@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Redshift">
+  <polygon points="50,6 90,29 50,52 10,29" fill="#ff9d9d"/>
+  <polygon points="50,6 90,29 50,52" fill="#ff8585"/>
+  <polygon points="10,29 50,52 50,94 10,71" fill="#d23a3a"/>
+  <polygon points="10,29 50,52 10,71" fill="#bf2f2f"/>
+  <polygon points="90,29 90,71 50,94 50,52" fill="#ee2c2c"/>
+  <polygon points="90,71 50,94 50,52" fill="#d81f1f"/>
+</svg>

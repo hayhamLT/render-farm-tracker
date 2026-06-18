@@ -1,0 +1,24 @@
+# Secrets & runtime config (NEVER commit)
+# config.json holds the plaintext agent key + slack webhook
+config.json
+# node-side agent config (server URL + agent key)
+agent_config.json
+# local Claude Code settings (may embed the agent key)
+.claude/
+
+# Database / runtime state
+tracker.db
+tracker.db-wal
+tracker.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Staged installer binaries (large / licensed — never publish)
+installers/*
+!installers/.gitkeep
+
+# OS / editor cruft
+.DS_Store
+**/.DS_Store
+*.log

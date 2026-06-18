@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchDaemon for the tracker agent (runs as root so installers can run).
+
+  1. Copy render_agent.py to /usr/local/tracker/render_agent.py
+  2. Edit the - -server / - -key values below
+  3. sudo cp com.tracker.agent.plist /Library/LaunchDaemons/
+     sudo launchctl load -w /Library/LaunchDaemons/com.tracker.agent.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tracker.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/usr/local/tracker/render_agent.py</string>
+    <string>--server</string>
+    <string>http://TRACKER-HOST:4400</string>
+    <string>--key</string>
+    <string>PASTE_AGENT_KEY_HERE</string>
+    <string>--interval</string>
+    <string>60</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/tracker-agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/tracker-agent.log</string>
+</dict>
+</plist>
