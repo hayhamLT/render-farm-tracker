@@ -1571,27 +1571,48 @@ async function refreshInstallerFiles() {
 }
 
 // --------------------------------------------------------------- catalog ---
-// Add-custom-product form modal — resolves to {name, detect_pattern, latest_version} or null.
-function customProductForm() {
+// Add/edit-custom-product form modal — resolves to the full field set or null. Mirrors the
+// automation the built-ins get: detection, version-check URL+regex, per-OS installer URL +
+// silent-install command (so it auto-downloads, version-checks and deploys like a hardcoded app).
+function customProductForm(prod) {
+  const v = (k) => (prod && prod[k] != null ? esc(prod[k]) : '');
   return new Promise((resolve) => {
     const ov = document.createElement('div');
     ov.className = 'modal-overlay';
-    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-title">Add custom product</div>
+    ov.innerHTML = `<div class="modal wide" role="dialog" aria-modal="true">
+      <div class="modal-title">${prod ? 'Edit' : 'Add'} custom product</div>
       <div class="modal-body lic-form">
-        <label>Name<input id="cp-name" placeholder="e.g. X-Particles"></label>
+        <label>Name<input id="cp-name" placeholder="e.g. 7-Zip" value="${v('name')}"></label>
         <label>Detection pattern <span class="muted small">— text/regex matched against the installed app's name (comma-separate alternatives)</span>
-          <input id="cp-pat" placeholder="e.g. x-particles, insydium"></label>
-        <label>Latest version <span class="muted small">(optional — what “up to date” means)</span><input id="cp-ver" placeholder="e.g. 2024.3"></label>
-        <div class="hint small">The agents match the pattern against each machine's installed apps and report the version. Set an installer + command later (via a normal deploy) to also update it.</div>
+          <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
+        <div class="lic-form-row">
+          <label>Version-check URL <span class="muted small">(optional — a page that shows the latest version)</span>
+            <input id="cp-curl" placeholder="https://www.7-zip.org/" value="${v('check_url')}"></label>
+          <label>…version regex <span class="muted small">(optional — capture group 1; blank = highest number on the page)</span>
+            <input id="cp-cre" placeholder="Download 7-Zip ([0-9.]+)" value="${v('check_regex')}"></label>
+        </div>
+        <label>Latest version <span class="muted small">(optional — auto-filled by the check URL; or set it manually)</span>
+          <input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
+        <div class="lic-form-row">
+          <label>Windows installer URL <span class="muted small">(direct download)</span>
+            <input id="cp-swin" placeholder="https://…/7z2408-x64.exe" value="${v('source_url_win')}"></label>
+          <label>Windows install command <span class="muted small">— {file} = downloaded path</span>
+            <input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
+        </div>
+        <div class="lic-form-row">
+          <label>macOS installer URL<input id="cp-smac" placeholder="https://…/app.pkg" value="${v('source_url_mac')}"></label>
+          <label>macOS install command<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
+        </div>
+        <div class="hint small">With a check URL + installer URL + command, this behaves like a built-in: it auto-detects the latest version, auto-downloads the installer on “Check now”, and can auto-deploy. Tracking-only works with just a name + detection pattern.</div>
       </div>
       <div class="modal-actions">
         <button class="dlg-btn ghost" data-act="cancel">Cancel</button>
-        <button class="dlg-btn primary" data-act="ok">Add</button>
+        <button class="dlg-btn primary" data-act="ok">${prod ? 'Save' : 'Add'}</button>
       </div></div>`;
     document.body.appendChild(ov);
     requestAnimationFrame(() => ov.classList.add('in'));
     const close = (val) => { ov.classList.remove('in'); setTimeout(() => ov.remove(), 180); resolve(val); };
+    const g = (id) => ov.querySelector('#' + id).value.trim() || null;
     ov.addEventListener('click', (e) => {
       if (e.target === ov) return close(null);
       const act = e.target.closest('[data-act]');
@@ -1599,8 +1620,9 @@ function customProductForm() {
       if (act.dataset.act === 'cancel') return close(null);
       const name = ov.querySelector('#cp-name').value.trim();
       if (!name) { ov.querySelector('#cp-name').focus(); return; }
-      close({ name, detect_pattern: ov.querySelector('#cp-pat').value.trim() || null,
-        latest_version: ov.querySelector('#cp-ver').value.trim() || null });
+      close({ name, detect_pattern: g('cp-pat'), check_url: g('cp-curl'), check_regex: g('cp-cre'),
+        latest_version: g('cp-ver'), source_url_win: g('cp-swin'), install_cmd_win: g('cp-cwin'),
+        source_url_mac: g('cp-smac'), install_cmd_mac: g('cp-cmac') });
     });
     ov.querySelector('#cp-name').focus();
   });
@@ -1608,7 +1630,20 @@ function customProductForm() {
 async function addCustomProduct() {
   const v = await customProductForm();
   if (!v) return;
-  try { await api('POST', '/api/products', v); toast(`Tracking “${v.name}” — agents will detect it on their next check-in`, 'success', 7000); refresh(); }
+  try {
+    await api('POST', '/api/products', v);
+    toast(`Tracking “${v.name}” — running a version check now…`, 'success', 6000);
+    // Kick an immediate check so the version + installer download happen right away.
+    try { await api('POST', '/api/check-maxon'); } catch { /* periodic check will catch it */ }
+    refresh();
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function editProduct(key) {
+  const prod = state.products.find((x) => x.key === key);
+  if (!prod) return;
+  const v = await customProductForm(prod);
+  if (!v) return;
+  try { await api('PUT', `/api/products/${key}`, v); toast('Saved', 'success'); refresh(); }
   catch (e) { toast(e.message, 'error'); }
 }
 async function deleteProduct(key) {
@@ -1639,7 +1674,7 @@ function renderCatalog() {
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">${p.autodeploy ? 'On' : 'Off'}</span>
           </label>`}</td>
-      <td class="track-cell">${p.custom ? `<button class="node-reboot" title="Delete this custom product" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
+      <td class="track-cell" style="white-space:nowrap">${p.custom ? `<button class="node-reboot" title="Edit" onclick="editProduct('${p.key}')">${icon('cog')}</button><button class="node-reboot" title="Delete this custom product" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
     </tr>`).join('');
 
   // download-folder control

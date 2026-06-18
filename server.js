@@ -385,6 +385,77 @@ async function checkExtraVersions() {
   }
   return { bumped, fetched };
 }
+// Fetch a text page (follows redirects) — for custom products' version-check URLs.
+function httpGetText(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 6) return reject(new Error('too many redirects'));
+    let lib;
+    try { lib = new URL(url).protocol === 'http:' ? http : https; } catch { return reject(new Error('bad url')); }
+    const req = lib.get(url, { headers: { 'User-Agent': 'render-farm-tracker' }, timeout: 25000 }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return resolve(httpGetText(new URL(res.headers.location, url).href, redirects + 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; if (data.length > 5e6) req.destroy(); });
+      res.on('end', () => resolve(data));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+  });
+}
+// Derive a filename (with extension) from a direct-download URL.
+function filenameFromUrl(u) {
+  try {
+    const base = (new URL(u).pathname.split('/').filter(Boolean).pop() || '');
+    return /\.[a-z0-9]{2,5}$/i.test(base) ? decodeURIComponent(base) : '';
+  } catch { return ''; }
+}
+
+// Custom products: configurable analog of the built-in scrapers. For each custom product,
+// optionally fetch check_url and extract the latest version (check_regex group 1, else the
+// highest version-looking token), and auto-download the installer(s) from source_url_win/mac.
+async function checkCustomVersions() {
+  const bumped = [], fetched = [];
+  for (const prod of db.prepare('SELECT * FROM products WHERE custom = 1').all()) {
+    if (!isTracked(prod)) continue;
+    if (prod.check_url) {
+      try {
+        const txt = await httpGetText(prod.check_url);
+        let ver = null;
+        if (prod.check_regex) {
+          const m = txt.match(new RegExp(prod.check_regex));
+          ver = m && (m[1] || m[0]);
+        } else {
+          ver = (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
+        }
+        if (ver && (!prod.latest_version || cmpVersionServer(ver, prod.latest_version) > 0)) {
+          db.prepare('UPDATE products SET latest_version = ?, updated_at = ? WHERE key = ?').run(ver, Date.now(), prod.key);
+          logEvent('catalog', `Auto-detected newer ${prod.name}: latest is now ${ver}`);
+          bumped.push(`${prod.key} ${ver}`);
+        }
+      } catch { /* best-effort: leave the manual/last value */ }
+    }
+    if (config.autoFetchMaxonInstallers === false) continue;
+    for (const os of ['windows', 'macos']) {
+      const srcUrl = os === 'windows' ? prod.source_url_win : prod.source_url_mac;
+      if (!srcUrl) continue;
+      const filename = filenameFromUrl(srcUrl);
+      if (!filename || resolveInstaller(filename)) continue;
+      if ([...downloads.values()].some((d) => d.filename === filename)) continue;
+      try { const st = fs.statfsSync(downloadDir()); if (st.bavail * st.bsize < 25e9) continue; } catch { /* ignore */ }
+      const dlId = crypto.randomBytes(6).toString('hex');
+      downloads.set(dlId, { url: srcUrl, filename, status: 'downloading', received: 0, total: 0, error: null });
+      fetchToInstallers(dlId, srcUrl, filename);
+      logEvent('package', `Auto-fetching ${prod.name} installer (${os})`);
+      fetched.push(filename);
+    }
+  }
+  return { bumped, fetched };
+}
+
 function runMaxonVersionCheck() {
   checkMaxonVersions(db, logEvent, config)
     .then((bumped) => {
@@ -394,6 +465,11 @@ function runMaxonVersionCheck() {
     .then(() => checkExtraVersions())
     .then((r) => {
       if (r.bumped.length || r.fetched.length) console.log('Blender/FFmpeg/NotchLC/NVIDIA:', JSON.stringify(r));
+      if (r.bumped.length) notifySlack(`🆕 New version detected: ${r.bumped.join(', ')}`);
+      return checkCustomVersions();
+    })
+    .then((r) => {
+      if (r.bumped.length || r.fetched.length) console.log('Custom products:', JSON.stringify(r));
       if (r.bumped.length) notifySlack(`🆕 New version detected: ${r.bumped.join(', ')}`);
     })
     .catch((e) => console.error('version/installer check failed:', e.message));
@@ -510,7 +586,9 @@ function runAutoDeploy() {
       let pkg = db.prepare('SELECT * FROM packages WHERE product_key=? AND version=? AND os=? ORDER BY id DESC LIMIT 1').get(prod.key, V, os);
       if (!pkg) {
         const last = db.prepare('SELECT * FROM packages WHERE product_key=? AND os=? ORDER BY id DESC LIMIT 1').get(prod.key, os);
-        const builtin = SERVER_PRESETS[prod.key] && SERVER_PRESETS[prod.key][os];
+        // Built-in preset, or a custom product's own install command (so customs auto-deploy too).
+        const builtin = (SERVER_PRESETS[prod.key] && SERVER_PRESETS[prod.key][os])
+          || (os === 'windows' ? prod.install_cmd_win : prod.install_cmd_mac);
         let filename, install_command, kind;
         if (last) {                             // reuse the learned command from a prior deploy
           filename = last.filename; install_command = last.install_command; kind = last.kind;
@@ -1531,7 +1609,10 @@ const server = http.createServer(async (req, res) => {
         const bumped = await checkMaxonVersions(db, logEvent, config);
         const fetched = await autoFetchMaxonInstallers();
         const extra = await checkExtraVersions();
-        return sendJson(res, 200, { ok: true, bumped: [...bumped, ...extra.bumped], fetched: [...fetched, ...extra.fetched] });
+        const cust = await checkCustomVersions();
+        return sendJson(res, 200, { ok: true,
+          bumped: [...bumped, ...extra.bumped, ...cust.bumped],
+          fetched: [...fetched, ...extra.fetched, ...cust.fetched] });
       } catch (e) {
         return sendJson(res, 500, { error: e.message });
       }
@@ -1619,9 +1700,13 @@ const server = http.createServer(async (req, res) => {
       let key = base, i = 2;
       while (db.prepare('SELECT 1 FROM products WHERE key = ?').get(key)) key = `${base}-${i++}`;
       db.prepare(`INSERT INTO products (key, name, latest_version, latest_win, latest_mac, notes,
-                    detect_pattern, custom, updated_at) VALUES (?,?,?,?,?,?,?,1,?)`)
+                    detect_pattern, check_url, check_regex, source_url_win, source_url_mac,
+                    install_cmd_win, install_cmd_mac, custom, updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
         .run(key, name, b.latest_version || null, b.latest_win || null, b.latest_mac || null,
-          b.notes || null, (b.detect_pattern || '').trim() || null, Date.now());
+          b.notes || null, (b.detect_pattern || '').trim() || null,
+          b.check_url || null, b.check_regex || null, b.source_url_win || null, b.source_url_mac || null,
+          b.install_cmd_win || null, b.install_cmd_mac || null, Date.now());
       logEvent('catalog', `Custom product added: ${name}`);
       return sendJson(res, 200, { ok: true, key });
     }
@@ -1651,9 +1736,12 @@ const server = http.createServer(async (req, res) => {
       const newHidden = body.dashboard_hidden !== undefined ? (body.dashboard_hidden ? 1 : 0) : prod.dashboard_hidden;
       db.prepare(`UPDATE products SET latest_version = ?, notes = ?,
                     source_url_win = ?, source_url_mac = ?, autodeploy = ?, dashboard_hidden = ?,
-                    detect_pattern = ?, latest_win = ?, latest_mac = ?, updated_at = ? WHERE key = ?`)
+                    detect_pattern = ?, latest_win = ?, latest_mac = ?,
+                    check_url = ?, check_regex = ?, install_cmd_win = ?, install_cmd_mac = ?,
+                    updated_at = ? WHERE key = ?`)
         .run(pick('latest_version'), pick('notes'), pick('source_url_win'), pick('source_url_mac'),
           newAuto, newHidden, pick('detect_pattern'), pick('latest_win'), pick('latest_mac'),
+          pick('check_url'), pick('check_regex'), pick('install_cmd_win'), pick('install_cmd_mac'),
           Date.now(), prod.key);
       if (body.dashboard_hidden !== undefined && newHidden !== prod.dashboard_hidden) {
         logEvent('catalog', `${prod.name}: ${newHidden ? 'hidden from' : 'shown on'} the dashboard`);
