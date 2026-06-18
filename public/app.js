@@ -856,6 +856,14 @@ function latestInstallerReady(prod, os) {
   const fv = versionFromFilename(stagedFor(prod, os));
   return !!(fv && (!want || cmpVersion(fv, want) >= 0));
 }
+// Can this product actually be installed (vs tracking-only)? True with Adobe RUM, a built-in
+// preset, a custom install command, a saved source link, or a staged installer. A custom
+// product with only a detection pattern/path (e.g. SABER) is tracking-only — never a deploy target.
+function isDeployable(prod) {
+  if (ADOBE_RUM[prod.key] || INSTALL_PRESETS[prod.key]) return true;
+  return !!(prod.install_cmd_win || prod.install_cmd_mac || prod.source_url_win || prod.source_url_mac
+    || prod.staged_win || prod.staged_mac);
+}
 const wizOsList = () => (wizSel.os === 'both' ? ['windows', 'macos'] : [wizSel.os]);
 // A node already has an in-flight job for this product (queued / downloading / installing).
 const jobActiveFor = (node, productKey) => state.jobs.some((j) =>
@@ -865,8 +873,15 @@ const jobActiveFor = (node, productKey) => state.jobs.some((j) =>
 // machine it drops out of the "to update" count (it moves to "updating"), which is what
 // you'd expect after pressing Update.
 const nodesByKind = (prod, osList, kinds) =>
-  state.nodes.filter((n) => osList.includes(n.os)
-    && kinds.includes(productStatus(n, prod).status) && !jobActiveFor(n, prod.key));
+  state.nodes.filter((n) => {
+    if (!osList.includes(n.os) || jobActiveFor(n, prod.key)) return false;
+    const st = productStatus(n, prod).status;
+    if (!kinds.includes(st)) return false;
+    // A not-installed node is a deploy target ONLY when there's a version to install AND a
+    // way to install it. Otherwise it's tracking-only (e.g. a plug-in) — never a fresh-install target.
+    if (st === 'missing' && !(latestForOS(prod, n.os) && isDeployable(prod))) return false;
+    return true;
+  });
 // Machines already mid-rollout for this product (queued or installing).
 const inProgressNodes = (prod, osList) =>
   state.nodes.filter((n) => osList.includes(n.os) && jobActiveFor(n, prod.key));
@@ -986,7 +1001,12 @@ function renderProductCards() {
     // Show machines mid-rollout as "updating" so a queued fleet doesn't keep reading
     // "to update" — it only counts what still needs queuing.
     const progBadge = inProg ? `<span class="cc-badge prog" title="${inProg} machine(s) queued or installing now">${icon('spinner', 'spin')} ${inProg} updating</span>` : '';
-    if (!patch && !major) {
+    if (!isDeployable(p)) {
+      // Tracking-only product (e.g. a plug-in with only a detection rule) — show presence, not "update".
+      const installed = state.nodes.filter((n) => wizOsList().includes(n.os) && (n.software || []).some((sw) => sw.product_key === p.key)).length;
+      badge = `<span class="cc-badge ok" title="Tracking-only — no installer/command configured. Add one in Catalog (edit the product → Auto-update) to deploy or update it.">track only · ${installed} installed</span>`;
+      majBadge = '';
+    } else if (!patch && !major) {
       badge = inProg ? progBadge : `<span class="cc-badge ok">all current</span>`;
       majBadge = '';
     } else if (!ready) {
@@ -1069,9 +1089,15 @@ function renderSegs() {
   }
 }
 
-// How many of the selected products are outdated/missing on a node.
+// How many of the selected products this node is a real deploy target for (behind, or a
+// fresh install of a deployable product). Tracking-only / no-version products don't count.
 function nodeNeedsCount(n) {
-  return wizProducts().filter((p) => ['patch', 'major'].includes(productStatus(n, p).status)).length;
+  return wizProducts().filter((p) => {
+    const st = productStatus(n, p).status;
+    if (st === 'patch' || st === 'major') return true;
+    if (st === 'missing') return !!(latestForOS(p, n.os) && isDeployable(p));
+    return false;
+  }).length;
 }
 
 // Step 4 — filterable machine chips.
@@ -1167,6 +1193,9 @@ function updateWizard() {
   const needInstaller = prods.filter((p) => !ADOBE_RUM[p.key]
     && (patchNodes(p, osList).length || majorNodes(p, osList).length)
     && !osList.every((os) => latestInstallerReady(p, os)));
+  // A selected product that has no installer/command at all is tracking-only — explain calmly
+  // (it's not a failure; it just can't be deployed from here).
+  const trackOnly = prods.filter((p) => !isDeployable(p));
   const instWarn = document.getElementById('up-installer-warn');
   if (needInstaller.length) {
     instWarn.style.display = '';
@@ -1174,6 +1203,11 @@ function updateWizard() {
       + needInstaller.map((p) => `${esc(p.name)} ${esc(p.latest_version || '')}`).join(', ')
       + ` ${needInstaller.length > 1 ? 'have' : 'has'} a newer version detected, but the matching installer isn't staged. `
       + `Add it (drop the installer on the share, or set a source link in Options), then deploy.`;
+  } else if (trackOnly.length) {
+    instWarn.style.display = '';
+    instWarn.innerHTML = `${icon('alert')} <b>${trackOnly.map((p) => esc(p.name)).join(', ')} ${trackOnly.length > 1 ? 'are' : 'is'} tracking-only</b> — `
+      + `no installer or command is set, so ${trackOnly.length > 1 ? 'they' : 'it'} can be monitored but not deployed from here. `
+      + `To enable updates, edit the product in Catalog → turn on <b>Auto-update</b> and add an installer link + command.`;
   } else instWarn.style.display = 'none';
   // Disable Update now when nothing selected can actually deploy (would only hit the guard).
   const deployable = prods.some((p) => ADOBE_RUM[p.key] || osList.every((os) => latestInstallerReady(p, os)));
