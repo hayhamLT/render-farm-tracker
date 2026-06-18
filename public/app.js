@@ -955,12 +955,23 @@ const TILE = {
 // extractable icon).
 const ICON_KEYS = new Set(['aftereffects', 'creativecloud', 'cinema4d', 'maxonapp', 'redshift', 'redgiant', 'blender', 'ffmpeg', 'notchlc', 'nvidia']);
 const SVG_ICONS = new Set(['redshift']);
+// If a custom product's favicon fails to load, swap the <img> for a colored monogram.
+function monoFallback(img, abbr, bg, fg) {
+  const s = document.createElement('span');
+  s.className = img.className; s.style.background = bg; s.style.color = fg; s.textContent = abbr;
+  img.replaceWith(s);
+}
 function tileLogo(key, cls = '') {
   if (ICON_KEYS.has(key)) {
     const ext = SVG_ICONS.has(key) ? 'svg' : 'png';
     return `<img class="cc-logo ${cls}" src="icons/${key}.${ext}" alt="${esc(PRODUCT_NAMES[key] || key)}" loading="lazy">`;
   }
-  const [abbr, bg, fg] = TILE[key] || [key.slice(0, 2).toUpperCase(), '#22303f', '#9fb3c8'];
+  const prod = state && state.products && state.products.find((p) => p.key === key);
+  const [abbr, bg, fg] = TILE[key] || [(PRODUCT_NAMES[key] || key).slice(0, 2).toUpperCase(), '#22303f', '#9fb3c8'];
+  // Custom product with an auto-fetched favicon → show it, falling back to the monogram.
+  if (prod && prod.icon_url) {
+    return `<img class="cc-logo ${cls}" src="${esc(prod.icon_url)}" alt="${esc(prod.name || key)}" loading="lazy" onerror="monoFallback(this,'${abbr}','${bg}','${fg}')">`;
+  }
   return `<span class="cc-logo ${cls}" style="background:${bg};color:${fg}">${abbr}</span>`;
 }
 
@@ -1571,39 +1582,49 @@ async function refreshInstallerFiles() {
 }
 
 // --------------------------------------------------------------- catalog ---
-// Add/edit-custom-product form modal — resolves to the full field set or null. Mirrors the
-// automation the built-ins get: detection, version-check URL+regex, per-OS installer URL +
-// silent-install command (so it auto-downloads, version-checks and deploys like a hardcoded app).
+// Add/edit-custom-product form. SIMPLE by default — Name + a URL, and "Auto-fill" grabs the
+// icon, latest version and installer. Everything it can't determine waits under "Advanced"
+// for manual entry (progressive disclosure — the modern pattern). Resolves to the field set.
 function customProductForm(prod) {
   const v = (k) => (prod && prod[k] != null ? esc(prod[k]) : '');
   return new Promise((resolve) => {
     const ov = document.createElement('div');
     ov.className = 'modal-overlay';
-    ov.innerHTML = `<div class="modal wide" role="dialog" aria-modal="true">
+    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
       <div class="modal-title">${prod ? 'Edit' : 'Add'} custom product</div>
       <div class="modal-body lic-form">
-        <label>Name<input id="cp-name" placeholder="e.g. 7-Zip" value="${v('name')}"></label>
-        <label>Detection pattern <span class="muted small">— text/regex matched against the installed app's name (comma-separate alternatives)</span>
-          <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
-        <div class="lic-form-row">
-          <label>Version-check URL <span class="muted small">(optional — a page that shows the latest version)</span>
-            <input id="cp-curl" placeholder="https://www.7-zip.org/" value="${v('check_url')}"></label>
-          <label>…version regex <span class="muted small">(optional — capture group 1; blank = highest number on the page)</span>
-            <input id="cp-cre" placeholder="Download 7-Zip ([0-9.]+)" value="${v('check_regex')}"></label>
+        <div class="cp-head">
+          <span class="cp-icon" id="cp-iconprev">${prod && prod.icon_url ? `<img src="${esc(prod.icon_url)}" onerror="this.remove()">` : ''}</span>
+          <label style="flex:1">Name<input id="cp-name" placeholder="e.g. 7-Zip" value="${v('name')}"></label>
         </div>
-        <label>Latest version <span class="muted small">(optional — auto-filled by the check URL; or set it manually)</span>
-          <input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
-        <div class="lic-form-row">
-          <label>Windows installer URL <span class="muted small">(direct download)</span>
-            <input id="cp-swin" placeholder="https://…/7z2408-x64.exe" value="${v('source_url_win')}"></label>
-          <label>Windows install command <span class="muted small">— {file} = downloaded path</span>
-            <input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
-        </div>
-        <div class="lic-form-row">
-          <label>macOS installer URL<input id="cp-smac" placeholder="https://…/app.pkg" value="${v('source_url_mac')}"></label>
-          <label>macOS install command<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
-        </div>
-        <div class="hint small">With a check URL + installer URL + command, this behaves like a built-in: it auto-detects the latest version, auto-downloads the installer on “Check now”, and can auto-deploy. Tracking-only works with just a name + detection pattern.</div>
+        <label>Website or installer link <span class="muted small">— paste it, then Auto-fill grabs the icon, version &amp; installer</span>
+          <span class="cp-url"><input id="cp-url" placeholder="https://www.7-zip.org/  ·  or a direct …/app.exe">
+            <button type="button" class="btn-soft primary" id="cp-fetch">Auto-fill</button></span></label>
+        <div class="hint small" id="cp-fillnote">Just a name + link is enough to start — Auto-fill does the rest, and anything missing you can add under Advanced.</div>
+
+        <details class="up-adv cp-adv"${prod ? ' open' : ''}>
+          <summary><span data-ic="cog"></span> Advanced <span class="up-adv-hint">detection · versions · installers · uninstall · icon</span></summary>
+          <div class="up-adv-body lic-form">
+            <label>Detection pattern <span class="muted small">(matched against the installed app's name; defaults to the name)</span>
+              <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
+            <div class="lic-form-row">
+              <label>Version-check URL<input id="cp-curl" value="${v('check_url')}"></label>
+              <label>…version regex <span class="muted small">(group 1; blank = highest number)</span><input id="cp-cre" value="${v('check_regex')}"></label>
+            </div>
+            <label>Latest version<input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
+            <div class="lic-form-row">
+              <label>Windows installer URL<input id="cp-swin" value="${v('source_url_win')}"></label>
+              <label>Windows install cmd <span class="muted small">{file}=path</span><input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
+            </div>
+            <label>Windows uninstall cmd<input id="cp-uwin" placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' value="${v('uninstall_cmd_win')}"></label>
+            <div class="lic-form-row">
+              <label>macOS installer URL<input id="cp-smac" value="${v('source_url_mac')}"></label>
+              <label>macOS install cmd<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
+            </div>
+            <label>macOS uninstall cmd<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
+            <label>Icon URL <span class="muted small">(auto-set from the website; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
+          </div>
+        </details>
       </div>
       <div class="modal-actions">
         <button class="dlg-btn ghost" data-act="cancel">Cancel</button>
@@ -1611,20 +1632,47 @@ function customProductForm(prod) {
       </div></div>`;
     document.body.appendChild(ov);
     requestAnimationFrame(() => ov.classList.add('in'));
+    const $ = (id) => ov.querySelector('#' + id);
+    const g = (id) => $(id).value.trim() || null;
     const close = (val) => { ov.classList.remove('in'); setTimeout(() => ov.remove(), 180); resolve(val); };
-    const g = (id) => ov.querySelector('#' + id).value.trim() || null;
+    ov.querySelectorAll('[data-ic]').forEach((el) => { el.innerHTML = icon(el.dataset.ic); });
+
+    $('cp-fetch').addEventListener('click', async () => {
+      const url = $('cp-url').value.trim();
+      if (!url) { $('cp-url').focus(); return; }
+      const btn = $('cp-fetch'); btn.disabled = true; btn.textContent = '…';
+      try {
+        const r = await api('POST', '/api/products/inspect', { url });
+        const got = [];
+        if (r.icon_url) { $('cp-icon').value = r.icon_url; $('cp-iconprev').innerHTML = `<img src="${esc(r.icon_url)}" onerror="this.remove()">`; got.push('icon'); }
+        if (r.version) { $('cp-ver').value = r.version; got.push('version ' + r.version); }
+        if (r.check_url && !$('cp-curl').value) $('cp-curl').value = r.check_url;
+        if (r.source_url_win && !$('cp-swin').value) { $('cp-swin').value = r.source_url_win; got.push('Windows installer'); }
+        if (r.source_url_mac && !$('cp-smac').value) { $('cp-smac').value = r.source_url_mac; got.push('macOS installer'); }
+        if (!$('cp-pat').value && $('cp-name').value.trim()) $('cp-pat').value = $('cp-name').value.trim().toLowerCase();
+        const missing = [];
+        if (!$('cp-ver').value && !$('cp-curl').value) missing.push('version (or a check URL)');
+        if (!$('cp-swin').value && !$('cp-smac').value) missing.push('an installer link + command');
+        $('cp-fillnote').innerHTML = `${icon('check')} Found: ${got.join(', ') || 'icon'}.` + (missing.length ? ` Add in Advanced: ${esc(missing.join(', '))}.` : ' Looks complete.');
+        if (missing.length) ov.querySelector('.cp-adv').open = true;
+      } catch (e) { $('cp-fillnote').textContent = 'Auto-fill failed: ' + e.message + ' — fill it in Advanced.'; ov.querySelector('.cp-adv').open = true; }
+      btn.disabled = false; btn.textContent = 'Auto-fill';
+    });
+
     ov.addEventListener('click', (e) => {
       if (e.target === ov) return close(null);
       const act = e.target.closest('[data-act]');
       if (!act) return;
       if (act.dataset.act === 'cancel') return close(null);
-      const name = ov.querySelector('#cp-name').value.trim();
-      if (!name) { ov.querySelector('#cp-name').focus(); return; }
-      close({ name, detect_pattern: g('cp-pat'), check_url: g('cp-curl'), check_regex: g('cp-cre'),
-        latest_version: g('cp-ver'), source_url_win: g('cp-swin'), install_cmd_win: g('cp-cwin'),
-        source_url_mac: g('cp-smac'), install_cmd_mac: g('cp-cmac') });
+      const name = $('cp-name').value.trim();
+      if (!name) { $('cp-name').focus(); return; }
+      close({ name, detect_pattern: g('cp-pat') || name.toLowerCase(),
+        check_url: g('cp-curl'), check_regex: g('cp-cre'), latest_version: g('cp-ver'),
+        source_url_win: g('cp-swin'), install_cmd_win: g('cp-cwin'), uninstall_cmd_win: g('cp-uwin'),
+        source_url_mac: g('cp-smac'), install_cmd_mac: g('cp-cmac'), uninstall_cmd_mac: g('cp-umac'),
+        icon_url: g('cp-icon') });
     });
-    ov.querySelector('#cp-name').focus();
+    $('cp-name').focus();
   });
 }
 async function addCustomProduct() {
@@ -1654,6 +1702,23 @@ async function deleteProduct(key) {
   catch (e) { toast(e.message, 'error'); }
 }
 
+async function uninstallProduct(key) {
+  const prod = state.products.find((x) => x.key === key);
+  if (!prod) return;
+  const nodes = state.nodes.filter((n) => (n.software || []).some((s) => s.product_key === key));
+  if (!nodes.length) { toast(`No machines currently have ${prod.name}`, 'info'); return; }
+  const haveCmd = nodes.filter((n) => (n.os === 'windows' ? prod.uninstall_cmd_win : prod.uninstall_cmd_mac));
+  if (!haveCmd.length) { toast(`Set an uninstall command first — Edit ${prod.name} → Advanced`, 'error', 6000); return; }
+  const list = haveCmd.map((n) => n.hostname);
+  if (!await uiConfirm(`Uninstall “${prod.name}” from ${haveCmd.length} machine(s): ${list.slice(0, 8).join(', ')}${list.length > 8 ? '…' : ''}?`,
+    { title: 'Uninstall', confirmLabel: 'Uninstall', danger: true })) return;
+  try {
+    const r = await api('POST', '/api/uninstall', { product_key: key, node_ids: haveCmd.map((n) => n.id) });
+    toast(`Uninstall queued on ${r.queued.length} machine(s)`, 'success');
+    refresh();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 function renderCatalog() {
   const t = document.getElementById('catalog-table');
   t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>Latest version</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th><th></th></tr>` +
@@ -1674,7 +1739,7 @@ function renderCatalog() {
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">${p.autodeploy ? 'On' : 'Off'}</span>
           </label>`}</td>
-      <td class="track-cell" style="white-space:nowrap">${p.custom ? `<button class="node-reboot" title="Edit" onclick="editProduct('${p.key}')">${icon('cog')}</button><button class="node-reboot" title="Delete this custom product" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
+      <td class="track-cell" style="white-space:nowrap">${p.custom ? `<button class="node-reboot" title="Edit" onclick="editProduct('${p.key}')">${icon('cog')}</button><button class="node-reboot" title="Uninstall from machines that have it" onclick="uninstallProduct('${p.key}')">${icon('x')}</button><button class="node-reboot" title="Delete this custom product (stops tracking; doesn't touch machines)" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
     </tr>`).join('');
 
   // download-folder control

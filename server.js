@@ -1690,6 +1690,55 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // Auto-fetcher for the "Add custom product" form: given a URL, fill in what we can
+    // (icon from the site's favicon; latest version + installer/check URL). The form asks
+    // the user only for what this can't determine.
+    if (req.method === 'POST' && p === '/api/products/inspect') {
+      const b = await readBody(req);
+      const url = String(b.url || '').trim();
+      let domain = '';
+      try { domain = new URL(url).hostname.replace(/^www\./, ''); } catch { return sendJson(res, 400, { error: 'enter a valid URL (https://…)' }); }
+      const out = { icon_url: domain ? `https://icons.duckduckgo.com/ip3/${domain}.ico` : null,
+        source_url_win: null, source_url_mac: null, check_url: null, version: null };
+      const fn = filenameFromUrl(url);
+      if (/\.(exe|msi|dmg|pkg|zip|7z)$/i.test(fn)) {                 // URL is a direct installer
+        if (/\.(dmg|pkg)$/i.test(fn)) out.source_url_mac = url; else out.source_url_win = url;
+        out.version = versionFromFilename(fn);
+      } else {                                                       // URL is a page → version-check source
+        out.check_url = url;
+        try {
+          const txt = await httpGetText(url);
+          out.version = (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
+        } catch { /* leave version null — user fills it */ }
+      }
+      return sendJson(res, 200, out);
+    }
+
+    // Uninstall a custom product from machines — runs its uninstall command (command-kind job).
+    if (req.method === 'POST' && p === '/api/uninstall') {
+      const b = await readBody(req);
+      const prod = db.prepare('SELECT * FROM products WHERE key = ?').get(b.product_key);
+      if (!prod) return sendJson(res, 404, { error: 'no such product' });
+      if (!Array.isArray(b.node_ids) || !b.node_ids.length) return sendJson(res, 400, { error: 'node_ids required' });
+      const now = Date.now();
+      const queued = [], noCmd = [];
+      for (const nid of b.node_ids) {
+        const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nid));
+        if (!node) continue;
+        const cmd = node.os === 'windows' ? prod.uninstall_cmd_win : prod.uninstall_cmd_mac;
+        if (!cmd) { noCmd.push(node.hostname); continue; }
+        if (activeJobForProduct(node.id, prod.key)) continue;
+        const pkgId = Number(db.prepare(
+          'INSERT INTO packages (product_key, version, os, filename, install_command, kind, created_at) VALUES (?,?,?,?,?,?,?)'
+        ).run(prod.key, 'uninstall', node.os, '', cmd, 'command', now).lastInsertRowid);
+        db.prepare('INSERT INTO jobs (package_id, node_id, status, created_at, updated_at) VALUES (?,?,?,?,?)')
+          .run(pkgId, node.id, 'pending', now, now);
+        queued.push(node.hostname);
+      }
+      if (queued.length) logEvent('deploy', `Uninstall queued: ${prod.name} → ${queued.join(', ')}`);
+      return sendJson(res, 200, { ok: true, queued, noCmd });
+    }
+
     // Register a NEW custom product to track (no code change) — e.g. a plugin like X-Particles.
     if (req.method === 'POST' && p === '/api/products') {
       const b = await readBody(req);
@@ -1701,12 +1750,14 @@ const server = http.createServer(async (req, res) => {
       while (db.prepare('SELECT 1 FROM products WHERE key = ?').get(key)) key = `${base}-${i++}`;
       db.prepare(`INSERT INTO products (key, name, latest_version, latest_win, latest_mac, notes,
                     detect_pattern, check_url, check_regex, source_url_win, source_url_mac,
-                    install_cmd_win, install_cmd_mac, custom, updated_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
+                    install_cmd_win, install_cmd_mac, icon_url, uninstall_cmd_win, uninstall_cmd_mac,
+                    custom, updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
         .run(key, name, b.latest_version || null, b.latest_win || null, b.latest_mac || null,
           b.notes || null, (b.detect_pattern || '').trim() || null,
           b.check_url || null, b.check_regex || null, b.source_url_win || null, b.source_url_mac || null,
-          b.install_cmd_win || null, b.install_cmd_mac || null, Date.now());
+          b.install_cmd_win || null, b.install_cmd_mac || null, b.icon_url || null,
+          b.uninstall_cmd_win || null, b.uninstall_cmd_mac || null, Date.now());
       logEvent('catalog', `Custom product added: ${name}`);
       return sendJson(res, 200, { ok: true, key });
     }
@@ -1738,10 +1789,12 @@ const server = http.createServer(async (req, res) => {
                     source_url_win = ?, source_url_mac = ?, autodeploy = ?, dashboard_hidden = ?,
                     detect_pattern = ?, latest_win = ?, latest_mac = ?,
                     check_url = ?, check_regex = ?, install_cmd_win = ?, install_cmd_mac = ?,
+                    icon_url = ?, uninstall_cmd_win = ?, uninstall_cmd_mac = ?,
                     updated_at = ? WHERE key = ?`)
         .run(pick('latest_version'), pick('notes'), pick('source_url_win'), pick('source_url_mac'),
           newAuto, newHidden, pick('detect_pattern'), pick('latest_win'), pick('latest_mac'),
           pick('check_url'), pick('check_regex'), pick('install_cmd_win'), pick('install_cmd_mac'),
+          pick('icon_url'), pick('uninstall_cmd_win'), pick('uninstall_cmd_mac'),
           Date.now(), prod.key);
       if (body.dashboard_hidden !== undefined && newHidden !== prod.dashboard_hidden) {
         logEvent('catalog', `${prod.name}: ${newHidden ? 'hidden from' : 'shown on'} the dashboard`);
