@@ -902,6 +902,8 @@ details.qa .hint { margin: 8px 0 2px 16px; }
 /* ===================================================== Fleet (NOC view) === */
 .muted { color: var(--muted); }
 .small { font-size: .8rem; }
+.cat-custom { font-size: .64rem; font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--accent2); border: 1px solid rgba(124,92,255,.4); border-radius: 4px; padding: 0 4px; margin-left: 6px; vertical-align: middle; }
 
 .fleet-kpis { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; margin-bottom: 14px; }
 .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 13px; display: flex; align-items: center; gap: 10px; }

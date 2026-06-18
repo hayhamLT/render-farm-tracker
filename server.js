@@ -1366,6 +1366,11 @@ function handleCheckin(body) {
     jobs,
     // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
     reboot: pendingAgentReboot.delete(node.id) ? true : undefined,
+    // User-added (custom) products + their detection patterns, so the agent can detect them
+    // without a code change. Built-ins are hardcoded in the agent; only customs are sent.
+    products: db.prepare(
+      "SELECT key, detect_pattern FROM products WHERE custom = 1 AND detect_pattern IS NOT NULL AND detect_pattern != ''"
+    ).all().map((r) => ({ key: r.key, pattern: r.detect_pattern })),
   };
 }
 
@@ -1604,6 +1609,38 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // Register a NEW custom product to track (no code change) — e.g. a plugin like X-Particles.
+    if (req.method === 'POST' && p === '/api/products') {
+      const b = await readBody(req);
+      const name = String(b.name || '').trim();
+      if (!name) return sendJson(res, 400, { error: 'name is required' });
+      // Slug the name into a unique key matching the route charset ([a-z0-9_-]).
+      let base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'product';
+      let key = base, i = 2;
+      while (db.prepare('SELECT 1 FROM products WHERE key = ?').get(key)) key = `${base}-${i++}`;
+      db.prepare(`INSERT INTO products (key, name, latest_version, latest_win, latest_mac, notes,
+                    detect_pattern, custom, updated_at) VALUES (?,?,?,?,?,?,?,1,?)`)
+        .run(key, name, b.latest_version || null, b.latest_win || null, b.latest_mac || null,
+          b.notes || null, (b.detect_pattern || '').trim() || null, Date.now());
+      logEvent('catalog', `Custom product added: ${name}`);
+      return sendJson(res, 200, { ok: true, key });
+    }
+
+    // Delete a product — ONLY user-added custom ones (built-ins are protected).
+    const productDel = p.match(/^\/api\/products\/([a-z0-9_-]+)$/);
+    if (req.method === 'DELETE' && productDel) {
+      const prod = db.prepare('SELECT * FROM products WHERE key = ?').get(productDel[1]);
+      if (!prod) return sendJson(res, 404, { error: 'no such product' });
+      if (!prod.custom) return sendJson(res, 400, { error: 'built-in products cannot be deleted' });
+      const pkgIds = db.prepare('SELECT id FROM packages WHERE product_key = ?').all(prod.key).map((r) => r.id);
+      for (const pid of pkgIds) db.prepare('DELETE FROM jobs WHERE package_id = ?').run(pid);
+      db.prepare('DELETE FROM packages WHERE product_key = ?').run(prod.key);
+      db.prepare('DELETE FROM software WHERE product_key = ?').run(prod.key);
+      db.prepare('DELETE FROM products WHERE key = ?').run(prod.key);
+      logEvent('catalog', `Custom product removed: ${prod.name}`);
+      return sendJson(res, 200, { ok: true });
+    }
+
     const productPut = p.match(/^\/api\/products\/([a-z0-9_-]+)$/);
     if (req.method === 'PUT' && productPut) {
       const body = await readBody(req);
@@ -1613,9 +1650,11 @@ const server = http.createServer(async (req, res) => {
       const newAuto = body.autodeploy !== undefined ? (body.autodeploy ? 1 : 0) : prod.autodeploy;
       const newHidden = body.dashboard_hidden !== undefined ? (body.dashboard_hidden ? 1 : 0) : prod.dashboard_hidden;
       db.prepare(`UPDATE products SET latest_version = ?, notes = ?,
-                    source_url_win = ?, source_url_mac = ?, autodeploy = ?, dashboard_hidden = ?, updated_at = ? WHERE key = ?`)
+                    source_url_win = ?, source_url_mac = ?, autodeploy = ?, dashboard_hidden = ?,
+                    detect_pattern = ?, latest_win = ?, latest_mac = ?, updated_at = ? WHERE key = ?`)
         .run(pick('latest_version'), pick('notes'), pick('source_url_win'), pick('source_url_mac'),
-          newAuto, newHidden, Date.now(), prod.key);
+          newAuto, newHidden, pick('detect_pattern'), pick('latest_win'), pick('latest_mac'),
+          Date.now(), prod.key);
       if (body.dashboard_hidden !== undefined && newHidden !== prod.dashboard_hidden) {
         logEvent('catalog', `${prod.name}: ${newHidden ? 'hidden from' : 'shown on'} the dashboard`);
       }

@@ -39,7 +39,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.21.0"
+AGENT_VERSION = "2.22.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -199,11 +199,46 @@ PRODUCT_PATTERNS = {
 }
 
 
+# User-added products: {key: [compiled_regex, ...]}, pushed by the server in the check-in
+# response (custom catalog entries). Lets the farm track a new app/plugin with NO code change.
+CUSTOM_PATTERNS = {}
+
+
+def set_custom_products(defs):
+    """Rebuild CUSTOM_PATTERNS from the server's list of {key, pattern}. A pattern is one or
+    more comma/newline-separated regexes (case-insensitive); a bad regex falls back to a
+    literal substring match. Best-effort — never raise (must not break detection)."""
+    global CUSTOM_PATTERNS
+    out = {}
+    for d in (defs or []):
+        key = (d.get("key") or "").strip()
+        raw = (d.get("pattern") or "").strip()
+        if not key or not raw:
+            continue
+        pats = []
+        for part in re.split(r"[,\n]", raw):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                pats.append(re.compile(part, re.IGNORECASE))
+            except re.error:
+                pats.append(re.compile(re.escape(part), re.IGNORECASE))
+        if pats:
+            out[key] = pats
+    CUSTOM_PATTERNS = out
+
+
 def _match_product(display_name):
     low = display_name.lower()
     for key, patterns in PRODUCT_PATTERNS.items():
         for pat in patterns:
             if re.search(pat, low):
+                return key
+    # Built-ins win; then try user-added custom products.
+    for key, regs in CUSTOM_PATTERNS.items():
+        for rg in regs:
+            if rg.search(display_name):
                 return key
     return None
 
@@ -1223,6 +1258,8 @@ def main():
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
                 continue
+            # Pull user-added (custom) product patterns BEFORE the full check-in's detection below.
+            set_custom_products(resp.get("products"))
             active = resp.get("active", True)
             # Check-in cadence is server-controlled (≈ offline-threshold ÷ 3), so offline
             # detection speed is tunable from the server alone. Falls back to the local interval.

@@ -1571,15 +1571,63 @@ async function refreshInstallerFiles() {
 }
 
 // --------------------------------------------------------------- catalog ---
+// Add-custom-product form modal — resolves to {name, detect_pattern, latest_version} or null.
+function customProductForm() {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-title">Add custom product</div>
+      <div class="modal-body lic-form">
+        <label>Name<input id="cp-name" placeholder="e.g. X-Particles"></label>
+        <label>Detection pattern <span class="muted small">— text/regex matched against the installed app's name (comma-separate alternatives)</span>
+          <input id="cp-pat" placeholder="e.g. x-particles, insydium"></label>
+        <label>Latest version <span class="muted small">(optional — what “up to date” means)</span><input id="cp-ver" placeholder="e.g. 2024.3"></label>
+        <div class="hint small">The agents match the pattern against each machine's installed apps and report the version. Set an installer + command later (via a normal deploy) to also update it.</div>
+      </div>
+      <div class="modal-actions">
+        <button class="dlg-btn ghost" data-act="cancel">Cancel</button>
+        <button class="dlg-btn primary" data-act="ok">Add</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    requestAnimationFrame(() => ov.classList.add('in'));
+    const close = (val) => { ov.classList.remove('in'); setTimeout(() => ov.remove(), 180); resolve(val); };
+    ov.addEventListener('click', (e) => {
+      if (e.target === ov) return close(null);
+      const act = e.target.closest('[data-act]');
+      if (!act) return;
+      if (act.dataset.act === 'cancel') return close(null);
+      const name = ov.querySelector('#cp-name').value.trim();
+      if (!name) { ov.querySelector('#cp-name').focus(); return; }
+      close({ name, detect_pattern: ov.querySelector('#cp-pat').value.trim() || null,
+        latest_version: ov.querySelector('#cp-ver').value.trim() || null });
+    });
+    ov.querySelector('#cp-name').focus();
+  });
+}
+async function addCustomProduct() {
+  const v = await customProductForm();
+  if (!v) return;
+  try { await api('POST', '/api/products', v); toast(`Tracking “${v.name}” — agents will detect it on their next check-in`, 'success', 7000); refresh(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+async function deleteProduct(key) {
+  const p = state.products.find((x) => x.key === key);
+  if (!p) return;
+  if (!await uiConfirm(`Stop tracking “${p.name}” and remove it? This deletes the tracker record (not the app on any machine).`, { title: 'Delete custom product', confirmLabel: 'Delete', danger: true })) return;
+  try { await api('DELETE', `/api/products/${key}`); toast('Custom product removed', 'success'); refresh(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
 function renderCatalog() {
   const t = document.getElementById('catalog-table');
-  t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>Latest version</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th></tr>` +
+  t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>Latest version</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th><th></th></tr>` +
     state.products.map((p) => `<tr>
       <td class="track-cell"><label class="switch" title="Track ${esc(p.name)} — show it on the dashboard, counts, wizard. Off = ignore it.">
             <input type="checkbox" onchange="toggleDashboardVisible('${p.key}', this.checked)" ${p.dashboard_hidden ? '' : 'checked'}>
             <span class="switch-track"><span class="switch-thumb"></span></span>
           </label></td>
-      <td><span class="prod-name">${tileLogo(p.key, 'xs')}${esc(p.name)}</span></td>
+      <td><span class="prod-name">${tileLogo(p.key, 'xs')}${esc(p.name)}${p.custom ? ' <span class="cat-custom">custom</span>' : ''}</span>${p.custom && p.detect_pattern ? `<div class="hint small" style="margin:2px 0 0">detects: <code>${esc(p.detect_pattern)}</code></div>` : ''}</td>
       <td>${(p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac)
         ? `<span class="ver-os" title="This app ships different versions on Windows and macOS"><b>Win</b> ${esc(p.latest_win)} &nbsp;·&nbsp; <b>Mac</b> ${esc(p.latest_mac)}</span>`
         : (p.latest_version ? esc(p.latest_version) : '<span class="hint">auto-detected</span>')}</td>
@@ -1591,6 +1639,7 @@ function renderCatalog() {
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">${p.autodeploy ? 'On' : 'Off'}</span>
           </label>`}</td>
+      <td class="track-cell">${p.custom ? `<button class="node-reboot" title="Delete this custom product" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
     </tr>`).join('');
 
   // download-folder control
@@ -1762,6 +1811,7 @@ async function browseFolder() {
 }
 
 // Manual "Check now" — detect newest Maxon versions + auto-fetch installers on demand.
+document.getElementById('cat-add').addEventListener('click', addCustomProduct);
 document.getElementById('cat-refresh').addEventListener('click', async (e) => {
   const btn = e.currentTarget; const orig = btn.innerHTML;
   btn.disabled = true; btn.innerHTML = `${icon('refresh', 'spin')} checking…`;
