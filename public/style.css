@@ -931,6 +931,7 @@ details.qa .hint { margin: 8px 0 2px 16px; }
 .fleet-tbl td { padding: 8px 10px; border-bottom: 1px solid rgba(40,52,64,.5); vertical-align: middle; }
 .fleet-tbl th, .fleet-tbl td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fleet-tbl .node-cell, .fleet-tbl .act { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.fleet-tbl .fleet-act { text-align: right; overflow: visible; }
 .fleet-tbl tr:hover td { background: rgba(255,255,255,.02); }
 .fleet-tbl .dim { color: var(--muted); }
 .fleet-tbl .node-cell { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }

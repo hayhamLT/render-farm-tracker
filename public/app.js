@@ -593,8 +593,8 @@ function renderFleet() {
   const q = fleetSearch.trim().toLowerCase();
   const rows = acts.filter(({ n }) => !q || n.hostname.toLowerCase().includes(q));
   document.getElementById('fleet-table').innerHTML = `<table class="fleet-tbl">
-    <colgroup><col style="width:16%"><col style="width:18%"><col style="width:13%"><col style="width:11%"><col style="width:24%"><col style="width:9%"><col style="width:9%"></colgroup>
-    <thead><tr><th>Machine</th><th>Activity</th><th>GPU load</th><th>${AGENT_NAME}</th><th>GPU / driver</th><th>Disk</th><th>Seen</th></tr></thead>
+    <colgroup><col style="width:16%"><col style="width:17%"><col style="width:12%"><col style="width:11%"><col style="width:21%"><col style="width:8%"><col style="width:9%"><col style="width:6%"></colgroup>
+    <thead><tr><th>Machine</th><th>Activity</th><th>GPU load</th><th>${AGENT_NAME}</th><th>GPU / driver</th><th>Disk</th><th>Seen</th><th></th></tr></thead>
     <tbody>${rows.map(({ n, a }) => {
       const load = (n.online && n.gpu_util != null)
         ? `<span class="load"><i class="${n.gpu_util >= 20 ? 'hot' : ''}" style="width:${Math.min(100, n.gpu_util)}%"></i></span><span class="load-n">${n.gpu_util}%</span>`
@@ -607,8 +607,9 @@ function renderFleet() {
         <td class="dim" title="${esc((n.gpu || '') + (n.gpu_driver ? ' · ' + n.gpu_driver : ''))}">${n.gpu ? esc(n.gpu) : '—'}${n.gpu_driver ? ` · ${esc(n.gpu_driver)}` : ''}</td>
         <td class="dim">${n.disk_free_gb != null ? esc(n.disk_free_gb) + ' GB' : '—'}</td>
         <td class="dim">${ago(n.last_seen)}</td>
+        <td class="fleet-act">${nodeActionBtn(n)}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="7" class="muted" style="text-align:center;padding:18px">No machines match.</td></tr>'}</tbody>
+    }).join('') || '<tr><td colspan="8" class="muted" style="text-align:center;padding:18px">No machines match.</td></tr>'}</tbody>
   </table>`;
 
   // ---- Beacon rollout ----
