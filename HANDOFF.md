@@ -20,6 +20,22 @@ The single security boundary is one **shared static agent key** (`config.agentKe
 
 ---
 
+## 1b. Current state — additions since this doc's core was written
+
+The sections below describe the original core and are still accurate for the
+plumbing (router, auth, `/api/state` contract, merge steps). These features were
+added later — an integrator should know they exist:
+
+- **Agent is now `AGENT_VERSION` 2.20.x** (self-updates from `GET /agent`), branded **"Beacon"** in the UI (display name only; the on-machine task/service names are unchanged). It runs all Windows subprocesses hidden and hides its own console.
+- **Products are now 10** (`lib/db.js`): added `blender`, `ffmpeg`, `notchlc`, `nvidia` alongside the original six. `nvidia` = GeForce **Studio driver**, tracked per-GPU (multi-GPU aware: a node with any legacy Maxwell/Pascal card is targeted to the legacy driver track).
+- **`nodes` table gained telemetry columns**: `gpu`, `gpu_driver`, `disk_free_gb`/`disk_total_gb`, `os_version`, `pending_reboot`, `macs` (Wake-on-LAN), `gpu_util` (live render load). **`products`** gained `latest_win`/`latest_mac`/`latest_legacy`, `autodeploy`, `dashboard_hidden`, `source_url_win`/`source_url_mac`. **`jobs`** gained `install_ms`, `started_at`. All flow through `/api/state` automatically (nodes/products/packages are `SELECT *`).
+- **`/api/state` also returns** `latestAgentVersion`, `maxConcurrentInstalls`, `slackWebhook`, `maintenanceWindow`, `downloadDir`, `installerSources`. Job rows add `inst_overrun`/`stalled` flags.
+- **New capabilities**: bounded **rolling deploy + circuit breaker**, per-product **auto-deploy** (canary-first, `runAutoDeploy()`), **Adobe RUM** as source-of-truth for AE, server-side **version auto-detect/fetch** (Maxon Zendesk feed, NVIDIA public lookup, FFmpeg mirrors), **Wake-on-LAN** + agent-first reboot, **Slack alerts**.
+- **New UI**: a **Fleet** tab (live NOC view — per-machine activity, agent rollout, OS/GPU-driver spread, alerts). Nav order: Dashboard · Updates · Fleet · Activity · Catalog · Help.
+- **Not in the repo** (gitignored): `config.json`, `tracker.db*`, `installers/`, `.claude/`. See `config.example.json` for the config shape.
+
+---
+
 ## 2. Architecture
 
 ```

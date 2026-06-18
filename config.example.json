@@ -1,0 +1,11 @@
+{
+  "port": 4400,
+  "agentKey": "GENERATED-ON-FIRST-RUN-do-not-commit-the-real-one",
+  "installerSources": ["/Volumes/THIS-server/INSTALLERS"],
+  "downloadDir": "",
+  "maxConcurrentInstalls": 6,
+  "monitoringActive": true,
+  "offlineAfterSeconds": 180,
+  "slackWebhook": "",
+  "maintenanceWindow": { "enabled": false, "start": "22:00", "end": "06:00" }
+}
