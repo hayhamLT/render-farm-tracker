@@ -1587,6 +1587,17 @@ async function refreshInstallerFiles() {
 // for manual entry (progressive disclosure — the modern pattern). Resolves to the field set.
 function customProductForm(prod) {
   const v = (k) => (prod && prod[k] != null ? esc(prod[k]) : '');
+  // Derive initial UI state for edit mode from what's already configured.
+  const hasWin = prod && (prod.detect_path_win || prod.source_url_win || prod.install_cmd_win || prod.uninstall_cmd_win);
+  const hasMac = prod && (prod.detect_path_mac || prod.source_url_mac || prod.install_cmd_mac || prod.uninstall_cmd_mac);
+  const initOs = hasWin && hasMac ? 'both' : hasMac ? 'mac' : 'win';
+  const initMethod = prod && (prod.detect_path_win || prod.detect_path_mac) ? 'path' : 'name';
+  const initCheck = !!(prod && prod.check_url);
+  const initUpd = !!(prod && (prod.source_url_win || prod.source_url_mac || prod.install_cmd_win || prod.install_cmd_mac));
+  const initUnin = !!(prod && (prod.uninstall_cmd_win || prod.uninstall_cmd_mac));
+  const sel = (val, want) => (val === want ? ' selected' : '');
+  const cap = (id, on, text) => `<label class="switch cp-cap"><input type="checkbox" id="${id}"${on ? ' checked' : ''}><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">${text}</span></label>`;
+
   return new Promise((resolve) => {
     const ov = document.createElement('div');
     ov.className = 'modal-overlay';
@@ -1597,38 +1608,63 @@ function customProductForm(prod) {
           <span class="cp-icon" id="cp-iconprev">${prod && prod.icon_url ? `<img src="${esc(prod.icon_url)}" onerror="this.remove()">` : ''}</span>
           <label style="flex:1">Name<input id="cp-name" placeholder="e.g. 7-Zip" value="${v('name')}"></label>
         </div>
-        <label>Website or installer link <span class="muted small">— paste it, then Auto-fill grabs the icon, version &amp; installer</span>
+        <label>Website or installer link <span class="muted small">— paste it, Auto-fill grabs the icon, version &amp; installer</span>
           <span class="cp-url"><input id="cp-url" placeholder="https://www.7-zip.org/  ·  or a direct …/app.exe">
             <button type="button" class="btn-soft primary" id="cp-fetch">Auto-fill</button></span></label>
-        <div class="hint small" id="cp-fillnote">Just a name + link is enough to start — Auto-fill does the rest, and anything missing you can add under Advanced.</div>
+        <div class="hint small" id="cp-fillnote">Just a name + link is enough to start tracking — turn on the options below only if you want them.</div>
 
         <details class="up-adv cp-adv"${prod ? ' open' : ''}>
-          <summary><span data-ic="cog"></span> Advanced <span class="up-adv-hint">detection · versions · installers · uninstall · icon</span></summary>
-          <div class="up-adv-body lic-form">
-            <label>Detection pattern <span class="muted small">(matched against the installed app's name; defaults to the name)</span>
-              <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
-            <div class="lic-form-row">
+          <summary><span data-ic="cog"></span> Options <span class="up-adv-hint">detection · auto-update · uninstall</span></summary>
+          <div class="up-adv-body cp-opts">
+            <div class="cp-srow">
+              <label class="cp-inline">Runs on
+                <select id="cp-os"><option value="win"${sel(initOs, 'win')}>Windows</option><option value="mac"${sel(initOs, 'mac')}>macOS</option><option value="both"${sel(initOs, 'both')}>Both</option></select></label>
+              <label class="cp-inline">Find it by
+                <select id="cp-method"><option value="name"${sel(initMethod, 'name')}>Installed app name</option><option value="path"${sel(initMethod, 'path')}>Plug-in / folder path</option></select></label>
+            </div>
+
+            <div id="cp-m-name">
+              <label>Detection pattern <span class="muted small">(matched vs the installed app's name; defaults to the product name)</span>
+                <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
+            </div>
+            <div id="cp-m-path" hidden>
+              <label class="cp-win">Plug-in / folder path — Windows <span class="muted small">(glob ok — for apps not in the uninstall list, e.g. AE plug-ins)</span>
+                <input id="cp-pwin" placeholder="C:\\Program Files\\Adobe\\Common\\Plug-ins\\*\\MediaCore\\**\\Saber*" value="${v('detect_path_win')}"></label>
+              <label class="cp-mac">Plug-in / folder path — macOS
+                <input id="cp-pmac" placeholder="/Library/Application Support/Adobe/Common/Plug-ins/*/MediaCore/**/Saber*" value="${v('detect_path_mac')}"></label>
+            </div>
+
+            <label>Latest version <span class="muted small">(optional — what "up to date" means)</span>
+              <input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
+            <label class="wiz-check"><input type="checkbox" id="cp-autocheck"${initCheck ? ' checked' : ''}> Auto-check the latest from a web page</label>
+            <div id="cp-checkgroup" class="lic-form-row" hidden>
               <label>Version-check URL<input id="cp-curl" value="${v('check_url')}"></label>
               <label>…version regex <span class="muted small">(group 1; blank = highest number)</span><input id="cp-cre" value="${v('check_regex')}"></label>
             </div>
-            <label>Latest version<input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
-            <div class="lic-form-row">
-              <label>Windows installer URL<input id="cp-swin" value="${v('source_url_win')}"></label>
-              <label>Windows install cmd <span class="muted small">{file}=path</span><input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
+
+            <div class="cp-cap-block">
+              ${cap('cp-tg-update', initUpd, 'Auto-update — download &amp; install it across the fleet')}
+              <div id="cp-updategroup" hidden>
+                <div class="cp-win">
+                  <label>Windows installer URL<input id="cp-swin" value="${v('source_url_win')}"></label>
+                  <label>Windows install command <span class="muted small">{file}=downloaded path</span><input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
+                </div>
+                <div class="cp-mac">
+                  <label>macOS installer URL<input id="cp-smac" value="${v('source_url_mac')}"></label>
+                  <label>macOS install command<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
+                </div>
+              </div>
             </div>
-            <label>Windows uninstall cmd<input id="cp-uwin" placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' value="${v('uninstall_cmd_win')}"></label>
-            <div class="lic-form-row">
-              <label>macOS installer URL<input id="cp-smac" value="${v('source_url_mac')}"></label>
-              <label>macOS install cmd<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
+
+            <div class="cp-cap-block">
+              ${cap('cp-tg-uninstall', initUnin, 'Uninstall — allow removing it from machines')}
+              <div id="cp-uningroup" hidden>
+                <label class="cp-win">Windows uninstall command<input id="cp-uwin" placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' value="${v('uninstall_cmd_win')}"></label>
+                <label class="cp-mac">macOS uninstall command<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
+              </div>
             </div>
-            <label>macOS uninstall cmd<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
-            <div class="lic-form-row">
-              <label>Plug-in / folder path — Windows <span class="muted small">(for apps NOT in the uninstall list, e.g. AE plug-ins; glob ok)</span>
-                <input id="cp-pwin" placeholder="C:\\Program Files\\Adobe\\Common\\Plug-ins\\*\\MediaCore\\**\\Saber*" value="${v('detect_path_win')}"></label>
-              <label>Plug-in / folder path — macOS
-                <input id="cp-pmac" placeholder="/Library/Application Support/Adobe/Common/Plug-ins/*/MediaCore/**/Saber*" value="${v('detect_path_mac')}"></label>
-            </div>
-            <label>Icon URL <span class="muted small">(auto-set from the website; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
+
+            <label class="cp-iconrow">Icon URL <span class="muted small">(auto-set from the website; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
           </div>
         </details>
       </div>
@@ -1643,6 +1679,22 @@ function customProductForm(prod) {
     const close = (val) => { ov.classList.remove('in'); setTimeout(() => ov.remove(), 180); resolve(val); };
     ov.querySelectorAll('[data-ic]').forEach((el) => { el.innerHTML = icon(el.dataset.ic); });
 
+    // Show only the fields relevant to the chosen OS, detection method, and enabled capabilities.
+    function sync() {
+      const os = $('cp-os').value, showWin = os !== 'mac', showMac = os !== 'win';
+      ov.querySelectorAll('.cp-win').forEach((e) => { e.hidden = !showWin; });
+      ov.querySelectorAll('.cp-mac').forEach((e) => { e.hidden = !showMac; });
+      const method = $('cp-method').value;
+      $('cp-m-name').hidden = method !== 'name';
+      $('cp-m-path').hidden = method !== 'path';
+      $('cp-checkgroup').hidden = !$('cp-autocheck').checked;
+      $('cp-updategroup').hidden = !$('cp-tg-update').checked;
+      $('cp-uningroup').hidden = !$('cp-tg-uninstall').checked;
+    }
+    ['cp-os', 'cp-method', 'cp-autocheck', 'cp-tg-update', 'cp-tg-uninstall']
+      .forEach((id) => $(id).addEventListener('change', sync));
+    sync();
+
     $('cp-fetch').addEventListener('click', async () => {
       const url = $('cp-url').value.trim();
       if (!url) { $('cp-url').focus(); return; }
@@ -1651,17 +1703,16 @@ function customProductForm(prod) {
         const r = await api('POST', '/api/products/inspect', { url });
         const got = [];
         if (r.icon_url) { $('cp-icon').value = r.icon_url; $('cp-iconprev').innerHTML = `<img src="${esc(r.icon_url)}" onerror="this.remove()">`; got.push('icon'); }
-        if (r.name && !$('cp-name').value.trim()) $('cp-name').value = r.name;          // suggest a name
-        if (r.version) { $('cp-ver').value = r.version; got.push('version ' + r.version); } // reliable only
-        if (r.check_url && !$('cp-curl').value) $('cp-curl').value = r.check_url;
-        if (r.source_url_win && !$('cp-swin').value) { $('cp-swin').value = r.source_url_win; got.push('Windows installer'); }
-        if (r.source_url_mac && !$('cp-smac').value) { $('cp-smac').value = r.source_url_mac; got.push('macOS installer'); }
-        // Honest, calm note — tracking is ready; only mention extras as optional. Never auto-open Advanced.
-        let note = `${icon('check')} Got the ${got.join(' + ') || 'icon'} — tracking's ready, just click Add.`;
-        if (r.version_guess && !$('cp-ver').value) note += ` (The page mentions <b>${esc(r.version_guess)}</b> — if that's the version, add it in Advanced.)`;
-        if (!$('cp-swin').value && !$('cp-smac').value) note += ` To also auto-update it, add an installer under Advanced.`;
+        if (r.name && !$('cp-name').value.trim()) $('cp-name').value = r.name;
+        if (r.version) { $('cp-ver').value = r.version; got.push('version ' + r.version); }
+        if (r.check_url) { $('cp-curl').value = r.check_url; $('cp-autocheck').checked = true; }
+        if (r.source_url_win) { $('cp-swin').value = r.source_url_win; $('cp-tg-update').checked = true; if ($('cp-os').value === 'mac') $('cp-os').value = 'both'; got.push('Windows installer'); }
+        if (r.source_url_mac) { $('cp-smac').value = r.source_url_mac; $('cp-tg-update').checked = true; if ($('cp-os').value === 'win') $('cp-os').value = 'both'; got.push('macOS installer'); }
+        sync();
+        let note = `${icon('check')} Got the ${got.join(' + ') || 'icon'} — tracking's ready, just click ${prod ? 'Save' : 'Add'}.`;
+        if (r.version_guess && !$('cp-ver').value) note += ` (The page mentions <b>${esc(r.version_guess)}</b> — set it as the version if that's right.)`;
         $('cp-fillnote').innerHTML = note;
-      } catch (e) { $('cp-fillnote').textContent = 'Couldn’t auto-fill from that link — you can still type the details under Advanced.'; }
+      } catch (e) { $('cp-fillnote').textContent = 'Couldn’t auto-fill from that link — fill the options below manually.'; }
       btn.disabled = false; btn.textContent = 'Auto-fill';
     });
 
@@ -1672,11 +1723,26 @@ function customProductForm(prod) {
       if (act.dataset.act === 'cancel') return close(null);
       const name = $('cp-name').value.trim();
       if (!name) { $('cp-name').focus(); return; }
-      close({ name, detect_pattern: g('cp-pat') || name.toLowerCase(),
-        check_url: g('cp-curl'), check_regex: g('cp-cre'), latest_version: g('cp-ver'),
-        source_url_win: g('cp-swin'), install_cmd_win: g('cp-cwin'), uninstall_cmd_win: g('cp-uwin'),
-        source_url_mac: g('cp-smac'), install_cmd_mac: g('cp-cmac'), uninstall_cmd_mac: g('cp-umac'),
-        detect_path_win: g('cp-pwin'), detect_path_mac: g('cp-pmac'), icon_url: g('cp-icon') });
+      // Toggles + OS selector are authoritative: only save fields for enabled capabilities/OS.
+      const os = $('cp-os').value, win = os !== 'mac', mac = os !== 'win';
+      const method = $('cp-method').value, ac = $('cp-autocheck').checked;
+      const upd = $('cp-tg-update').checked, unin = $('cp-tg-uninstall').checked;
+      close({
+        name,
+        detect_pattern: method === 'name' ? (g('cp-pat') || name.toLowerCase()) : null,
+        detect_path_win: (method === 'path' && win) ? g('cp-pwin') : null,
+        detect_path_mac: (method === 'path' && mac) ? g('cp-pmac') : null,
+        latest_version: g('cp-ver'),
+        check_url: ac ? g('cp-curl') : null,
+        check_regex: ac ? g('cp-cre') : null,
+        source_url_win: (upd && win) ? g('cp-swin') : null,
+        install_cmd_win: (upd && win) ? g('cp-cwin') : null,
+        source_url_mac: (upd && mac) ? g('cp-smac') : null,
+        install_cmd_mac: (upd && mac) ? g('cp-cmac') : null,
+        uninstall_cmd_win: (unin && win) ? g('cp-uwin') : null,
+        uninstall_cmd_mac: (unin && mac) ? g('cp-umac') : null,
+        icon_url: g('cp-icon'),
+      });
     });
     $('cp-name').focus();
   });

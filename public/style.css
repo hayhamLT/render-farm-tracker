@@ -922,6 +922,20 @@ details.qa .hint { margin: 8px 0 2px 16px; }
 .cp-url input { flex: 1; }
 .cp-adv { margin-top: 4px; }
 .cp-adv .up-adv-body { background: transparent; }
+/* capability-driven options: only the fields you enable are shown */
+.cp-opts { display: flex; flex-direction: column; gap: 14px; }
+.cp-opts label { display: flex; flex-direction: column; gap: 5px; font-size: .82rem; color: var(--muted); }
+.cp-opts input, .cp-opts select { width: 100%; }
+.cp-srow { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.cp-inline select { font-size: .86rem; }
+#cp-m-path, #cp-updategroup { display: flex; flex-direction: column; gap: 12px; }
+.cp-cap-block { border-top: 1px solid var(--border); padding-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+.cp-cap { flex-direction: row !important; align-items: center; gap: 10px; cursor: pointer; }
+.cp-cap .switch-label { min-width: 0; font-size: .9rem; color: var(--text); font-weight: 500; }
+.cp-cap input:checked ~ .switch-label { color: var(--text); }
+.cp-iconrow { border-top: 1px solid var(--border); padding-top: 12px; }
+.wiz-check { flex-direction: row !important; align-items: center; gap: 8px; font-size: .84rem; cursor: pointer; }
+.wiz-check input { width: auto !important; }
 
 .fleet-kpis { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; margin-bottom: 14px; }
 .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 13px; display: flex; align-items: center; gap: 10px; }
