@@ -391,7 +391,11 @@ function httpGetText(url, redirects = 0) {
     if (redirects > 6) return reject(new Error('too many redirects'));
     let lib;
     try { lib = new URL(url).protocol === 'http:' ? http : https; } catch { return reject(new Error('bad url')); }
-    const req = lib.get(url, { headers: { 'User-Agent': 'render-farm-tracker' }, timeout: 25000 }, (res) => {
+    const req = lib.get(url, { headers: {
+      // A real browser UA — some sites (e.g. aescripts.com) return nothing to unknown agents.
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml',
+    }, timeout: 25000 }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
         return resolve(httpGetText(new URL(res.headers.location, url).href, redirects + 1));
@@ -1750,13 +1754,26 @@ const server = http.createServer(async (req, res) => {
       if (/\.(exe|msi|dmg|pkg|zip|7z)$/i.test(fn)) {                 // URL is a direct installer
         if (/\.(dmg|pkg)$/i.test(fn)) out.source_url_mac = url; else out.source_url_win = url;
         out.version = versionFromFilename(fn);                       // reliable: it's in the filename
-      } else {                                                       // URL is a page → version-check source
+      } else {                                                       // URL is a page → read its metadata
         out.check_url = url;
         try {
           const txt = await httpGetText(url);
-          const tm = txt.match(/<title[^>]*>([^<]{2,80})<\/title>/i);  // a nicer name from the page title
-          if (tm) { const t = tm[1].split(/[|\-–·»:]/)[0].trim(); if (t.length >= 2) out.name = t; }
-          out.version_guess = (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
+          // Open Graph / Twitter card tags give the real product NAME + thumbnail (e.g. an
+          // aescripts.com product page) — far better than the site favicon + <title>.
+          const meta = (key, attr) => {
+            const tag = txt.match(new RegExp('<meta[^>]+' + attr + '=["\\\']' + key + '["\\\'][^>]*>', 'i'));
+            const c = tag && tag[0].match(/content=["\']([^"\']+)["\']/i);
+            return c ? c[1].trim() : null;
+          };
+          const ogTitle = meta('og:title', 'property') || meta('twitter:title', 'name');
+          const ogImage = meta('og:image', 'property') || meta('twitter:image', 'name');
+          if (ogTitle) out.name = ogTitle.split(/\s+[|–-]\s+/)[0].trim() || out.name;
+          else { const tm = txt.match(/<title[^>]*>([^<]{2,90})<\/title>/i); if (tm) { const t = tm[1].split(/[|\-–·»:]/)[0].trim(); if (t.length >= 2) out.name = t; } }
+          if (ogImage) { try { out.icon_url = new URL(ogImage, url).href; } catch { /* keep favicon */ } }
+          // Version: prefer an explicit "current version 1.4.0", else the highest token on the page.
+          const cv = txt.match(/current\s+version[^0-9]{0,14}v?(\d+(?:\.\d+){1,3})/i)
+            || txt.match(/\bversion[^0-9]{0,8}v?(\d+(?:\.\d+){1,3})/i);
+          out.version_guess = (cv && cv[1]) || (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
         } catch { /* leave it — user can fill manually */ }
       }
       return sendJson(res, 200, out);
