@@ -852,9 +852,15 @@ const versionFromFilename = (f) => { const m = String(f || '').match(/(\d+(?:\.\
 function latestInstallerReady(prod, os) {
   if (!appliesToOS(prod, os)) return true;   // Windows-only product (NVIDIA) — nothing to stage on macOS
   if (ADOBE_RUM[prod.key]) return !!ADOBE_RUM[prod.key][os];
+  const staged = stagedFor(prod, os);
+  if (!staged) return false;                 // nothing staged for this OS
   const want = latestForOS(prod, os);   // per-OS (NotchLC: win 1.3.1, mac 1.4.3)
-  const fv = versionFromFilename(stagedFor(prod, os));
-  return !!(fv && (!want || cmpVersion(fv, want) >= 0));
+  const fv = versionFromFilename(staged);
+  // A custom product's manually-staged file is trusted even when its filename has no version
+  // (e.g. "ElementInstallerFull.dmg") — the user staged it on purpose. Built-ins still require
+  // a version match (their staged files always carry one).
+  if (!fv) return !!prod.custom;
+  return !want || cmpVersion(fv, want) >= 0;
 }
 // Can this product actually be installed (vs tracking-only)? True with Adobe RUM, a built-in
 // preset, a custom install command, a saved source link, or a staged installer. A custom
