@@ -1784,17 +1784,18 @@ const server = http.createServer(async (req, res) => {
       let base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'product';
       let key = base, i = 2;
       while (db.prepare('SELECT 1 FROM products WHERE key = ?').get(key)) key = `${base}-${i++}`;
+      const cat = ['plugin', 'script'].includes(b.category) ? b.category : 'app';
       db.prepare(`INSERT INTO products (key, name, latest_version, latest_win, latest_mac, notes,
                     detect_pattern, check_url, check_regex, source_url_win, source_url_mac,
                     install_cmd_win, install_cmd_mac, icon_url, uninstall_cmd_win, uninstall_cmd_mac,
-                    detect_path_win, detect_path_mac, custom, updated_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
+                    detect_path_win, detect_path_mac, category, custom, updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`)
         .run(key, name, b.latest_version || null, b.latest_win || null, b.latest_mac || null,
           b.notes || null, (b.detect_pattern || '').trim() || null,
           b.check_url || null, b.check_regex || null, b.source_url_win || null, b.source_url_mac || null,
           b.install_cmd_win || null, b.install_cmd_mac || null, b.icon_url || null,
           b.uninstall_cmd_win || null, b.uninstall_cmd_mac || null,
-          b.detect_path_win || null, b.detect_path_mac || null, Date.now());
+          b.detect_path_win || null, b.detect_path_mac || null, cat, Date.now());
       logEvent('catalog', `Custom product added: ${name}`);
       return sendJson(res, 200, { ok: true, key });
     }
@@ -1827,13 +1828,14 @@ const server = http.createServer(async (req, res) => {
                     detect_pattern = ?, latest_win = ?, latest_mac = ?,
                     check_url = ?, check_regex = ?, install_cmd_win = ?, install_cmd_mac = ?,
                     icon_url = ?, uninstall_cmd_win = ?, uninstall_cmd_mac = ?,
-                    detect_path_win = ?, detect_path_mac = ?,
+                    detect_path_win = ?, detect_path_mac = ?, category = ?,
                     updated_at = ? WHERE key = ?`)
         .run(pick('latest_version'), pick('notes'), pick('source_url_win'), pick('source_url_mac'),
           newAuto, newHidden, pick('detect_pattern'), pick('latest_win'), pick('latest_mac'),
           pick('check_url'), pick('check_regex'), pick('install_cmd_win'), pick('install_cmd_mac'),
           pick('icon_url'), pick('uninstall_cmd_win'), pick('uninstall_cmd_mac'),
           pick('detect_path_win'), pick('detect_path_mac'),
+          (['plugin', 'script'].includes(body.category) ? body.category : (body.category === 'app' ? 'app' : prod.category)),
           Date.now(), prod.key);
       if (body.dashboard_hidden !== undefined && newHidden !== prod.dashboard_hidden) {
         logEvent('catalog', `${prod.name}: ${newHidden ? 'hidden from' : 'shown on'} the dashboard`);

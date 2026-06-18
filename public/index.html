@@ -189,8 +189,13 @@
       <div class="act-head">
         <h2>Tracked software — latest available versions</h2>
         <span class="hint" id="cat-refresh-note" style="margin:0"></span>
-        <button class="link-btn" id="cat-add" title="Track a new app or plugin (e.g. X-Particles) — give it a name + a detection pattern the agents match against installed-app names. No code change needed."><span data-ic="download"></span> Add custom product</button>
+        <button class="link-btn" id="cat-add" title="Add a custom app, plug-in or script to track / deploy. No code change needed."><span data-ic="download"></span> Add</button>
         <button class="link-btn" id="cat-refresh" title="Check the latest versions for every auto-detected app (Maxon, Blender, FFmpeg, NotchLC, NVIDIA) and fetch any new installers. After Effects updates separately via Adobe RUM on each machine's check-in."><span data-ic="refresh"></span> Check now</button>
+      </div>
+      <div id="cat-subnav" class="cat-subnav">
+        <button type="button" data-cat="app" class="active">Apps</button>
+        <button type="button" data-cat="plugin">Plug-ins</button>
+        <button type="button" data-cat="script">Scripts</button>
       </div>
       <table id="catalog-table"></table>
     </div>

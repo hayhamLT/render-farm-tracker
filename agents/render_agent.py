@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.23.0"
+AGENT_VERSION = "2.24.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -564,16 +564,22 @@ def detect_ffmpeg():
 
 
 def _win_file_version(path):
-    """Read a Windows binary's version (e.g. a .aex/.dll plug-in) via its file properties."""
+    """Read a Windows binary's version (e.g. a .aex/.dll plug-in) via its file properties.
+    Tries ProductVersion, then FileVersion, then the numeric Major.Minor.Build.Private parts
+    (some plug-ins leave the string fields blank but fill the numeric ones). Returns "" when
+    nothing usable is found, so the caller falls back to presence-only."""
     try:
         ps = ("$ErrorActionPreference='SilentlyContinue';"
-              "$i=Get-Item -LiteralPath '%s';"
-              "if($i.VersionInfo.ProductVersion){$i.VersionInfo.ProductVersion}else{$i.VersionInfo.FileVersion}"
+              "$v=[System.Diagnostics.FileVersionInfo]::GetVersionInfo('%s');"
+              "if($v.ProductVersion){$v.ProductVersion.Trim()}"
+              "elseif($v.FileVersion){$v.FileVersion.Trim()}"
+              "else{'{0}.{1}.{2}.{3}' -f $v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart,$v.FilePrivatePart}"
               % path.replace("'", "''"))
         out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
                              capture_output=True, text=True, timeout=20).stdout.strip()
         m = re.search(r"\d+(?:\.\d+){1,3}", out)
-        return m.group(0) if m else (out or "")
+        v = m.group(0) if m else ""
+        return "" if v in ("0.0.0.0", "0.0.0", "0.0", "0") else v
     except Exception:
         return ""
 

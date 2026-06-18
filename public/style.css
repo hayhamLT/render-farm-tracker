@@ -922,6 +922,15 @@ details.qa .hint { margin: 8px 0 2px 16px; }
 .cp-url input { flex: 1; }
 .cp-adv { margin-top: 4px; }
 .cp-adv .up-adv-body { background: transparent; }
+/* Catalog Apps/Plug-ins/Scripts sub-tabs */
+.cat-subnav { display: flex; gap: 4px; margin: 2px 0 14px; }
+.cat-subnav button { background: none; border: none; color: var(--muted); padding: 6px 14px; border-radius: 9px;
+  cursor: pointer; font-size: .86rem; font-weight: 600; transition: background .15s, color .15s; }
+.cat-subnav button:hover { color: var(--text); background: var(--panel2); }
+.cat-subnav button.active { color: #fff; background: linear-gradient(180deg, var(--accent), #3d8ae6); }
+/* type selector in the add/edit form */
+.cp-typeseg { width: 100%; margin-bottom: 4px; }
+.cp-typeseg button { flex: 1; }
 /* capability-driven options: only the fields you enable are shown */
 .cp-opts { display: flex; flex-direction: column; gap: 14px; }
 .cp-opts label { display: flex; flex-direction: column; gap: 5px; font-size: .82rem; color: var(--muted); }

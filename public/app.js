@@ -1619,13 +1619,16 @@ async function refreshInstallerFiles() {
 // Add/edit-custom-product form. SIMPLE by default — Name + a URL, and "Auto-fill" grabs the
 // icon, latest version and installer. Everything it can't determine waits under "Advanced"
 // for manual entry (progressive disclosure — the modern pattern). Resolves to the field set.
-function customProductForm(prod) {
+function customProductForm(prod, defaultCat) {
   const v = (k) => (prod && prod[k] != null ? esc(prod[k]) : '');
+  const initCat = (prod && prod.category) || defaultCat || 'app';
   // Derive initial UI state for edit mode from what's already configured.
   const hasWin = prod && (prod.detect_path_win || prod.source_url_win || prod.install_cmd_win || prod.uninstall_cmd_win);
   const hasMac = prod && (prod.detect_path_mac || prod.source_url_mac || prod.install_cmd_mac || prod.uninstall_cmd_mac);
   const initOs = hasWin && hasMac ? 'both' : hasMac ? 'mac' : 'win';
-  const initMethod = prod && (prod.detect_path_win || prod.detect_path_mac) ? 'path' : 'name';
+  // Plug-ins/scripts default to path detection (they're not in the uninstall list); apps to name.
+  const initMethod = (prod && (prod.detect_path_win || prod.detect_path_mac)) ? 'path'
+    : (prod ? 'name' : (initCat === 'app' ? 'name' : 'path'));
   const initCheck = !!(prod && prod.check_url);
   const initUpd = !!(prod && (prod.source_url_win || prod.source_url_mac || prod.install_cmd_win || prod.install_cmd_mac));
   const initUnin = !!(prod && (prod.uninstall_cmd_win || prod.uninstall_cmd_mac));
@@ -1636,11 +1639,16 @@ function customProductForm(prod) {
     const ov = document.createElement('div');
     ov.className = 'modal-overlay';
     ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-title">${prod ? 'Edit' : 'Add'} custom product</div>
+      <div class="modal-title">${prod ? 'Edit' : 'Add'} ${initCat === 'plugin' ? 'plug-in' : initCat === 'script' ? 'script' : 'product'}</div>
       <div class="modal-body lic-form">
+        <div class="cp-typeseg seg" id="cp-type" data-val="${initCat}">
+          <button type="button" data-v="app">App</button>
+          <button type="button" data-v="plugin">Plug-in</button>
+          <button type="button" data-v="script">Script</button>
+        </div>
         <div class="cp-head">
           <span class="cp-icon" id="cp-iconprev">${prod && prod.icon_url ? `<img src="${esc(prod.icon_url)}" onerror="this.remove()">` : ''}</span>
-          <label style="flex:1">Name<input id="cp-name" placeholder="e.g. 7-Zip" value="${v('name')}"></label>
+          <label style="flex:1">Name<input id="cp-name" placeholder="${initCat === 'script' ? 'e.g. Flow' : initCat === 'plugin' ? 'e.g. Element 3D' : 'e.g. 7-Zip'}" value="${v('name')}"></label>
         </div>
         <label>Website or installer link <span class="muted small">— paste it, Auto-fill grabs the icon, version &amp; installer</span>
           <span class="cp-url"><input id="cp-url" placeholder="https://www.7-zip.org/  ·  or a direct …/app.exe">
@@ -1729,6 +1737,33 @@ function customProductForm(prod) {
       .forEach((id) => $(id).addEventListener('change', sync));
     sync();
 
+    // Type selector (App / Plug-in / Script): sets the category + tailors detection/placeholders.
+    const typeSeg = $('cp-type');
+    function typePlaceholders(cat) {
+      if (cat === 'script') {
+        $('cp-pwin').placeholder = 'C:\\Program Files\\Adobe\\Adobe After Effects *\\Support Files\\Scripts\\**\\YourScript.jsx';
+        $('cp-pmac').placeholder = '/Applications/Adobe After Effects */Scripts/**/YourScript.jsx';
+        $('cp-cwin').placeholder = 'copy /Y "{file}" "…\\Scripts\\ScriptUI Panels\\YourScript.jsx"';
+        $('cp-cmac').placeholder = 'cp "{file}" "…/Scripts/ScriptUI Panels/YourScript.jsx"';
+      } else {
+        $('cp-pwin').placeholder = 'C:\\Program Files\\Adobe\\**\\Element*.aex';
+        $('cp-pmac').placeholder = '/Library/Application Support/Adobe/**/Element*.plugin';
+        $('cp-cwin').placeholder = '"{file}" /S';
+        $('cp-cmac').placeholder = 'installer -pkg "{file}" -target /';
+      }
+    }
+    typeSeg.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.v === initCat);
+      b.addEventListener('click', () => {
+        typeSeg.dataset.val = b.dataset.v;
+        typeSeg.querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b));
+        $('cp-method').value = b.dataset.v === 'app' ? 'name' : 'path';
+        typePlaceholders(b.dataset.v);
+        sync();
+      });
+    });
+    typePlaceholders(initCat);
+
     $('cp-fetch').addEventListener('click', async () => {
       const url = $('cp-url').value.trim();
       if (!url) { $('cp-url').focus(); return; }
@@ -1763,6 +1798,7 @@ function customProductForm(prod) {
       const upd = $('cp-tg-update').checked, unin = $('cp-tg-uninstall').checked;
       close({
         name,
+        category: typeSeg.dataset.val,
         detect_pattern: method === 'name' ? (g('cp-pat') || name.toLowerCase()) : null,
         detect_path_win: (method === 'path' && win) ? g('cp-pwin') : null,
         detect_path_mac: (method === 'path' && mac) ? g('cp-pmac') : null,
@@ -1781,8 +1817,8 @@ function customProductForm(prod) {
     $('cp-name').focus();
   });
 }
-async function addCustomProduct() {
-  const v = await customProductForm();
+async function addCustomProduct(category) {
+  const v = await customProductForm(null, category);
   if (!v) return;
   try {
     await api('POST', '/api/products', v);
@@ -1827,8 +1863,21 @@ async function uninstallProduct(key) {
 
 function renderCatalog() {
   const t = document.getElementById('catalog-table');
-  t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>Latest version</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th><th></th></tr>` +
-    state.products.map((p) => `<tr>
+  const catOf = (p) => (p.category === 'plugin' || p.category === 'script') ? p.category : 'app';
+  // Sub-tab counts.
+  document.querySelectorAll('#cat-subnav button').forEach((b) => {
+    const c = state.products.filter((p) => catOf(p) === b.dataset.cat).length;
+    const base = { app: 'Apps', plugin: 'Plug-ins', script: 'Scripts' }[b.dataset.cat];
+    b.textContent = `${base}${c ? ` (${c})` : ''}`;
+  });
+  const list = state.products.filter((p) => catOf(p) === catalogCat);
+  const versionLabel = catalogCat === 'script' ? 'Version' : 'Latest version';
+  if (!list.length) {
+    t.innerHTML = `<tr><td class="hint" style="padding:16px">No ${catalogCat === 'app' ? 'apps' : catalogCat + 's'} yet — click <b>Add</b> to track one.</td></tr>`;
+    return;
+  }
+  t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>${versionLabel}</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th><th></th></tr>` +
+    list.map((p) => `<tr>
       <td class="track-cell"><label class="switch" title="Track ${esc(p.name)} — show it on the dashboard, counts, wizard. Off = ignore it.">
             <input type="checkbox" onchange="toggleDashboardVisible('${p.key}', this.checked)" ${p.dashboard_hidden ? '' : 'checked'}>
             <span class="switch-track"><span class="switch-thumb"></span></span>
@@ -2017,7 +2066,17 @@ async function browseFolder() {
 }
 
 // Manual "Check now" — detect newest Maxon versions + auto-fetch installers on demand.
-document.getElementById('cat-add').addEventListener('click', addCustomProduct);
+// Catalog sub-tabs (Apps / Plug-ins / Scripts) — keep the catalog uncrowded.
+let catalogCat = 'app';
+document.querySelectorAll('#cat-subnav button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    catalogCat = btn.dataset.cat;
+    document.querySelectorAll('#cat-subnav button').forEach((b) => b.classList.toggle('active', b === btn));
+    if (state) renderCatalog();
+  });
+});
+// "Add" pre-selects the type matching the current sub-tab (Plug-in / Script / App).
+document.getElementById('cat-add').addEventListener('click', () => addCustomProduct(catalogCat));
 document.getElementById('cat-refresh').addEventListener('click', async (e) => {
   const btn = e.currentTarget; const orig = btn.innerHTML;
   btn.disabled = true; btn.innerHTML = `${icon('refresh', 'spin')} checking…`;
