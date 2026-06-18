@@ -437,6 +437,20 @@ async function checkCustomVersions() {
           bumped.push(`${prod.key} ${ver}`);
         }
       } catch { /* best-effort: leave the manual/last value */ }
+    } else {
+      // No version source configured → derive "latest" from the newest staged installer's
+      // filename, so just dropping the installer on the share makes the product deployable.
+      let best = null;
+      for (const os of ['windows', 'macos']) {
+        const staged = findStagedInstaller(prod.key, os, null);
+        const fv = staged ? versionFromFilename(staged.name) : null;
+        if (fv && (!best || cmpVersionServer(fv, best) > 0)) best = fv;
+      }
+      if (best && (!prod.latest_version || cmpVersionServer(best, prod.latest_version) > 0)) {
+        db.prepare('UPDATE products SET latest_version = ?, updated_at = ? WHERE key = ?').run(best, Date.now(), prod.key);
+        logEvent('catalog', `${prod.name}: version ${best} taken from the staged installer`);
+        bumped.push(`${prod.key} ${best}`);
+      }
     }
     if (config.autoFetchMaxonInstallers === false) continue;
     for (const os of ['windows', 'macos']) {
@@ -748,7 +762,18 @@ const PRODUCT_KEYWORDS = {
   nvidia: [/nvidia/i, /geforce/i, /nsd.*dch/i],
 };
 function findStagedInstaller(productKey, os, version, files) {
-  const kws = PRODUCT_KEYWORDS[productKey] || [];
+  let kws = PRODUCT_KEYWORDS[productKey];
+  if (!kws) {
+    // Custom product: derive match keywords from its name + key (e.g. "Element 3D" → /element/i),
+    // so a manually-staged installer is found just like the built-ins.
+    const prod = db.prepare('SELECT name FROM products WHERE key = ?').get(productKey);
+    const words = new Set();
+    for (const src of [prod && prod.name, productKey]) {
+      String(src || '').toLowerCase().split(/[^a-z0-9]+/).forEach((w) => { if (w.length >= 3) words.add(w); });
+    }
+    kws = [...words].map((w) => new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+  }
+  if (!kws.length) return null;
   const osOk = (name) => os === 'windows'
     ? /win|x64|\.exe$|\.msi$/i.test(name)
     : /mac|osx|darwin|\.dmg$|\.pkg$/i.test(name);
