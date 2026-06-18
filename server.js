@@ -902,17 +902,22 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyC
 Remove-ItemProperty -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" -Name "TrackerAgent" -ErrorAction SilentlyContinue
 $arg = '"' + "$dir\\render_agent.py" + '" --server ${base} --key ${config.agentKey} --interval 60'
 $act = New-ScheduledTaskAction -Execute $py -Argument $arg
-$trg = New-ScheduledTaskTrigger -AtStartup
-# Watchdog: also re-fire every 5 min so a killed agent (render-load kill, crash)
-# relaunches on its own without waiting for a reboot. The agent's single-instance
-# mutex makes re-firing a harmless no-op while it's already running.
-$trg.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) \`
-  -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)).Repetition
+# Two triggers: AtStartup AND an independent 5-min heartbeat. The heartbeat is a
+# STANDALONE time trigger (not attached to AtStartup), so the agent relaunches every
+# 5 min regardless of how the machine powered on -- even if AtStartup never fires
+# (Windows Fast Startup resumes instead of cold-booting). The single-instance mutex
+# makes a re-fire a harmless no-op while the agent is already running.
+$boot = New-ScheduledTaskTrigger -AtStartup
+$beat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1) \`
+  -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 $prin = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Days 3650) \`
   -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable \`
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "TrackerAgentElevated" -Action $act -Trigger $trg \`
+# Disable Windows Fast Startup so a shutdown is a TRUE cold boot (AtStartup fires; WoL works).
+Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power" \`
+  -Name HiberbootEnabled -Value 0 -Type DWord -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName "TrackerAgentElevated" -Action $act -Trigger @($boot,$beat) \`
   -Principal $prin -Settings $set -Force | Out-Null
 Start-ScheduledTask -TaskName "TrackerAgentElevated"
 Write-Host "Elevated tracker agent installed as SYSTEM (headless, highest privileges) on $env:COMPUTERNAME — runs with no login required; installs run without UAC."

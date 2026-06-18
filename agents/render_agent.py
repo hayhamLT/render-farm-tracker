@@ -39,7 +39,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.20.0"
+AGENT_VERSION = "2.21.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -120,30 +120,63 @@ def acquire_single_instance():
 
 
 def ensure_task_watchdog():
-    """Self-heal the elevated scheduled task so the agent restarts on its own.
+    """Self-heal the elevated scheduled task so the agent ALWAYS restarts on its own.
 
-    The task was created to fire only at startup; if the agent process is later
-    killed (render-load OOM, console logoff sending Ctrl+C, etc.) nothing relaunches
-    it until the next reboot — the node then shows "offline" while it keeps rendering.
-    Running as SYSTEM (the elevated task), add a 5-minute repetition trigger so a dead
-    agent is relaunched within minutes (the single-instance mutex makes re-firing a
-    no-op when it's already alive). Best-effort: never raise, never block the agent.
+    The original task attached its 5-minute repetition to the AtStartup trigger. If
+    AtStartup never fired — which is exactly what Windows **Fast Startup** does (a
+    "shutdown" becomes a hybrid resume, not a cold boot, so AtStartup tasks are skipped)
+    — the repetition never started either, so a rebooted node could sit powered-on but
+    with NO agent until someone logged in (the MARS-02 / AVA-01 symptom).
+
+    Fix: give the task an INDEPENDENT time-based heartbeat trigger (every 5 min,
+    StartWhenAvailable) that fires regardless of how the machine powered on, plus the
+    AtStartup trigger. The single-instance mutex makes a re-fire a no-op when the agent
+    is already alive. Idempotent (re-set on each agent start); best-effort, never raises.
     """
     if not IS_WINDOWS:
         return
     ps = (
         "$t=Get-ScheduledTask -TaskName 'TrackerAgentElevated' -ErrorAction SilentlyContinue;"
-        "if($t){$rep=$false;foreach($g in $t.Triggers){if($g.Repetition -and $g.Repetition.Interval){$rep=$true}};"
-        "if(-not $rep){$nt=New-ScheduledTaskTrigger -AtStartup;"
-        "$tmp=New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650);"
-        "$nt.Repetition=$tmp.Repetition;"
-        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger $nt | Out-Null}}"
+        "if($t){"
+        "$boot=New-ScheduledTaskTrigger -AtStartup;"
+        "$beat=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1) "
+        "-RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650);"
+        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger @($boot,$beat) | Out-Null}"
     )
     try:
         import base64
         enc = base64.b64encode(ps.encode("utf-16-le")).decode()
         subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                         "-EncodedCommand", enc], capture_output=True, timeout=60)
+    except Exception:
+        pass
+
+
+def ensure_fast_startup_disabled():
+    """Turn OFF Windows Fast Startup so a 'shutdown' is a TRUE cold boot.
+
+    Fast Startup ("HiberbootEnabled") makes a shutdown a hybrid-hibernate: the next
+    power-on RESUMES the saved kernel session instead of cold-booting, so AtStartup
+    scheduled tasks don't fire (agent never comes back) AND Wake-on-LAN from S5 often
+    fails. Disabling it makes shutdown/restart behave predictably. Idempotent registry
+    write; only succeeds as SYSTEM/admin (the elevated task), silently no-ops otherwise.
+    Leaves normal hibernate/sleep untouched. This auto-propagates fleet-wide as agents
+    self-update — no manual re-elevation needed.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SYSTEM\CurrentControlSet\Control\Session Manager\Power",
+                             0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+        try:
+            cur, _ = winreg.QueryValueEx(key, "HiberbootEnabled")
+        except OSError:
+            cur = None
+        if cur != 0:
+            winreg.SetValueEx(key, "HiberbootEnabled", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
     except Exception:
         pass
 
@@ -1153,8 +1186,10 @@ def main():
     print("Tracker agent %s on %s (%s) -> %s"
           % (AGENT_VERSION, socket.gethostname(), platform.system(), server_url))
 
-    # Make the elevated task self-restart (no-op on non-elevated/macOS nodes).
+    # Make the elevated task self-restart (no-op on non-elevated/macOS nodes), and turn off
+    # Fast Startup so reboots cold-boot the agent before login (and Wake-on-LAN works).
     ensure_task_watchdog()
+    ensure_fast_startup_disabled()
 
     # Wedge watchdog: force a restart if the loop stalls or a job hangs (see above).
     watch_state = {"tick": time.time(), "busy_since": None}
