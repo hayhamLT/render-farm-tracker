@@ -641,21 +641,30 @@ function renderFleet() {
     const dm = fleetDriver(gpuNodes);
     const dc = {};
     gpuNodes.forEach((n) => { dc[n.gpu_driver] = (dc[n.gpu_driver] || 0) + 1; });
+    // Neutral bars — legacy GPUs legitimately run an older driver track (581.x), so a
+    // non-top version is NOT "outdated". Genuinely-behind nodes are caught in Alerts.
     const dRows = Object.entries(dc).sort((x, y) => y[1] - x[1]).map(([v, count]) => ({
       label: esc(v) + (v === dm ? ' <span class="tag-latest">most common</span>' : ''),
-      count, cls: v === dm ? 'ok' : 'old',
+      count, cls: v === dm ? 'ok' : '',
     }));
     document.getElementById('fleet-drivers').innerHTML =
       `<h2>${icon('cog')} GPU drivers</h2><div class="dist">${distRows(dRows, gpuNodes.length)}</div>`;
   }
 
   // ---- Alerts ----
-  const dm2 = fleetDriver(nodes);
   const items = [];
   nodes.filter((n) => !n.online).forEach((n) => items.push({ ic: 'power', cls: 'bad', t: `${n.hostname} offline`, s: 'last seen ' + ago(n.last_seen) }));
   nodes.filter((n) => n.pending_reboot).forEach((n) => items.push({ ic: 'refresh', cls: 'warn', t: `${n.hostname} needs a reboot`, s: 'Windows update pending' }));
   nodes.filter((n) => n.disk_free_gb != null && n.disk_free_gb < 20).forEach((n) => items.push({ ic: 'server', cls: 'warn', t: `${n.hostname} low disk`, s: `${n.disk_free_gb} GB free` }));
-  nodes.filter((n) => n.gpu_driver && dm2 && String(n.gpu_driver).split('.')[0] !== String(dm2).split('.')[0]).forEach((n) => items.push({ ic: 'cog', cls: 'warn', t: `${n.hostname} driver drift`, s: `${n.gpu_driver} vs fleet ${dm2}` }));
+  // GPU driver "behind" = installed driver older than the newest version THIS node's GPU
+  // supports (per-GPU target). A legacy Maxwell/Pascal card on 581.57 is at its MAX, not
+  // drifting; a non-NVIDIA box is n/a. productStatus encodes both (eol/na/uptodate vs
+  // patch/major), so trust it instead of comparing to the fleet's most-common version.
+  const nvProd = state.products.find((p) => p.key === 'nvidia');
+  if (nvProd) nodes.forEach((n) => {
+    const st = productStatus(n, nvProd);
+    if (['patch', 'major'].includes(st.status)) items.push({ ic: 'cog', cls: 'warn', t: `${n.hostname} GPU driver behind`, s: `${st.version || '—'} → ${nvidiaTarget(n, nvProd)}` });
+  });
   nodes.filter((n) => n.agent_version && latest && cmpVersion(n.agent_version, latest) < 0).forEach((n) => items.push({ ic: 'beacon', cls: 'info', t: `${n.hostname} · ${AGENT_NAME} ${n.agent_version}`, s: `update to ${latest}` }));
   state.jobs.filter((j) => j.status === 'failed').slice(0, 6).forEach((j) => items.push({ ic: 'alert', cls: 'bad', t: `${j.hostname}: ${PRODUCT_NAMES[j.product_key] || j.product_key} failed`, s: 'see Activity' }));
   const aBody = items.length
