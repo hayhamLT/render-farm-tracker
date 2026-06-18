@@ -883,9 +883,12 @@ const nodesByKind = (prod, osList, kinds) =>
     if (!osList.includes(n.os) || jobActiveFor(n, prod.key)) return false;
     const st = productStatus(n, prod).status;
     if (!kinds.includes(st)) return false;
-    // A not-installed node is a deploy target ONLY when there's a version to install AND a
-    // way to install it. Otherwise it's tracking-only (e.g. a plug-in) — never a fresh-install target.
-    if (st === 'missing' && !(latestForOS(prod, n.os) && isDeployable(prod))) return false;
+    // A not-installed node is a deploy target only when the product is installable. Apps need a
+    // known target version too; scripts install by presence (a .jsx/.jsxbin often has no version).
+    if (st === 'missing') {
+      if (!isDeployable(prod)) return false;
+      if (prod.category !== 'script' && !latestForOS(prod, n.os)) return false;
+    }
     return true;
   });
 // Machines already mid-rollout for this product (queued or installing).
@@ -1101,7 +1104,7 @@ function nodeNeedsCount(n) {
   return wizProducts().filter((p) => {
     const st = productStatus(n, p).status;
     if (st === 'patch' || st === 'major') return true;
-    if (st === 'missing') return !!(latestForOS(p, n.os) && isDeployable(p));
+    if (st === 'missing') return isDeployable(p) && (p.category === 'script' || !!latestForOS(p, n.os));
     return false;
   }).length;
 }

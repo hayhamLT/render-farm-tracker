@@ -410,7 +410,7 @@ function httpGetText(url, redirects = 0) {
 function filenameFromUrl(u) {
   try {
     const base = (new URL(u).pathname.split('/').filter(Boolean).pop() || '');
-    return /\.[a-z0-9]{2,5}$/i.test(base) ? decodeURIComponent(base) : '';
+    return /\.[a-z0-9]{2,6}$/i.test(base) ? decodeURIComponent(base) : '';
   } catch { return ''; }
 }
 
@@ -779,9 +779,11 @@ function findStagedInstaller(productKey, os, version, files) {
     kws = [...words].map((w) => new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
   }
   if (!kws.length) return null;
-  const osOk = (name) => os === 'windows'
+  // Scripts (.jsx/.jsxbin/.zip) are OS-agnostic — they match on either platform. Otherwise
+  // require an OS-appropriate installer extension.
+  const osOk = (name) => /\.(jsx|jsxbin|zip)$/i.test(name) || (os === 'windows'
     ? /win|x64|\.exe$|\.msi$/i.test(name)
-    : /mac|osx|darwin|\.dmg$|\.pkg$/i.test(name);
+    : /mac|osx|darwin|\.dmg$|\.pkg$/i.test(name));
   const matches = (files || listInstallerFiles()).filter((f) =>
     kws.some((re) => re.test(f.name)) && osOk(f.name));
   if (!matches.length) return null;
