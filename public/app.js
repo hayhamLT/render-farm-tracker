@@ -1639,19 +1639,14 @@ function customProductForm(prod, defaultCat) {
     const ov = document.createElement('div');
     ov.className = 'modal-overlay';
     ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-title">${prod ? 'Edit' : 'Add'} ${initCat === 'plugin' ? 'plug-in' : initCat === 'script' ? 'script' : 'product'}</div>
+      <div class="modal-title">${prod ? 'Edit' : 'Add'} ${initCat === 'plugin' ? 'plug-in' : initCat === 'script' ? 'script' : 'app'}</div>
       <div class="modal-body lic-form">
-        <div class="cp-typeseg seg" id="cp-type" data-val="${initCat}">
-          <button type="button" data-v="app">App</button>
-          <button type="button" data-v="plugin">Plug-in</button>
-          <button type="button" data-v="script">Script</button>
-        </div>
         <div class="cp-head">
           <span class="cp-icon" id="cp-iconprev">${prod && prod.icon_url ? `<img src="${esc(prod.icon_url)}" onerror="this.remove()">` : ''}</span>
           <label style="flex:1">Name<input id="cp-name" placeholder="${initCat === 'script' ? 'e.g. Flow' : initCat === 'plugin' ? 'e.g. Element 3D' : 'e.g. 7-Zip'}" value="${v('name')}"></label>
         </div>
-        <label>Website or installer link <span class="muted small">— paste it, Auto-fill grabs the icon, version &amp; installer</span>
-          <span class="cp-url"><input id="cp-url" placeholder="https://www.7-zip.org/  ·  or a direct …/app.exe">
+        <label>${initCat === 'script' ? 'Script file (.jsx) link' : initCat === 'plugin' ? 'Installer link (or stage it on the share)' : 'Website or installer link'} <span class="muted small">— ${initCat === 'script' ? 'a direct link to the .jsx; Auto-fill grabs the icon' : 'paste it, Auto-fill grabs the icon, version &amp; installer'}</span>
+          <span class="cp-url"><input id="cp-url" placeholder="${initCat === 'script' ? 'https://…/MyScript.jsx' : initCat === 'plugin' ? 'https://…/Plugin_win.exe' : 'https://www.7-zip.org/  ·  or a direct …/app.exe'}">
             <button type="button" class="btn-soft primary" id="cp-fetch">Auto-fill</button></span></label>
         <div class="hint small" id="cp-fillnote">Just a name + link is enough to start tracking — turn on the options below only if you want them.</div>
 
@@ -1737,32 +1732,28 @@ function customProductForm(prod, defaultCat) {
       .forEach((id) => $(id).addEventListener('change', sync));
     sync();
 
-    // Type selector (App / Plug-in / Script): sets the category + tailors detection/placeholders.
-    const typeSeg = $('cp-type');
-    function typePlaceholders(cat) {
-      if (cat === 'script') {
-        $('cp-pwin').placeholder = 'C:\\Program Files\\Adobe\\Adobe After Effects *\\Support Files\\Scripts\\**\\YourScript.jsx';
-        $('cp-pmac').placeholder = '/Applications/Adobe After Effects */Scripts/**/YourScript.jsx';
-        $('cp-cwin').placeholder = 'copy /Y "{file}" "…\\Scripts\\ScriptUI Panels\\YourScript.jsx"';
-        $('cp-cmac').placeholder = 'cp "{file}" "…/Scripts/ScriptUI Panels/YourScript.jsx"';
-      } else {
-        $('cp-pwin').placeholder = 'C:\\Program Files\\Adobe\\**\\Element*.aex';
-        $('cp-pmac').placeholder = '/Library/Application Support/Adobe/**/Element*.plugin';
-        $('cp-cwin').placeholder = '"{file}" /S';
-        $('cp-cmac').placeholder = 'installer -pkg "{file}" -target /';
-      }
+    // This dialog is dedicated to ONE kind (initCat) — App, Plug-in, or Script. Tailor it:
+    // plug-ins/scripts are AE-only, so hide the OS + detection-method controls (always the AE
+    // folders, both platforms) and set placeholders to suit.
+    if (initCat === 'script') {
+      $('cp-pwin').placeholder = 'auto: AE Scripts folder (override if needed)';
+      $('cp-pmac').placeholder = 'auto: AE Scripts folder';
+      $('cp-cwin').placeholder = 'auto: copies the .jsx into AE’s ScriptUI Panels';
+      $('cp-cmac').placeholder = 'auto: copies the .jsx into AE’s ScriptUI Panels';
+    } else {
+      $('cp-pwin').placeholder = initCat === 'plugin' ? 'auto: AE plug-ins folder (override if needed)' : 'C:\\Program Files\\…';
+      $('cp-pmac').placeholder = initCat === 'plugin' ? 'auto: AE plug-ins folder' : '/Applications/…';
+      $('cp-cwin').placeholder = '"{file}" /S';
+      $('cp-cmac').placeholder = 'installer -pkg "{file}" -target /';
     }
-    typeSeg.querySelectorAll('button').forEach((b) => {
-      b.classList.toggle('active', b.dataset.v === initCat);
-      b.addEventListener('click', () => {
-        typeSeg.dataset.val = b.dataset.v;
-        typeSeg.querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b));
-        $('cp-method').value = b.dataset.v === 'app' ? 'name' : 'path';
-        typePlaceholders(b.dataset.v);
-        sync();
-      });
-    });
-    typePlaceholders(initCat);
+    if (initCat !== 'app') {
+      // AE plug-ins/scripts: not in the uninstall list, always both OS — hide OS + method pickers,
+      // force path detection across both platforms (the path auto-derives from the name on save).
+      const srow = ov.querySelector('.cp-srow'); if (srow) srow.hidden = true;
+      $('cp-method').value = 'path';
+      $('cp-os').value = 'both';
+    }
+    sync();
 
     $('cp-fetch').addEventListener('click', async () => {
       const url = $('cp-url').value.trim();
@@ -1793,12 +1784,18 @@ function customProductForm(prod, defaultCat) {
       const name = $('cp-name').value.trim();
       if (!name) { $('cp-name').focus(); return; }
       // Toggles + OS selector are authoritative: only save fields for enabled capabilities/OS.
-      const cat = typeSeg.dataset.val;
-      // Plug-ins & scripts are AE-only and live in AE's folders on both platforms → default OS=both.
+      const cat = initCat;   // this dialog is dedicated to one kind
+      // Plug-ins & scripts are AE-only and live in AE's folders on both platforms → OS=both.
       const os = (cat === 'plugin' || cat === 'script') ? 'both' : $('cp-os').value;
       const win = os !== 'mac', mac = os !== 'win';
       const method = $('cp-method').value, ac = $('cp-autocheck').checked;
-      const upd = $('cp-tg-update').checked, unin = $('cp-tg-uninstall').checked;
+      // A script's "install" is a copy into AE's ScriptUI Panels on every installed AE version —
+      // auto-generated so the user never writes a command. Plug-ins use the silent installer cmd.
+      const scriptCmd = (osName) => osName === 'win'
+        ? 'for /d %i in ("C:\\Program Files\\Adobe\\Adobe After Effects *") do copy /Y "{file}" "%i\\Support Files\\Scripts\\ScriptUI Panels\\"'
+        : 'for d in /Applications/Adobe\\ After\\ Effects\\ */Scripts/ScriptUI\\ Panels; do cp "{file}" "$d/"; done';
+      const upd = cat === 'script' ? true : $('cp-tg-update').checked;
+      const unin = $('cp-tg-uninstall').checked;
       // For AE plug-ins/scripts, auto-derive the detection path from the name (first word) so
       // you don't have to type AE folder paths. e.g. "Element 3D" → look for Element*.aex in AE.
       const tok = name.split(/[^A-Za-z0-9]+/).filter(Boolean)[0] || name;
@@ -1818,10 +1815,10 @@ function customProductForm(prod, defaultCat) {
         latest_version: g('cp-ver'),
         check_url: ac ? g('cp-curl') : null,
         check_regex: ac ? g('cp-cre') : null,
-        source_url_win: (upd && win) ? g('cp-swin') : null,
-        install_cmd_win: (upd && win) ? g('cp-cwin') : null,
-        source_url_mac: (upd && mac) ? g('cp-smac') : null,
-        install_cmd_mac: (upd && mac) ? g('cp-cmac') : null,
+        source_url_win: (upd && win) ? (g('cp-swin') || (cat === 'script' ? $('cp-url').value.trim() || null : null)) : null,
+        install_cmd_win: (upd && win) ? (g('cp-cwin') || (cat === 'script' ? scriptCmd('win') : null)) : null,
+        source_url_mac: (upd && mac) ? (g('cp-smac') || (cat === 'script' ? $('cp-url').value.trim() || null : null)) : null,
+        install_cmd_mac: (upd && mac) ? (g('cp-cmac') || (cat === 'script' ? scriptCmd('mac') : null)) : null,
         uninstall_cmd_win: (unin && win) ? g('cp-uwin') : null,
         uninstall_cmd_mac: (unin && mac) ? g('cp-umac') : null,
         icon_url: g('cp-icon'),
@@ -1887,8 +1884,7 @@ function renderCatalog() {
   const versionLabel = catalogCat === 'script' ? 'Version' : 'Latest version';
   if (!list.length) {
     t.innerHTML = `<tr><td class="hint" style="padding:16px">No ${catalogCat === 'app' ? 'apps' : catalogCat + 's'} yet — click <b>Add</b> to track one.</td></tr>`;
-    return;
-  }
+  } else {
   t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>${versionLabel}</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th><th></th></tr>` +
     list.map((p) => `<tr>
       <td class="track-cell"><label class="switch" title="Track ${esc(p.name)} — show it on the dashboard, counts, wizard. Off = ignore it.">
@@ -1909,19 +1905,28 @@ function renderCatalog() {
           </label>`}</td>
       <td class="track-cell" style="white-space:nowrap">${p.custom ? `<button class="node-reboot" title="Edit" onclick="editProduct('${p.key}')">${icon('cog')}</button><button class="node-reboot" title="Uninstall from machines that have it" onclick="uninstallProduct('${p.key}')">${icon('x')}</button><button class="node-reboot" title="Delete this custom product (stops tracking; doesn't touch machines)" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
     </tr>`).join('');
+  }
 
-  // per-category download folders (don't clobber a field the user is editing)
+  // Download-folder panel — show only the active sub-tab's folder.
   const dlVals = { 'dl-dir': state.downloadDir, 'dl-dir-plugins': state.downloadDirPlugins, 'dl-dir-scripts': state.downloadDirScripts };
   for (const [id, val] of Object.entries(dlVals)) {
     const el = document.getElementById(id);
     if (el && document.activeElement !== el) el.value = val || '';
   }
+  const catField = { app: 'downloadDir', plugin: 'downloadDirPlugins', script: 'downloadDirScripts' }[catalogCat];
+  const catWord = { app: 'Apps', plugin: 'Plug-ins', script: 'Scripts' }[catalogCat];
+  document.querySelectorAll('.dlf-row').forEach((r) => { r.hidden = r.querySelector('input').dataset.field !== catField; });
+  const fhead = document.getElementById('dlf-head'); if (fhead) fhead.textContent = `${catWord} — installer download folder`;
+  const fsub = document.getElementById('dlf-sub');
+  if (fsub) fsub.innerHTML = catalogCat === 'app'
+    ? 'Where app installers are staged / auto-fetched.'
+    : `Where ${catWord.toLowerCase()} installers go. Leave blank to use the Apps folder. (All folders are searched, so a file in any is found.)`;
   const note = document.getElementById('dl-dir-note');
   if (note) {
-    const dropboxy = [state.downloadDir, state.downloadDirPlugins, state.downloadDirScripts].some((d) => /dropbox/i.test(d || ''));
-    note.innerHTML = dropboxy
-      ? `<span style="color:var(--warn)">${icon('alert')} One of these folders is inside Dropbox, so installers will sync to the cloud — pick a folder on your server/share instead.</span>`
-      : `Tip: in Finder, right-click a folder → <b>Copy as Pathname</b> (⌥⌘C), then paste it above. Blank plug-in/script folders fall back to the Apps folder.`;
+    const cur = catalogCat === 'app' ? state.downloadDir : catalogCat === 'plugin' ? state.downloadDirPlugins : state.downloadDirScripts;
+    note.innerHTML = /dropbox/i.test(cur || '')
+      ? `<span style="color:var(--warn)">${icon('alert')} This folder is inside Dropbox, so installers will sync to the cloud — pick a folder on your server/share instead.</span>`
+      : `Tip: in Finder, right-click a folder → <b>Copy as Pathname</b> (⌥⌘C), then paste it above.`;
   }
   // Slack + maintenance-window settings (don't clobber a field the user is editing).
   const su = document.getElementById('slack-url');
