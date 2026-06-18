@@ -1793,15 +1793,28 @@ function customProductForm(prod, defaultCat) {
       const name = $('cp-name').value.trim();
       if (!name) { $('cp-name').focus(); return; }
       // Toggles + OS selector are authoritative: only save fields for enabled capabilities/OS.
-      const os = $('cp-os').value, win = os !== 'mac', mac = os !== 'win';
+      const cat = typeSeg.dataset.val;
+      // Plug-ins & scripts are AE-only and live in AE's folders on both platforms → default OS=both.
+      const os = (cat === 'plugin' || cat === 'script') ? 'both' : $('cp-os').value;
+      const win = os !== 'mac', mac = os !== 'win';
       const method = $('cp-method').value, ac = $('cp-autocheck').checked;
       const upd = $('cp-tg-update').checked, unin = $('cp-tg-uninstall').checked;
+      // For AE plug-ins/scripts, auto-derive the detection path from the name (first word) so
+      // you don't have to type AE folder paths. e.g. "Element 3D" → look for Element*.aex in AE.
+      const tok = name.split(/[^A-Za-z0-9]+/).filter(Boolean)[0] || name;
+      const aePath = (osName) => {
+        if (cat === 'plugin') return osName === 'win'
+          ? `C:\\Program Files\\Adobe\\**\\${tok}*.aex` : `/Library/Application Support/Adobe/**/${tok}*.plugin`;
+        if (cat === 'script') return osName === 'win'
+          ? `C:\\Program Files\\Adobe\\**\\Scripts\\**\\${tok}*.jsx*` : `/Applications/Adobe After Effects */Scripts/**/${tok}*.jsx*`;
+        return null;
+      };
       close({
         name,
-        category: typeSeg.dataset.val,
-        detect_pattern: method === 'name' ? (g('cp-pat') || name.toLowerCase()) : null,
-        detect_path_win: (method === 'path' && win) ? g('cp-pwin') : null,
-        detect_path_mac: (method === 'path' && mac) ? g('cp-pmac') : null,
+        category: cat,
+        detect_pattern: (method === 'name' && cat === 'app') ? (g('cp-pat') || name.toLowerCase()) : null,
+        detect_path_win: win ? (g('cp-pwin') || aePath('win')) : null,
+        detect_path_mac: mac ? (g('cp-pmac') || aePath('mac')) : null,
         latest_version: g('cp-ver'),
         check_url: ac ? g('cp-curl') : null,
         check_regex: ac ? g('cp-cre') : null,
@@ -1897,14 +1910,18 @@ function renderCatalog() {
       <td class="track-cell" style="white-space:nowrap">${p.custom ? `<button class="node-reboot" title="Edit" onclick="editProduct('${p.key}')">${icon('cog')}</button><button class="node-reboot" title="Uninstall from machines that have it" onclick="uninstallProduct('${p.key}')">${icon('x')}</button><button class="node-reboot" title="Delete this custom product (stops tracking; doesn't touch machines)" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
     </tr>`).join('');
 
-  // download-folder control
-  const dd = document.getElementById('dl-dir');
-  if (dd && document.activeElement !== dd) dd.value = state.downloadDir || '';
+  // per-category download folders (don't clobber a field the user is editing)
+  const dlVals = { 'dl-dir': state.downloadDir, 'dl-dir-plugins': state.downloadDirPlugins, 'dl-dir-scripts': state.downloadDirScripts };
+  for (const [id, val] of Object.entries(dlVals)) {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el) el.value = val || '';
+  }
   const note = document.getElementById('dl-dir-note');
   if (note) {
-    note.innerHTML = /dropbox/i.test(state.downloadDir || '')
-      ? `<span style="color:var(--warn)">${icon('alert')} Warning: this folder is inside Dropbox, so every installer will sync to the cloud — pick a folder on your server/share instead.</span>`
-      : `Current: <code>${esc(state.downloadDir || '(default share)')}</code> &nbsp;·&nbsp; Tip: in Finder, right-click a folder → <b>Copy as Pathname</b> (⌥⌘C), then paste it above.`;
+    const dropboxy = [state.downloadDir, state.downloadDirPlugins, state.downloadDirScripts].some((d) => /dropbox/i.test(d || ''));
+    note.innerHTML = dropboxy
+      ? `<span style="color:var(--warn)">${icon('alert')} One of these folders is inside Dropbox, so installers will sync to the cloud — pick a folder on your server/share instead.</span>`
+      : `Tip: in Finder, right-click a folder → <b>Copy as Pathname</b> (⌥⌘C), then paste it above. Blank plug-in/script folders fall back to the Apps folder.`;
   }
   // Slack + maintenance-window settings (don't clobber a field the user is editing).
   const su = document.getElementById('slack-url');
@@ -1915,16 +1932,23 @@ function renderCatalog() {
   const mwend = document.getElementById('mw-end'); if (mwend && document.activeElement !== mwend) mwend.value = mw.end || '06:00';
 }
 
-async function saveDownloadDir(dir) {
-  dir = (dir || document.getElementById('dl-dir').value || '').trim();
-  if (!dir) return;
-  try { await api('POST', '/api/settings', { downloadDir: dir }); toast('Download folder set to ' + dir, 'success'); refresh(); }
-  catch (e) { toast(e.message, 'error'); }
+const DLF_LABEL = { downloadDir: 'Apps', downloadDirPlugins: 'Plug-ins', downloadDirScripts: 'Scripts' };
+const DLF_INPUT = { downloadDir: 'dl-dir', downloadDirPlugins: 'dl-dir-plugins', downloadDirScripts: 'dl-dir-scripts' };
+async function saveDownloadField(field, dir) {
+  if (dir == null) dir = document.getElementById(DLF_INPUT[field]).value;
+  dir = (dir || '').trim();
+  // Apps must always have a folder; plug-ins/scripts may be blank (= inherit Apps).
+  if (!dir && field === 'downloadDir') return;
+  try {
+    await api('POST', '/api/settings', { [field]: dir });
+    toast(dir ? `${DLF_LABEL[field]} folder set` : `${DLF_LABEL[field]} folder cleared (uses Apps)`, 'success');
+    refresh();
+  } catch (e) { toast(e.message, 'error'); }
 }
-document.getElementById('dl-dir-browse').addEventListener('click', () => browseFolder());
-document.getElementById('dl-dir-save').addEventListener('click', () => saveDownloadDir());
-// Paste/type a path and press Enter to save it directly.
-document.getElementById('dl-dir').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveDownloadDir(); } });
+document.querySelectorAll('.dlf-save').forEach((b) => b.addEventListener('click', () => saveDownloadField(b.dataset.field)));
+document.querySelectorAll('.dlf-browse').forEach((b) => b.addEventListener('click', () => browseFolder(b.dataset.field)));
+document.querySelectorAll('.dlf-row input').forEach((inp) =>
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveDownloadField(inp.dataset.field); } }));
 
 // Slack alerts
 document.getElementById('slack-save').addEventListener('click', async () => {
@@ -1953,8 +1977,8 @@ document.getElementById('mw-save').addEventListener('click', async () => {
 // Finder-style server folder picker: Favorites/Locations sidebar, clickable breadcrumb
 // path, a Name/Date/Size list (folders navigable, files shown for context), and a New
 // Folder action. "Use this folder" sets + saves it.
-async function browseFolder() {
-  const start = document.getElementById('dl-dir').value.trim() || state.downloadDir || '';
+async function browseFolder(field = 'downloadDir') {
+  const start = (document.getElementById(DLF_INPUT[field]) || {}).value || state[field] || state.downloadDir || '';
   const ov = document.createElement('div');
   ov.className = 'modal-overlay';
   ov.innerHTML = `<div class="modal fb-dialog" role="dialog" aria-modal="true" aria-label="Choose folder">
@@ -2059,7 +2083,7 @@ async function browseFolder() {
     const act = e.target.closest('[data-act]');
     if (!act) return;
     if (act.dataset.act === 'newfolder') return newFolderRow();
-    if (act.dataset.act === 'use') { close(); saveDownloadDir(cur); }
+    if (act.dataset.act === 'use') { close(); saveDownloadField(field, cur); }
     else close();
   });
   load(start);

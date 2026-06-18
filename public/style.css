@@ -931,6 +931,12 @@ details.qa .hint { margin: 8px 0 2px 16px; }
 /* type selector in the add/edit form */
 .cp-typeseg { width: 100%; margin-bottom: 4px; }
 .cp-typeseg button { flex: 1; }
+/* per-category installer download folders */
+.dlf-grid { display: flex; flex-direction: column; gap: 8px; }
+.dlf-row { display: flex; align-items: center; gap: 8px; }
+.dlf-label { flex: none; width: 64px; font-size: .82rem; color: var(--muted); font-weight: 600; }
+.dlf-row .path-field { flex: 1; }
+.dlf-save, .dlf-browse { flex: none; }
 /* capability-driven options: only the fields you enable are shown */
 .cp-opts { display: flex; flex-direction: column; gap: 14px; }
 .cp-opts label { display: flex; flex-direction: column; gap: 5px; font-size: .82rem; color: var(--muted); }

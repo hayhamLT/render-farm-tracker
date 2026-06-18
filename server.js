@@ -148,9 +148,9 @@ function filenameFromUrl(u, fallback) {
 }
 
 // Fetch a URL into installers/, following redirects, tracking progress.
-function fetchToInstallers(dlId, fileUrl, filename) {
+function fetchToInstallers(dlId, fileUrl, filename, destDir) {
   const rec = downloads.get(dlId);
-  const dest = path.join(downloadDir(), filename);
+  const dest = path.join(destDir || downloadDir(), filename);
   const tmp = dest + '.part';
 
   const go = (u, redirects) => {
@@ -459,10 +459,11 @@ async function checkCustomVersions() {
       const filename = filenameFromUrl(srcUrl);
       if (!filename || resolveInstaller(filename)) continue;
       if ([...downloads.values()].some((d) => d.filename === filename)) continue;
-      try { const st = fs.statfsSync(downloadDir()); if (st.bavail * st.bsize < 25e9) continue; } catch { /* ignore */ }
+      const dest = downloadDirFor(prod.category);
+      try { const st = fs.statfsSync(dest); if (st.bavail * st.bsize < 25e9) continue; } catch { /* ignore */ }
       const dlId = crypto.randomBytes(6).toString('hex');
       downloads.set(dlId, { url: srcUrl, filename, status: 'downloading', received: 0, total: 0, error: null });
-      fetchToInstallers(dlId, srcUrl, filename);
+      fetchToInstallers(dlId, srcUrl, filename, dest);
       logEvent('package', `Auto-fetching ${prod.name} installer (${os})`);
       fetched.push(filename);
     }
@@ -683,16 +684,20 @@ setInterval(reapStaleJobs, 5 * 60 * 1000);
 reapStaleJobs();
 
 // All folders that may hold installer files: the local cache first, then mirrors.
-// Directory new downloads are written to (writable; prefers config.downloadDir → share → local).
-function downloadDir() {
-  for (const d of [config.downloadDir, ...(config.installerSources || []), INSTALLERS_DIR].filter(Boolean)) {
+// Where new downloads land, per category (apps / plug-ins / scripts can use different
+// folders). Falls back to the apps folder → share → local cache. Writable wins.
+function downloadDirFor(category) {
+  const k = category === 'plugin' ? 'downloadDirPlugins' : category === 'script' ? 'downloadDirScripts' : 'downloadDir';
+  for (const d of [config[k], config.downloadDir, ...(config.installerSources || []), INSTALLERS_DIR].filter(Boolean)) {
     try { fs.accessSync(d, fs.constants.W_OK); return d; } catch { /* not writable / missing */ }
   }
   return INSTALLERS_DIR;
 }
-// All folders searched for staged installers (includes the download dir).
+function downloadDir() { return downloadDirFor('app'); }
+// All folders searched for staged installers — includes every category's download folder, so
+// a file staged in any of them is found regardless of the product's category.
 function installerDirs() {
-  const dirs = [INSTALLERS_DIR, config.downloadDir, ...config.installerSources];
+  const dirs = [INSTALLERS_DIR, config.downloadDir, config.downloadDirPlugins, config.downloadDirScripts, ...config.installerSources];
   return [...new Set(dirs.filter((d) => d && fs.existsSync(d)))];
 }
 
@@ -1262,6 +1267,8 @@ function fullState() {
     slackWebhook: config.slackWebhook || '',
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
     downloadDir: downloadDir(),
+    downloadDirPlugins: config.downloadDirPlugins || '',
+    downloadDirScripts: config.downloadDirScripts || '',
     installerSources: [...new Set([config.downloadDir, '/Volumes/THIS-server/INSTALLERS', INSTALLERS_DIR, ...config.installerSources].filter(Boolean))],
     nodes,
     products,
@@ -1655,18 +1662,21 @@ const server = http.createServer(async (req, res) => {
         saveConfig();
         logEvent('monitoring', `Rollout concurrency set to ${config.maxConcurrentInstalls} at a time`);
       }
-      if (typeof b.downloadDir === 'string' && b.downloadDir.trim()) {
-        const dir = b.downloadDir.trim();
+      // Per-category download folders: downloadDir (apps), downloadDirPlugins, downloadDirScripts.
+      for (const [field, label] of [['downloadDir', 'Apps'], ['downloadDirPlugins', 'Plug-ins'], ['downloadDirScripts', 'Scripts']]) {
+        if (typeof b[field] !== 'string') continue;
+        const dir = b[field].trim();
+        if (!dir) { config[field] = field === 'downloadDir' ? config.downloadDir : null; saveConfig(); continue; }
         try {
           fs.mkdirSync(dir, { recursive: true });
           fs.accessSync(dir, fs.constants.W_OK);
         } catch (e) {
-          return sendJson(res, 400, { error: `download folder not writable: ${e.message}` });
+          return sendJson(res, 400, { error: `${label} folder not writable: ${e.message}` });
         }
-        config.downloadDir = dir;
+        config[field] = dir;
         if (!config.installerSources.includes(dir)) config.installerSources.push(dir);
         saveConfig();
-        logEvent('monitoring', `Download folder set to ${dir}`);
+        logEvent('monitoring', `${label} download folder set to ${dir}`);
       }
       if (typeof b.slackWebhook === 'string') {
         config.slackWebhook = b.slackWebhook.trim() || null;
