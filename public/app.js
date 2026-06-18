@@ -1647,70 +1647,70 @@ function customProductForm(prod, defaultCat) {
   return new Promise((resolve) => {
     const ov = document.createElement('div');
     ov.className = 'modal-overlay';
-    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+    ov.innerHTML = `<div class="modal cp-modal" role="dialog" aria-modal="true">
       <div class="modal-title">${prod ? 'Edit' : 'Add'} ${initCat === 'plugin' ? 'plug-in' : initCat === 'script' ? 'script' : 'app'}</div>
       <div class="modal-body lic-form">
         <div class="cp-head">
           <span class="cp-icon" id="cp-iconprev">${prod && prod.icon_url ? `<img src="${esc(prod.icon_url)}" onerror="this.remove()">` : ''}</span>
           <label style="flex:1">Name<input id="cp-name" placeholder="${initCat === 'script' ? 'e.g. Flow' : initCat === 'plugin' ? 'e.g. Element 3D' : 'e.g. 7-Zip'}" value="${v('name')}"></label>
         </div>
-        <label>${initCat === 'script' ? 'Script file (.jsx) link' : initCat === 'plugin' ? 'Installer link (or stage it on the share)' : 'Website or installer link'} <span class="muted small">— ${initCat === 'script' ? 'a direct link to the .jsx; Auto-fill grabs the icon' : 'paste it, Auto-fill grabs the icon, version &amp; installer'}</span>
-          <span class="cp-url"><input id="cp-url" placeholder="${initCat === 'script' ? 'https://…/MyScript.jsx' : initCat === 'plugin' ? 'https://…/Plugin_win.exe' : 'https://www.7-zip.org/  ·  or a direct …/app.exe'}">
+        <label>${initCat === 'script' ? 'Script link' : 'Link'} <span class="muted small">— ${initCat === 'script' ? 'direct .jsx/.jsxbin URL' : 'Auto-fill grabs icon, version &amp; installer'}</span>
+          <span class="cp-url"><input id="cp-url" placeholder="${initCat === 'script' ? 'https://…/MyScript.jsxbin' : 'https://www.7-zip.org/  ·  or a direct …/app.exe'}">
             <button type="button" class="btn-soft primary" id="cp-fetch">Auto-fill</button></span></label>
-        <div class="hint small" id="cp-fillnote">Just a name + link is enough to start tracking — turn on the options below only if you want them.</div>
+        <div class="hint small" id="cp-fillnote">Name + link is enough to start tracking. Options below are optional.</div>
 
         <details class="up-adv cp-adv"${prod ? ' open' : ''}>
-          <summary><span data-ic="cog"></span> Options <span class="up-adv-hint">detection · auto-update · uninstall</span></summary>
+          <summary><span data-ic="cog"></span> Options <span class="up-adv-hint">detection · updates · uninstall</span></summary>
           <div class="up-adv-body cp-opts">
             <div class="cp-srow">
               <label class="cp-inline">Runs on
                 <select id="cp-os"><option value="win"${sel(initOs, 'win')}>Windows</option><option value="mac"${sel(initOs, 'mac')}>macOS</option><option value="both"${sel(initOs, 'both')}>Both</option></select></label>
               <label class="cp-inline">Find it by
-                <select id="cp-method"><option value="name"${sel(initMethod, 'name')}>Installed app name</option><option value="path"${sel(initMethod, 'path')}>Plug-in / folder path</option></select></label>
+                <select id="cp-method"><option value="name"${sel(initMethod, 'name')}>App name</option><option value="path"${sel(initMethod, 'path')}>File path</option></select></label>
             </div>
 
             <div id="cp-m-name">
-              <label>Detection pattern <span class="muted small">(matched vs the installed app's name; defaults to the product name)</span>
+              <label>Detect by name <span class="muted small">(defaults to the product name)</span>
                 <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
             </div>
             <div id="cp-m-path" hidden>
-              <label class="cp-win">Plug-in / folder path — Windows <span class="muted small">(glob ok — for apps not in the uninstall list, e.g. AE plug-ins)</span>
-                <input id="cp-pwin" placeholder="C:\\Program Files\\Adobe\\Common\\Plug-ins\\*\\MediaCore\\**\\Saber*" value="${v('detect_path_win')}"></label>
-              <label class="cp-mac">Plug-in / folder path — macOS
-                <input id="cp-pmac" placeholder="/Library/Application Support/Adobe/Common/Plug-ins/*/MediaCore/**/Saber*" value="${v('detect_path_mac')}"></label>
+              <label class="cp-win">Detect path — Windows <span class="muted small">(glob ok)</span>
+                <input id="cp-pwin" placeholder="C:\\Program Files\\Adobe\\…\\Saber*" value="${v('detect_path_win')}"></label>
+              <label class="cp-mac">Detect path — macOS
+                <input id="cp-pmac" placeholder="/Library/Application Support/Adobe/…/Saber*" value="${v('detect_path_mac')}"></label>
             </div>
 
-            <label>Latest version <span class="muted small">(optional — what "up to date" means)</span>
+            <label>Latest version <span class="muted small">(optional)</span>
               <input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
-            <label class="wiz-check"><input type="checkbox" id="cp-autocheck"${initCheck ? ' checked' : ''}> Auto-check the latest from a web page</label>
+            <label class="wiz-check"><input type="checkbox" id="cp-autocheck"${initCheck ? ' checked' : ''}> Check version from a web page</label>
             <div id="cp-checkgroup" class="lic-form-row" hidden>
-              <label>Version-check URL<input id="cp-curl" value="${v('check_url')}"></label>
-              <label>…version regex <span class="muted small">(group 1; blank = highest number)</span><input id="cp-cre" value="${v('check_regex')}"></label>
+              <label>Check URL<input id="cp-curl" value="${v('check_url')}"></label>
+              <label>Version regex <span class="muted small">(blank = highest no.)</span><input id="cp-cre" value="${v('check_regex')}"></label>
             </div>
 
             <div class="cp-cap-block">
-              ${cap('cp-tg-update', initUpd, 'Auto-update — download &amp; install it across the fleet')}
+              ${cap('cp-tg-update', initUpd, 'Auto-update across the fleet')}
               <div id="cp-updategroup" hidden>
                 <div class="cp-win">
-                  <label>Windows installer URL<input id="cp-swin" value="${v('source_url_win')}"></label>
-                  <label>Windows install command <span class="muted small">{file}=downloaded path</span><input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
+                  <label>Win installer URL<input id="cp-swin" value="${v('source_url_win')}"></label>
+                  <label>Win install cmd <span class="muted small">{file}=path</span><input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
                 </div>
                 <div class="cp-mac">
-                  <label>macOS installer URL<input id="cp-smac" value="${v('source_url_mac')}"></label>
-                  <label>macOS install command<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
+                  <label>Mac installer URL<input id="cp-smac" value="${v('source_url_mac')}"></label>
+                  <label>Mac install cmd<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
                 </div>
               </div>
             </div>
 
             <div class="cp-cap-block">
-              ${cap('cp-tg-uninstall', initUnin, 'Uninstall — allow removing it from machines')}
+              ${cap('cp-tg-uninstall', initUnin, 'Allow uninstall')}
               <div id="cp-uningroup" hidden>
-                <label class="cp-win">Windows uninstall command<input id="cp-uwin" placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' value="${v('uninstall_cmd_win')}"></label>
-                <label class="cp-mac">macOS uninstall command<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
+                <label class="cp-win">Win uninstall cmd<input id="cp-uwin" placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' value="${v('uninstall_cmd_win')}"></label>
+                <label class="cp-mac">Mac uninstall cmd<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
               </div>
             </div>
 
-            <label class="cp-iconrow">Icon URL <span class="muted small">(auto-set from the website; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
+            <label class="cp-iconrow">Icon URL <span class="muted small">(auto-set; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
           </div>
         </details>
       </div>
@@ -2276,6 +2276,12 @@ function paintIcons() {
   });
 }
 paintIcons();
+
+// Lock background scroll whenever a modal is open, so the wheel scrolls the dialog (not the
+// page behind it). Generic — covers every overlay (Add/Edit form, confirms, folder browser).
+new MutationObserver(() => {
+  document.body.classList.toggle('modal-open', !!document.querySelector('.modal-overlay'));
+}).observe(document.body, { childList: true });
 
 loadEnrolCommands();
 refresh();
