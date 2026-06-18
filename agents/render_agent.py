@@ -24,6 +24,7 @@ Deployments run installer commands, so run the agent with admin rights:
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -39,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.22.0"
+AGENT_VERSION = "2.23.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -199,34 +200,41 @@ PRODUCT_PATTERNS = {
 }
 
 
-# User-added products: {key: [compiled_regex, ...]}, pushed by the server in the check-in
-# response (custom catalog entries). Lets the farm track a new app/plugin with NO code change.
-CUSTOM_PATTERNS = {}
+# User-added products, pushed by the server in the check-in response (custom catalog
+# entries). Lets the farm track a new app/plugin with NO code change.
+CUSTOM_PATTERNS = {}             # {key: [compiled_regex, ...]} — matched vs installed-app names
+CUSTOM_PATHS = {}                # {key: {"win": glob, "mac": glob}} — for plug-ins / folder apps
 
 
 def set_custom_products(defs):
-    """Rebuild CUSTOM_PATTERNS from the server's list of {key, pattern}. A pattern is one or
-    more comma/newline-separated regexes (case-insensitive); a bad regex falls back to a
-    literal substring match. Best-effort — never raise (must not break detection)."""
-    global CUSTOM_PATTERNS
-    out = {}
+    """Rebuild CUSTOM_PATTERNS + CUSTOM_PATHS from the server's list of
+    {key, pattern, path_win, path_mac}. A pattern is one or more comma/newline-separated
+    regexes (bad regex → literal). A path is a glob the agent scans for plug-ins/folder apps
+    that aren't in the uninstall registry. Best-effort — never raise (must not break detection)."""
+    global CUSTOM_PATTERNS, CUSTOM_PATHS
+    pats_out, paths_out = {}, {}
     for d in (defs or []):
         key = (d.get("key") or "").strip()
-        raw = (d.get("pattern") or "").strip()
-        if not key or not raw:
+        if not key:
             continue
-        pats = []
-        for part in re.split(r"[,\n]", raw):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                pats.append(re.compile(part, re.IGNORECASE))
-            except re.error:
-                pats.append(re.compile(re.escape(part), re.IGNORECASE))
-        if pats:
-            out[key] = pats
-    CUSTOM_PATTERNS = out
+        raw = (d.get("pattern") or "").strip()
+        if raw:
+            pats = []
+            for part in re.split(r"[,\n]", raw):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    pats.append(re.compile(part, re.IGNORECASE))
+                except re.error:
+                    pats.append(re.compile(re.escape(part), re.IGNORECASE))
+            if pats:
+                pats_out[key] = pats
+        pw, pm = (d.get("path_win") or "").strip(), (d.get("path_mac") or "").strip()
+        if pw or pm:
+            paths_out[key] = {"win": pw, "mac": pm}
+    CUSTOM_PATTERNS = pats_out
+    CUSTOM_PATHS = paths_out
 
 
 def _match_product(display_name):
@@ -555,6 +563,58 @@ def detect_ffmpeg():
     return None
 
 
+def _win_file_version(path):
+    """Read a Windows binary's version (e.g. a .aex/.dll plug-in) via its file properties."""
+    try:
+        ps = ("$ErrorActionPreference='SilentlyContinue';"
+              "$i=Get-Item -LiteralPath '%s';"
+              "if($i.VersionInfo.ProductVersion){$i.VersionInfo.ProductVersion}else{$i.VersionInfo.FileVersion}"
+              % path.replace("'", "''"))
+        out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+        m = re.search(r"\d+(?:\.\d+){1,3}", out)
+        return m.group(0) if m else (out or "")
+    except Exception:
+        return ""
+
+
+def detect_custom_paths():
+    """Detect plug-ins / folder apps that aren't in the uninstall registry or /Applications,
+    by globbing a user-supplied path (per OS) and reading a version from the matched
+    file/bundle. Presence alone is useful even when no version can be read."""
+    found = {}
+    if not CUSTOM_PATHS:
+        return found
+    osk = "win" if IS_WINDOWS else "mac" if IS_MACOS else None
+    if not osk:
+        return found
+    for key, paths in CUSTOM_PATHS.items():
+        patt = (paths.get(osk) or "").strip()
+        if not patt:
+            continue
+        try:
+            matches = sorted(glob.glob(patt, recursive=True))
+        except Exception:
+            matches = []
+        if not matches:
+            continue
+        path = matches[-1]   # if several, the last sorted (often the newest version folder)
+        ver = ""
+        try:
+            low = path.lower()
+            if IS_MACOS and low.endswith((".plugin", ".bundle", ".app", ".framework")):
+                ver = _plist_version(path)
+            elif IS_WINDOWS and os.path.isfile(path) and low.endswith((".aex", ".dll", ".exe", ".aip", ".cdl64")):
+                ver = _win_file_version(path)
+            if not ver:                                   # fall back to a version in the name/path
+                m = re.search(r"\d+(?:\.\d+){1,3}", os.path.basename(path)) or re.search(r"\d+(?:\.\d+){1,3}", path)
+                ver = m.group(0) if m else ""
+        except Exception:
+            ver = ""
+        found[key] = (ver, path)
+    return found
+
+
 def detect_software():
     found = detect_windows() if IS_WINDOWS else detect_macos() if IS_MACOS else {}
     # mx1 only knows Maxon-App-managed installs — a standalone installer (e.g.
@@ -570,6 +630,11 @@ def detect_software():
     nv = detect_nvidia_driver()
     if nv:
         found["nvidia"] = nv
+    # Path-glob detection for plug-ins / folder apps (additive — never overrides a real
+    # registry/bundle hit, only fills products the name scan couldn't see).
+    for key, val in detect_custom_paths().items():
+        if key not in found:
+            found[key] = val
     return [
         {"product": key, "version": ver or None, "path": path or None}
         for key, (ver, path) in sorted(found.items())

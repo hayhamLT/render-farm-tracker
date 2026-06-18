@@ -1622,6 +1622,12 @@ function customProductForm(prod) {
               <label>macOS install cmd<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
             </div>
             <label>macOS uninstall cmd<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
+            <div class="lic-form-row">
+              <label>Plug-in / folder path — Windows <span class="muted small">(for apps NOT in the uninstall list, e.g. AE plug-ins; glob ok)</span>
+                <input id="cp-pwin" placeholder="C:\\Program Files\\Adobe\\Common\\Plug-ins\\*\\MediaCore\\**\\Saber*" value="${v('detect_path_win')}"></label>
+              <label>Plug-in / folder path — macOS
+                <input id="cp-pmac" placeholder="/Library/Application Support/Adobe/Common/Plug-ins/*/MediaCore/**/Saber*" value="${v('detect_path_mac')}"></label>
+            </div>
             <label>Icon URL <span class="muted small">(auto-set from the website; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
           </div>
         </details>
@@ -1670,7 +1676,7 @@ function customProductForm(prod) {
         check_url: g('cp-curl'), check_regex: g('cp-cre'), latest_version: g('cp-ver'),
         source_url_win: g('cp-swin'), install_cmd_win: g('cp-cwin'), uninstall_cmd_win: g('cp-uwin'),
         source_url_mac: g('cp-smac'), install_cmd_mac: g('cp-cmac'), uninstall_cmd_mac: g('cp-umac'),
-        icon_url: g('cp-icon') });
+        detect_path_win: g('cp-pwin'), detect_path_mac: g('cp-pmac'), icon_url: g('cp-icon') });
     });
     $('cp-name').focus();
   });
