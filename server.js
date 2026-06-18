@@ -1696,20 +1696,27 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/products/inspect') {
       const b = await readBody(req);
       const url = String(b.url || '').trim();
-      let domain = '';
-      try { domain = new URL(url).hostname.replace(/^www\./, ''); } catch { return sendJson(res, 400, { error: 'enter a valid URL (https://…)' }); }
-      const out = { icon_url: domain ? `https://icons.duckduckgo.com/ip3/${domain}.ico` : null,
-        source_url_win: null, source_url_mac: null, check_url: null, version: null };
+      let u;
+      try { u = new URL(url); } catch { return sendJson(res, 400, { error: 'enter a valid URL (https://…)' }); }
+      const domain = u.hostname.replace(/^www\./, '');
+      const label = (domain.split('.')[0] || '').trim();
+      const out = { icon_url: `https://icons.duckduckgo.com/ip3/${domain}.ico`,
+        name: label ? label.charAt(0).toUpperCase() + label.slice(1) : null,
+        source_url_win: null, source_url_mac: null, check_url: null,
+        version: null,        // only set when RELIABLE (from an installer filename)
+        version_guess: null }; // a best-effort scrape from a page — shown as a suggestion, not auto-filled
       const fn = filenameFromUrl(url);
       if (/\.(exe|msi|dmg|pkg|zip|7z)$/i.test(fn)) {                 // URL is a direct installer
         if (/\.(dmg|pkg)$/i.test(fn)) out.source_url_mac = url; else out.source_url_win = url;
-        out.version = versionFromFilename(fn);
+        out.version = versionFromFilename(fn);                       // reliable: it's in the filename
       } else {                                                       // URL is a page → version-check source
         out.check_url = url;
         try {
           const txt = await httpGetText(url);
-          out.version = (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
-        } catch { /* leave version null — user fills it */ }
+          const tm = txt.match(/<title[^>]*>([^<]{2,80})<\/title>/i);  // a nicer name from the page title
+          if (tm) { const t = tm[1].split(/[|\-–·»:]/)[0].trim(); if (t.length >= 2) out.name = t; }
+          out.version_guess = (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
+        } catch { /* leave it — user can fill manually */ }
       }
       return sendJson(res, 200, out);
     }

@@ -1645,17 +1645,17 @@ function customProductForm(prod) {
         const r = await api('POST', '/api/products/inspect', { url });
         const got = [];
         if (r.icon_url) { $('cp-icon').value = r.icon_url; $('cp-iconprev').innerHTML = `<img src="${esc(r.icon_url)}" onerror="this.remove()">`; got.push('icon'); }
-        if (r.version) { $('cp-ver').value = r.version; got.push('version ' + r.version); }
+        if (r.name && !$('cp-name').value.trim()) $('cp-name').value = r.name;          // suggest a name
+        if (r.version) { $('cp-ver').value = r.version; got.push('version ' + r.version); } // reliable only
         if (r.check_url && !$('cp-curl').value) $('cp-curl').value = r.check_url;
         if (r.source_url_win && !$('cp-swin').value) { $('cp-swin').value = r.source_url_win; got.push('Windows installer'); }
         if (r.source_url_mac && !$('cp-smac').value) { $('cp-smac').value = r.source_url_mac; got.push('macOS installer'); }
-        if (!$('cp-pat').value && $('cp-name').value.trim()) $('cp-pat').value = $('cp-name').value.trim().toLowerCase();
-        const missing = [];
-        if (!$('cp-ver').value && !$('cp-curl').value) missing.push('version (or a check URL)');
-        if (!$('cp-swin').value && !$('cp-smac').value) missing.push('an installer link + command');
-        $('cp-fillnote').innerHTML = `${icon('check')} Found: ${got.join(', ') || 'icon'}.` + (missing.length ? ` Add in Advanced: ${esc(missing.join(', '))}.` : ' Looks complete.');
-        if (missing.length) ov.querySelector('.cp-adv').open = true;
-      } catch (e) { $('cp-fillnote').textContent = 'Auto-fill failed: ' + e.message + ' — fill it in Advanced.'; ov.querySelector('.cp-adv').open = true; }
+        // Honest, calm note — tracking is ready; only mention extras as optional. Never auto-open Advanced.
+        let note = `${icon('check')} Got the ${got.join(' + ') || 'icon'} — tracking's ready, just click Add.`;
+        if (r.version_guess && !$('cp-ver').value) note += ` (The page mentions <b>${esc(r.version_guess)}</b> — if that's the version, add it in Advanced.)`;
+        if (!$('cp-swin').value && !$('cp-smac').value) note += ` To also auto-update it, add an installer under Advanced.`;
+        $('cp-fillnote').innerHTML = note;
+      } catch (e) { $('cp-fillnote').textContent = 'Couldn’t auto-fill from that link — you can still type the details under Advanced.'; }
       btn.disabled = false; btn.textContent = 'Auto-fill';
     });
 
