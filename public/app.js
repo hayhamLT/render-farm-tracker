@@ -1727,7 +1727,7 @@ function renderCatalog() {
             <input type="checkbox" onchange="toggleDashboardVisible('${p.key}', this.checked)" ${p.dashboard_hidden ? '' : 'checked'}>
             <span class="switch-track"><span class="switch-thumb"></span></span>
           </label></td>
-      <td><span class="prod-name">${tileLogo(p.key, 'xs')}${esc(p.name)}${p.custom ? ' <span class="cat-custom">custom</span>' : ''}</span>${p.custom && p.detect_pattern ? `<div class="hint small" style="margin:2px 0 0">detects: <code>${esc(p.detect_pattern)}</code></div>` : ''}</td>
+      <td><span class="prod-name">${tileLogo(p.key, 'xs')}${esc(p.name)}</span></td>
       <td>${(p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac)
         ? `<span class="ver-os" title="This app ships different versions on Windows and macOS"><b>Win</b> ${esc(p.latest_win)} &nbsp;·&nbsp; <b>Mac</b> ${esc(p.latest_mac)}</span>`
         : (p.latest_version ? esc(p.latest_version) : '<span class="hint">auto-detected</span>')}</td>
