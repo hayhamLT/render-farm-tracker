@@ -15,6 +15,7 @@ const { execFile } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
+const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
 
 // In-memory progress for server-side installer downloads (URL -> cache file).
 // id -> { url, filename, status, received, total, error }
@@ -1284,6 +1285,7 @@ function fullState() {
     downloadDir: downloadDir(),
     downloadDirPlugins: config.downloadDirPlugins || '',
     downloadDirScripts: config.downloadDirScripts || '',
+    lastBackup: lastBackup(),   // {db, config, size, at} of the most recent DB snapshot, or null
     installerSources: [...new Set([config.downloadDir, '/Volumes/THIS-server/INSTALLERS', INSTALLERS_DIR, ...config.installerSources].filter(Boolean))],
     nodes,
     products,
@@ -1655,6 +1657,15 @@ const server = http.createServer(async (req, res) => {
 
     // Rollout concurrency: how many machines download/install at the same time.
     // Manual "Check now": run the Maxon release-notes detect + installer auto-fetch on demand.
+    // Back up the database + config on demand (also runs at startup + nightly).
+    if (req.method === 'POST' && p === '/api/backup') {
+      try { return sendJson(res, 200, { ok: true, backup: backupNow(config) }); }
+      catch (e) { return sendJson(res, 500, { error: e.message }); }
+    }
+    if (req.method === 'GET' && p === '/api/backups') {
+      return sendJson(res, 200, { backups: listBackups(config), last: lastBackup() });
+    }
+
     if (req.method === 'POST' && p === '/api/check-maxon') {
       try {
         const bumped = await checkMaxonVersions(db, logEvent, config);
@@ -2216,4 +2227,6 @@ server.listen(LISTEN_PORT, () => {
   console.log(`  Dashboard : http://localhost:${LISTEN_PORT}`);
   console.log(`  Agent key : ${config.agentKey}`);
   console.log(`  Installers: ${INSTALLERS_DIR}`);
+  // Automated DB + config backups (one now, then nightly) — see lib/backup.js.
+  scheduleBackups(config);
 });

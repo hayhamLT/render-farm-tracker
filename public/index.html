@@ -73,6 +73,7 @@
         <div class="panel fleet-panel" id="fleet-os"></div>
         <div class="panel fleet-panel" id="fleet-drivers"></div>
         <div class="panel fleet-panel" id="fleet-alerts"></div>
+        <div class="panel fleet-panel" id="fleet-backup"></div>
       </aside>
     </div>
   </section>
@@ -476,6 +477,9 @@
         <p class="hint">The tracker double-checks every install, so it flags one that didn't actually change. Usually it's Redshift bundled inside Cinema 4D — update Cinema 4D instead.</p></details>
       <details class="qa"><summary>An install is stuck or taking too long</summary>
         <p class="hint">In <b>Updates</b>, press ✕ on its progress bar to stop it. Stuck jobs also clear themselves after 45 minutes.</p></details>
+      <details class="qa"><summary>The database got corrupted / how do I restore a backup</summary>
+        <p class="hint">The tracker backs up its database (and config) <b>automatically — once at startup and nightly</b> — to <code>~/tracker-backups</code> (kept <b>outside</b> the project folder on purpose, and the newest 14 are retained). You can also hit <b>Back up now</b> on the Fleet tab anytime.</p>
+        <p class="hint">To roll back, run <code>./restore-db.sh</code> in the project folder (restores the newest snapshot; pass a path to pick a specific one). It stops the server, keeps a copy of the current DB, swaps in the backup, and restarts. The fleet re-reports itself within a minute either way, so a restore is low-stakes.</p></details>
     </div>
     </div><!-- /sub-trouble -->
   </section>

@@ -562,7 +562,7 @@ function renderFleet() {
   if (!nodes.length) {
     document.getElementById('fleet-kpis').innerHTML = '';
     document.getElementById('fleet-table').innerHTML = '<div class="empty">No machines enrolled yet.</div>';
-    ['fleet-beacon', 'fleet-os', 'fleet-drivers', 'fleet-alerts'].forEach((id) => { document.getElementById(id).innerHTML = ''; });
+    ['fleet-beacon', 'fleet-os', 'fleet-drivers', 'fleet-alerts', 'fleet-backup'].forEach((id) => { document.getElementById(id).innerHTML = ''; });
     return;
   }
   const acts = nodes.map((n) => ({ n, a: nodeActivity(n) }));
@@ -673,6 +673,26 @@ function renderFleet() {
     : `<div class="all-clear">${icon('check')} All systems healthy</div>`;
   document.getElementById('fleet-alerts').innerHTML =
     `<h2>${icon('alert')} Alerts${items.length ? ` <span class="cnt">${items.length}</span>` : ''}</h2><div class="alerts">${aBody}</div>`;
+
+  // ---- Backups: when the DB was last snapshotted, + a manual trigger ----
+  const lb = state.lastBackup;
+  const bInfo = lb
+    ? `<div class="dist"><span class="dist-k"><span class="ok">${icon('check')}</span> Last backup</span><span class="dist-v">${ago(lb.at)}</span></div>
+       <div class="muted small" style="margin-top:4px">${Math.round((lb.size || 0) / 1024)} KB · auto nightly · kept outside the repo</div>`
+    : `<div class="muted small">No backup yet this session.</div>`;
+  document.getElementById('fleet-backup').innerHTML =
+    `<h2>${icon('server')} Backups</h2>${bInfo}
+     <button class="btn-soft" style="margin-top:10px" onclick="backupNow(this)"><span data-ic="download"></span> Back up now</button>`;
+  document.querySelectorAll('#fleet-backup [data-ic]').forEach((el) => { el.innerHTML = icon(el.dataset.ic); });
+}
+
+async function backupNow(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    await api('POST', '/api/backup');
+    toast('Database backed up', 'ok');
+    refresh();
+  } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; }
 }
 
 async function quickUpdate(nodeId, packageId, btn) {
