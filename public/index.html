@@ -280,6 +280,7 @@
     <div class="help-subnav" id="help-subnav">
       <button data-sub="start" class="active"><span data-ic="server"></span>Getting started</button>
       <button data-sub="updates"><span data-ic="download"></span>How updates work</button>
+      <button data-sub="custom"><span data-ic="package"></span>Your own apps &amp; scripts</button>
       <button data-sub="gpu"><span data-ic="activity"></span>GPU drivers</button>
       <button data-sub="adobe"><span data-ic="refresh"></span>Adobe &amp; After Effects</button>
       <button data-sub="badges"><span data-ic="check"></span>Badges &amp; status</button>
@@ -367,6 +368,34 @@
       </div>
     </div>
     </div><!-- /sub-updates -->
+
+    <!-- ───────────── YOUR OWN APPS & SCRIPTS ───────────── -->
+    <div class="help-sub" id="sub-custom">
+    <div class="panel">
+      <h2>Track &amp; update your own apps and scripts</h2>
+      <p class="hint">Beyond the built-in apps, the <b>Catalog</b> lets you add anything else on the farm and
+        install, update or remove it from the <b>Updates</b> tab — just like the built-ins. The Catalog has
+        two tabs: <b>Apps</b> and <b>Scripts</b>, each with its own installer download folder.</p>
+      <div class="how-grid">
+        <div class="how-card"><span data-ic="package"></span><b>Add an app</b>
+          <p class="hint">Catalog → <b>Apps</b> → <b>Add</b>. Type a name and paste the app's website or installer link, then <b>Auto-fill</b> grabs the icon, version and installer. Works on Windows &amp; macOS.</p></div>
+        <div class="how-card"><span data-ic="file"></span><b>Add an AE script</b>
+          <p class="hint">Catalog → <b>Scripts</b> → <b>Add</b>. Point it at a <code>.jsx</code>/<code>.jsxbin</code>; it copies into After Effects' <i>ScriptUI&nbsp;Panels</i> on every machine. Set an uninstall command to allow removing it.</p></div>
+        <div class="how-card"><span data-ic="download"></span><b>Auto everything</b>
+          <p class="hint">With an installer link + a silent install command, the server downloads it once and rolls it out; turn on <b>Auto-deploy</b> to keep it current by itself.</p></div>
+        <div class="how-card"><span data-ic="check"></span><b>Install / uninstall</b>
+          <p class="hint">Custom apps and scripts appear in the <b>Updates</b> tab and on the dashboard, and can be pushed or removed across the fleet like any built-in.</p></div>
+      </div>
+      <details class="qa"><summary>Auto-fill couldn't read a site (e.g. aescripts.com)</summary>
+        <p class="hint">Some stores sit behind login or bot protection, so the server can't read the page. Type the
+          name and version yourself — the icon still loads from the site — then download the file with your
+          account and drop it in the Catalog's download folder for that tab.</p></details>
+      <details class="qa"><summary>It didn't find my installer / picked the wrong one</summary>
+        <p class="hint">Give the product a name that appears in the installer's filename (e.g. an app called
+          <b>VLC</b> matches <code>vlc-3.0.23-win64.exe</code>), and keep one installer per OS in the download
+          folder. A version in the filename lets the tracker confirm it's the right build.</p></details>
+    </div>
+    </div><!-- /sub-custom -->
 
     <!-- ───────────── GPU DRIVERS ───────────── -->
     <div class="help-sub" id="sub-gpu">

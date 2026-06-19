@@ -1748,7 +1748,9 @@ const server = http.createServer(async (req, res) => {
       try { u = new URL(url); } catch { return sendJson(res, 400, { error: 'enter a valid URL (https://…)' }); }
       const domain = u.hostname.replace(/^www\./, '');
       const label = (domain.split('.')[0] || '').trim();
-      const out = { icon_url: `https://icons.duckduckgo.com/ip3/${domain}.ico`,
+      // Google's favicon service is far more reliable than DuckDuckGo's (which 404s on many
+      // domains, e.g. videolan.org) and returns a real PNG even for Cloudflare-fronted sites.
+      const out = { icon_url: `https://www.google.com/s2/favicons?sz=64&domain=${domain}`,
         name: label ? label.charAt(0).toUpperCase() + label.slice(1) : null,
         source_url_win: null, source_url_mac: null, check_url: null,
         version: null,        // only set when RELIABLE (from an installer filename)
@@ -1771,8 +1773,15 @@ const server = http.createServer(async (req, res) => {
           const ogTitle = meta('og:title', 'property') || meta('twitter:title', 'name');
           const ogImage = meta('og:image', 'property') || meta('twitter:image', 'name');
           if (ogTitle) out.name = ogTitle.split(/\s+[|–-]\s+/)[0].trim() || out.name;
-          else { const tm = txt.match(/<title[^>]*>([^<]{2,90})<\/title>/i); if (tm) { const t = tm[1].split(/[|\-–·»:]/)[0].trim(); if (t.length >= 2) out.name = t; } }
-          if (ogImage) { try { out.icon_url = new URL(ogImage, url).href; } catch { /* keep favicon */ } }
+          else { const tm = txt.match(/<title[^>]*>([^<]{2,90})<\/title>/i); if (tm) { const t = tm[1].split(/[|\-–·»:]/)[0].trim(); if (t.length >= 2 && t.length <= 40) out.name = t; } }
+          // Icon preference: og:image (product art) → the page's own <link rel="icon"> →
+          // the Google favicon default set above.
+          let pageIcon = ogImage;
+          if (!pageIcon) {
+            const linkTags = txt.match(/<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]*>/gi) || [];
+            for (const lt of linkTags) { const h = lt.match(/href=["']([^"']+)["']/i); if (h) { pageIcon = h[1]; break; } }
+          }
+          if (pageIcon) { try { out.icon_url = new URL(pageIcon, url).href; } catch { /* keep favicon */ } }
           // Version: prefer an explicit "current version 1.4.0", else the highest token on the page.
           const cv = txt.match(/current\s+version[^0-9]{0,14}v?(\d+(?:\.\d+){1,3})/i)
             || txt.match(/\bversion[^0-9]{0,8}v?(\d+(?:\.\d+){1,3})/i);
