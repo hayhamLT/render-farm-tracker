@@ -468,7 +468,8 @@
           <li>Disable <b>ErP</b> / <b>EuP</b> (deep power-saving) — it cuts standby power to the network card when off, which blocks wake.</li>
           <li>Make sure the <b>plugged-in</b> network port is the one with WoL enabled (machines with two NICs report several).</li>
         </ul>
-        <p class="hint" style="margin-top:6px">This is a one-time, per-machine step. Tip: <b>sleep</b> idle machines instead of shutting them down and the Wake button works without touching the BIOS.</p></details>
+        <p class="hint" style="margin-top:6px">This is a one-time, per-machine step. Tip: <b>sleep</b> idle machines instead of shutting them down and the Wake button works without touching the BIOS.</p>
+        <p class="hint" style="margin-top:6px"><b>Macs are different:</b> a Mac <b>cannot</b> be powered on from a full shutdown by Wake-on-LAN — Apple only supports waking from <b>Sleep</b>, over <b>wired Ethernet</b>, with <i>System Settings → Energy → “Wake for network access”</i> on. So always <b>Sleep</b> a Mac node (never Shut Down) if you want to wake it remotely; a shut-down Mac must be powered on at the machine.</p></details>
       <details class="qa"><summary>A machine is online but updates never run on it</summary>
         <p class="hint">The agent is stuck. It usually fixes itself; to fix it now, click the <b>⏻ Restart</b> button on its card. (A restart interrupts any render on that machine.)</p></details>
       <details class="qa"><summary>A machine never appears on the dashboard</summary>
