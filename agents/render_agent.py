@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.24.0"
+AGENT_VERSION = "2.25.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1125,8 +1125,28 @@ def run_job(server, job):
             # proof (e.g. a downloader that doesn't install would exit 0 too).
             after_ver = _installed_version(job["product_key"])
             target = job.get("version") or ""
+            # Presence: does the product's detect-path now match a file on disk? Scripts and
+            # some plug-ins carry no readable version, so presence (not a version bump) is the proof.
+            present_after = job["product_key"] in detect_custom_paths()
+
+            # Uninstall jobs (packaged with version "uninstall") succeed when the product is
+            # GONE — no installed version AND no detect-path match. The version-change checks
+            # below are for installs only and would wrongly fail a successful removal.
+            if target == "uninstall":
+                if not after_ver and not present_after:
+                    server.report(job_id, "success", "Uninstalled — no longer present on the node.\n%s" % tail)
+                    print("  ✓ uninstalled")
+                else:
+                    server.report(job_id, "failed",
+                                  "Uninstall ran (exit 0) but the product is still present (%s).\n%s"
+                                  % (after_ver or "files remain", tail))
+                    print("  ✗ still present after uninstall")
+                return
+
             changed = after_ver and after_ver != before_ver
             reached = after_ver and target and _version_tuple(after_ver) >= _version_tuple(target)
+            # A version-less product (script / some plug-ins): exit 0 + now present on disk = installed.
+            presence_ok = (not after_ver) and present_after
             # Some installs don't reflect the new version during the job:
             #  • NVIDIA driver — installed with -noreboot, so nvidia-smi keeps reporting
             #    the OLD version until the machine reboots. Exit 0 IS the install proof.
@@ -1140,10 +1160,12 @@ def run_job(server, job):
             rum_noop = ("no new applicable updates" in tl
                         or "all products are up-to-date" in tl
                         or "all products are up to date" in tl)
-            if changed or reached or reboot_deferred or job["product_key"] == "creativecloud":
+            if changed or reached or presence_ok or reboot_deferred or job["product_key"] == "creativecloud":
                 if reboot_deferred and not (changed or reached):
                     note = ("Installed (target %s) — takes effect after reboot; nvidia-smi "
                             "still reports %s until then.\n%s" % (target, after_ver, tail))
+                elif presence_ok and not (changed or reached):
+                    note = "Installed (no version to read) — now present on the node.\n%s" % tail
                 else:
                     note = "Installed: %s -> %s\n%s" % (before_ver, after_ver, tail)
                 server.report(job_id, "success", note)

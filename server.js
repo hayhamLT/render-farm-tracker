@@ -788,8 +788,11 @@ function findStagedInstaller(productKey, os, version, files) {
   const osOk = (name) => /\.(jsx|jsxbin|zip)$/i.test(name) || (os === 'windows'
     ? /win|x64|\.exe$|\.msi$/i.test(name)
     : /mac|osx|darwin|\.dmg$|\.pkg$/i.test(name));
+  // Match keywords against the filename WITHOUT its extension, so a name-keyword like "zip"
+  // (from "7-Zip") never matches an unrelated file's ".zip" extension.
+  const stem = (n) => n.replace(/\.[a-z0-9]{1,6}$/i, '');
   const matches = (files || listInstallerFiles()).filter((f) =>
-    kws.some((re) => re.test(f.name)) && osOk(f.name));
+    kws.some((re) => re.test(stem(f.name))) && osOk(f.name));
   if (!matches.length) return null;
   // Prefer an exact version match, else newest-looking by version digits in name.
   const verDigits = (s) => (String(s).match(/\d+/g) || []).map(Number);
