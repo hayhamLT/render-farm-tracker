@@ -30,14 +30,7 @@ const ICONS = {
   shieldOk: '<path d="M12 2.5l8 3v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10v-6z"/><path d="M8.5 12l2.3 2.3 4.7-4.8"/>',
   shieldOff: '<path d="M12 2.5l8 3v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10v-6z"/><path d="M12 8.5v4M12 15.5h.01"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.4 9.3a2.7 2.7 0 1 1 3.8 2.5c-.8.4-1.2 1-1.2 1.9M12 17h.01"/>',
-  // Universal power/restart symbol — makes it unmistakable the machine will be rebooted.
-  power: '<path d="M12 3v8"/><path d="M6.8 6.2a8 8 0 1 0 10.4 0"/>',
-  // Beacon — the monitoring agent's mark: a node broadcasting its status home.
-  beacon: '<circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.8 5.8a9 9 0 0 0 0 12.4M18.2 5.8a9 9 0 0 1 0 12.4"/>',
 };
-// The monitoring agent's product name, shown across the UI (display-only; the on-machine
-// service/task keeps its internal name so nothing needs re-enrolling).
-const AGENT_NAME = 'Beacon';
 function icon(name, cls = '') {
   return `<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 }
@@ -93,49 +86,8 @@ function uiConfirm(message, opts = {}) {
   });
 }
 const osIcon = (os) => icon(os === 'windows' ? 'windows' : 'apple', 'os');
-// The OS marketing version as a short number for the corner badge: Windows 11 vs 10
-// (decided by build number — 22000+ is 11), or the macOS major (e.g. 15). Agent reports
-// os_version like "Windows 10.0.22631" / "macOS 15.4".
-function osVerShort(n) {
-  const v = n.os_version || '';
-  if (n.os === 'windows') {
-    const m = v.match(/10\.0\.(\d+)/);                 // Windows <major>.0.<build>
-    if (m) return Number(m[1]) >= 22000 ? '11' : '10';
-    const f = v.match(/\b(11|10)\b/);                  // already-friendly fallback
-    return f ? f[1] : '';
-  }
-  const m = v.match(/(\d+)(?:\.\d+)*/);                 // macOS major
-  return m ? m[1] : '';
-}
-// Machine status shown AS the OS icon — green when online, red when offline — with a
-// small OS-version number tucked into the icon's corner.
-const osStatus = (n) => {
-  const vs = osVerShort(n);
-  const full = n.os_version || (n.os === 'windows' ? 'Windows' : 'macOS');
-  return `<span class="os-status ${n.online ? 'on' : 'off'}" title="${esc(full)} · ${n.online ? 'online' : 'offline'}">${osIcon(n.os)}${vs ? `<span class="os-ver">${vs}</span>` : ''}</span>`;
-};
-
-// Most common GPU driver across nodes that report one — used to flag drift.
-function fleetDriver(nodes) {
-  const c = {};
-  nodes.forEach((n) => { if (n.gpu_driver) c[n.gpu_driver] = (c[n.gpu_driver] || 0) + 1; });
-  const top = Object.entries(c).sort((a, b) => b[1] - a[1])[0];
-  return top ? top[0] : null;
-}
-// Compact machine-health line for a node card (GPU driver, free disk, pending reboot).
-function healthLine(n, driverMode) {
-  const b = [];
-  if (n.gpu_driver) {
-    const branch = (v) => String(v).split('.')[0];   // NVIDIA driver branch (e.g. 591) — ignore minor builds
-    const drift = driverMode && branch(n.gpu_driver) !== branch(driverMode);
-    b.push(`<span class="hl${drift ? ' drift' : ''}" title="GPU driver${n.gpu ? ' — ' + esc(n.gpu) : ''}${drift ? ` · on a different driver branch than most of the fleet (${esc(driverMode)})` : ''}">${icon('cog')}${esc(n.gpu_driver)}</span>`);
-  }
-  if (n.disk_free_gb != null) {
-    b.push(`<span class="hl${n.disk_free_gb < 20 ? ' low' : ''}" title="Free space on the system drive">${icon('server')}${esc(n.disk_free_gb)} GB</span>`);
-  }
-  if (n.pending_reboot) b.push(`<span class="hl warnchip" title="Windows reports a reboot is pending">${icon('alert')}reboot pending</span>`);
-  return b.length ? `<div class="node-health">${b.join('')}</div>` : '';
-}
+// Machine status shown AS the OS icon — green when online, red when offline.
+const osStatus = (n) => `<span class="os-status ${n.online ? 'on' : 'off'}" title="${n.os === 'windows' ? 'Windows' : 'macOS'} · ${n.online ? 'online' : 'offline'}">${osIcon(n.os)}</span>`;
 
 const PRODUCT_NAMES = {}; // filled from state
 let state = null;
@@ -149,31 +101,6 @@ document.querySelectorAll('nav button').forEach((btn) => {
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
   });
 });
-
-// Help sub-tabs (segmented nav within the Help tab)
-document.querySelectorAll('#help-subnav button[data-sub]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#help-subnav button').forEach((b) => b.classList.toggle('active', b === btn));
-    const id = 'sub-' + btn.dataset.sub;
-    document.querySelectorAll('#tab-setup .help-sub').forEach((s) => s.classList.toggle('active', s.id === id));
-    document.getElementById('tab-setup').scrollTo({ top: 0, behavior: 'smooth' });
-  });
-});
-
-// Fleet tab — live filter box.
-{
-  const fs = document.getElementById('fleet-search');
-  if (fs) fs.addEventListener('input', (e) => { fleetSearch = e.target.value; if (state) renderFleet(); });
-}
-
-// Live count-up timers in the Activity table — tick each running job's elapsed time every
-// second (the row's frozen value is rendered on refresh once it finishes).
-setInterval(() => {
-  document.querySelectorAll('#job-table [data-timer]').forEach((el) => {
-    const start = Number(el.dataset.timer);
-    if (start) el.textContent = fmtTook(Date.now() - start);
-  });
-}, 1000);
 
 // --------------------------------------------------------------- helpers ---
 function esc(s) {
@@ -217,20 +144,6 @@ const SELF_UPDATING = new Set(['creativecloud']);
 // auto-deploy toggle (shown as "self-managed"), but they DO have a Track toggle like
 // everything else (default off). Their version logic still runs regardless server-side.
 const SELF_MANAGED = new Set(['creativecloud', 'maxonapp']);
-// Products that only exist on one OS — the NVIDIA GeForce driver is Windows-only (the
-// farm's NVIDIA cards are on Windows nodes; Macs are Apple Silicon). On the other OS the
-// product is "n/a", never "missing", so those nodes are never flagged or targeted.
-const WINDOWS_ONLY = new Set(['nvidia']);
-const appliesToOS = (p, os) => !(WINDOWS_ONLY.has(p.key) && os !== 'windows');
-// GPUs NVIDIA dropped from the current Studio/Game Ready driver branch (590+/610.x):
-// Maxwell (GTX 9xx) and Pascal (GTX 10xx). The 610.62 installer refuses to install on
-// them (exit 0xE6000100 / 3858759936); their last supported driver is the ~581 branch.
-// Such nodes are at their hardware max — never flag them "behind 610.62" or target them.
-const NVIDIA_EOL_GPU = /\bGTX\s*(9\d\d|10\d\d)\b/i;
-const nvidiaLegacy = (node) => NVIDIA_EOL_GPU.test(node.gpu || '');
-// The newest driver a node's GPU supports: legacy (Maxwell/Pascal) → the ~581 track
-// (product.latest_legacy), everything else → the current 610.x track.
-const nvidiaTarget = (node, product) => (nvidiaLegacy(node) ? product.latest_legacy : latestForOS(product, node.os));
 // An app is hidden from the dashboard when its Track toggle is off (dashboard_hidden=1 =
 // not tracked: no dashboard/count/wizard/updates).
 const isHidden = (p) => !!p && p.dashboard_hidden === 1;
@@ -241,7 +154,6 @@ const latestForOS = (p, os) => (os === 'windows' ? p.latest_win : p.latest_mac) 
 // major (older major — opt-in side-by-side) | missing | unknown.
 function productStatus(node, product) {
   const sw = node.software.find((s) => s.product_key === product.key);
-  if (!appliesToOS(product, node.os)) return { status: 'na', version: sw ? sw.version : null };
   if (SELF_UPDATING.has(product.key)) {
     // Adobe-managed: show ✓ once it's reached the newest version we've seen, else ↻.
     if (!sw || !sw.version) return { status: 'selfupdate', version: sw ? sw.version : null };
@@ -249,20 +161,12 @@ function productStatus(node, product) {
       return { status: 'uptodate', version: sw.version };
     return { status: 'selfupdate', version: sw.version };
   }
-  if (!sw) {
-    // The NVIDIA driver is only "missing" on a node that actually has an NVIDIA GPU; a
-    // GPU-less / AMD Windows box has no driver to track → n/a, not a false install target.
-    if (product.key === 'nvidia' && !/nvidia/i.test(node.gpu || '')) return { status: 'na', version: null };
-    return { status: 'missing', version: null };
-  }
-  // NVIDIA targets the newest driver THIS GPU supports (legacy cards → 581.x track).
-  const latest = product.key === 'nvidia' ? nvidiaTarget(node, product) : latestForOS(product, node.os);
+  if (!sw) return { status: 'missing', version: null };
+  const latest = latestForOS(product, node.os);   // per-OS (NotchLC differs win vs mac)
   if (!latest) return { status: 'unknown', version: sw.version };
   if (!sw.version) return { status: 'unknown', version: null };
   if (cmpVersion(sw.version, latest) >= 0) return { status: 'uptodate', version: sw.version };
-  // A GPU-driver update is always an in-place replacement (never a side-by-side "new
-  // major"), even though its leading number bumps most releases — classify it as a patch.
-  const kind = (product.key === 'nvidia' || verMajor(sw.version) === verMajor(latest)) ? 'patch' : 'major';
+  const kind = verMajor(sw.version) === verMajor(latest) ? 'patch' : 'major';
   return { status: kind, version: sw.version };
 }
 
@@ -278,7 +182,7 @@ async function api(method, url, body) {
 }
 
 // ------------------------------------------------------------- dashboard ---
-const BADGE_LABEL = { uptodate: 'up to date', patch: 'update available', major: 'new major available', missing: 'not installed', selfupdate: 'self-updating (Adobe-managed)', na: 'n/a', eol: 'GPU at max (driver EOL)', unknown: '?' };
+const BADGE_LABEL = { uptodate: 'up to date', patch: 'update available', major: 'new major available', missing: 'not installed', selfupdate: 'self-updating (Adobe-managed)', unknown: '?' };
 
 const filters = { search: '', os: '', status: '', product: '', sort: 'hostname', view: 'grid' };
 
@@ -291,10 +195,8 @@ function newestPackage(productKey, os) {
 }
 
 function nodeOutdatedCount(n) {
-  // Count apps that still NEED queuing — a machine already queued/installing shows as
-  // "updating" (its card shows the live progress chip), so it isn't counted as outdated.
   return state.products.reduce((c, p) =>
-    c + (!isHidden(p) && ['patch', 'major'].includes(productStatus(n, p).status) && !jobActiveFor(n, p.key) ? 1 : 0), 0);
+    c + (!isHidden(p) && ['patch', 'major'].includes(productStatus(n, p).status) ? 1 : 0), 0);
 }
 
 function visibleNodes() {
@@ -331,8 +233,6 @@ const PROG_LABEL = {
 // The words live in tooltips; the blue button REPLACES the outdated badge.
 function productCell(n, p) {
   const st = productStatus(n, p);
-  // The version this node is heading to (NVIDIA: the driver track its GPU supports).
-  const tgt = p.key === 'nvidia' ? nvidiaTarget(n, p) : p.latest_version;
   // An active job for this node+product replaces everything with a live chip.
   const job = state.jobs.find((j) => j.hostname === n.hostname && j.product_key === p.key
     && ['pending', 'downloading', 'installing'].includes(j.status));
@@ -349,13 +249,13 @@ function productCell(n, p) {
     const pkg = newestPackage(p.key, n.os);
     chip = (pkg && cmpVersion(pkg.version, st.version || '0') > 0)
       ? `<button class="upd-btn icon" onclick="quickUpdate(${n.id},${pkg.id},this)"
-          title="Update ${esc(p.name)} ${esc(st.version)} → ${esc(tgt)} on ${esc(n.hostname)}">${icon('up')}</button>`
+          title="Update ${esc(p.name)} ${esc(st.version)} → ${esc(p.latest_version)} on ${esc(n.hostname)}">${icon('up')}</button>`
       : `<span class="badge icon patch clickable" onclick="gotoUpdate('${p.key}','${n.os}',${n.id})"
-          title="Update available (${esc(st.version)} → ${esc(tgt)}) — click to update ${esc(p.name)} on ${esc(n.hostname)}">${icon('up')}</span>`;
+          title="Update available (${esc(st.version)} → ${esc(p.latest_version)}) — click to update ${esc(p.name)} on ${esc(n.hostname)}">${icon('up')}</span>`;
   } else if (st.status === 'major') {
     // Older major — opt-in side-by-side install, not an in-place patch.
     chip = `<span class="badge icon major clickable" onclick="gotoUpdate('${p.key}','${n.os}',${n.id},true)"
-      title="New major available (${esc(st.version)} → ${esc(tgt)}) — opt-in side-by-side install, ${esc(p.name)} on ${esc(n.hostname)}">${icon('up')}</span>`;
+      title="New major available (${esc(st.version)} → ${esc(p.latest_version)}) — opt-in side-by-side install, ${esc(p.name)} on ${esc(n.hostname)}">${icon('up')}</span>`;
   } else if (st.status === 'missing') {
     chip = `<span class="badge icon missing clickable" onclick="gotoUpdate('${p.key}','${n.os}',${n.id},true)"
       title="${esc(p.name)} not installed — click to install on ${esc(n.hostname)}">${icon('x')}</span>`;
@@ -363,10 +263,6 @@ function productCell(n, p) {
     chip = `<span class="badge icon selfupd" title="${esc(p.name)} ${esc(st.version || '')} — Adobe keeps this updated automatically; not managed here">${icon('refresh')}</span>`;
   } else if (st.status === 'uptodate') {
     chip = `<span class="badge icon uptodate" title="Up to date">${icon('check')}</span>`;
-  } else if (st.status === 'na') {
-    chip = `<span class="badge icon na" title="${esc(p.name)} — not applicable on ${n.os === 'macos' ? 'macOS (Apple Silicon, no NVIDIA)' : esc(n.os)}">–</span>`;
-  } else if (st.status === 'eol') {
-    chip = `<span class="badge icon na" title="${esc(n.gpu || 'This GPU')} is too old for ${esc(p.latest_version || 'the latest driver')} — NVIDIA dropped support. ${esc(st.version || 'Its current driver')} is the newest it can run; it won't be updated.">${icon('check')}</span>`;
   } else {
     chip = `<span class="badge icon unknown" title="No latest version known yet">${icon('help')}</span>`;
   }
@@ -488,7 +384,7 @@ function renderDashboard() {
         ${vis.map((p) => { const { st, chip, prog } = productCell(n, p);
           return `<td><div class="prod-cell">${esc(st.version || '—')} ${prog || chip}</div></td>`;
         }).join('')}
-        <td class="node-actions">${nodeActionBtn(n)}</td>
+        <td class="node-actions"><button class="node-reboot" title="Reboot ${esc(n.hostname)} (via Deadline — interrupts any active render)" onclick="rebootNode(${n.id})">${icon('refresh')}</button></td>
       </tr>`).join('')}
     </table>`;
     return;
@@ -502,7 +398,7 @@ function renderDashboard() {
         ${osStatus(n)}
         <span class="name">${esc(n.hostname)}</span>
         ${elevBadge(n)}
-        ${nodeActionBtn(n)}
+        <button class="node-reboot" title="Reboot ${esc(n.hostname)} (via Deadline — interrupts any active render)" onclick="rebootNode(${n.id})">${icon('refresh')}</button>
       </div>
       <div class="meta">${esc(n.ip || '')} · last seen ${ago(n.last_seen)}</div>
       <table>${vis.map((p) => {
@@ -514,165 +410,6 @@ function renderDashboard() {
       }).join('')}</table>
     </div>`;
   }).join('') || '<div class="empty">No nodes match the current filters.</div>';
-}
-
-// ============================================================ Fleet tab ===
-// A NOC-style overview: live KPIs, what every machine is doing right now, the Beacon
-// agent rollout, OS/driver spread, and active alerts.
-let fleetSearch = '';
-
-// The Beacon agent version for a node, with an up-to-date / outdated chip.
-function beaconVer(n) {
-  if (!n.agent_version) return `<span class="bcn none" title="No ${AGENT_NAME} version reported yet">—</span>`;
-  const latest = state.latestAgentVersion;
-  const old = latest && cmpVersion(n.agent_version, latest) < 0;
-  return `<span class="bcn ${old ? 'old' : 'ok'}" title="${old ? `Update available — latest ${AGENT_NAME} is ${esc(latest)}` : `${AGENT_NAME} is up to date`}">${icon('beacon')}${esc(n.agent_version)}</span>`;
-}
-
-// What a machine is doing right now — derived from online state, in-flight jobs, and live
-// GPU load. Order matters: an active install outranks "rendering" outranks idle.
-function nodeActivity(n) {
-  if (!n.online) return { key: 'offline', label: 'Offline', cls: 'off' };
-  const mine = state.jobs.filter((j) => j.hostname === n.hostname && ['installing', 'downloading', 'pending'].includes(j.status));
-  const pick = mine.find((j) => j.status === 'installing') || mine.find((j) => j.status === 'downloading') || mine[0];
-  if (pick) {
-    const nm = PRODUCT_NAMES[pick.product_key] || pick.product_key;
-    if (pick.status === 'installing') return { key: 'installing', label: 'Installing', detail: nm, cls: 'install' };
-    if (pick.status === 'downloading') return { key: 'downloading', label: 'Downloading', detail: nm, cls: 'download' };
-    return { key: 'queued', label: 'Queued', detail: nm, cls: 'queued' };
-  }
-  if (n.gpu_util != null && n.gpu_util >= 20) return { key: 'rendering', label: 'Rendering', cls: 'render', util: n.gpu_util };
-  if (n.pending_reboot) return { key: 'reboot', label: 'Reboot pending', cls: 'warn' };
-  return { key: 'idle', label: 'Idle', cls: 'idle' };
-}
-
-// Horizontal distribution bars (Beacon versions, OS, drivers). rows: {label(html), count, cls}.
-function distRows(rows, total) {
-  const t = total || rows.reduce((s, r) => s + r.count, 0) || 1;
-  return rows.map((r) => `<div class="dist-row">
-    <span class="dist-label">${r.label}</span>
-    <span class="dist-bar"><i class="${r.cls || ''}" style="width:${Math.round((r.count / t) * 100)}%"></i></span>
-    <span class="dist-n">${r.count}</span>
-  </div>`).join('') || '<div class="muted small">No data yet.</div>';
-}
-
-function renderFleet() {
-  if (!state) return;
-  const nodes = state.nodes.slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
-  if (!nodes.length) {
-    document.getElementById('fleet-kpis').innerHTML = '';
-    document.getElementById('fleet-table').innerHTML = '<div class="empty">No machines enrolled yet.</div>';
-    ['fleet-beacon', 'fleet-os', 'fleet-drivers', 'fleet-alerts'].forEach((id) => { document.getElementById(id).innerHTML = ''; });
-    return;
-  }
-  const acts = nodes.map((n) => ({ n, a: nodeActivity(n) }));
-  const cnt = (k) => acts.filter((x) => x.a.key === k).length;
-  const online = nodes.filter((n) => n.online).length;
-  const rendering = cnt('rendering');
-  const updating = acts.filter((x) => ['installing', 'downloading', 'queued'].includes(x.a.key)).length;
-  const idle = cnt('idle');
-  const offline = nodes.length - online;
-  const reboots = nodes.filter((n) => n.pending_reboot).length;
-  const latest = state.latestAgentVersion;
-  const oldBeacons = nodes.filter((n) => n.agent_version && latest && cmpVersion(n.agent_version, latest) < 0).length;
-
-  // ---- KPI tiles ----
-  const kpi = (ic, num, label, cls, title) =>
-    `<div class="kpi ${cls || ''}" title="${esc(title || '')}">${icon(ic)}<div class="kpi-meta"><span class="kpi-num">${num}</span><span class="kpi-label">${label}</span></div></div>`;
-  document.getElementById('fleet-kpis').innerHTML =
-    kpi('server', nodes.length, 'Machines', '', 'Total enrolled nodes') +
-    kpi('dot', online, 'Online', online === nodes.length ? 'ok' : 'warn', 'Checked in recently') +
-    kpi('activity', rendering, 'Rendering', rendering ? 'render' : '', 'GPU actively computing a render') +
-    kpi('download', updating, 'Updating', updating ? 'busy' : '', 'Installing / downloading / queued') +
-    kpi('clock', idle, 'Idle', '', 'Online but doing nothing') +
-    kpi('power', offline, 'Offline', offline ? 'bad' : 'ok', 'Not checked in') +
-    kpi('refresh', reboots, 'Reboot pending', reboots ? 'warn' : '', 'Windows reports a pending reboot') +
-    kpi('beacon', oldBeacons, `${AGENT_NAME} outdated`, oldBeacons ? 'warn' : 'ok', `Agents behind ${latest || '?'}`);
-
-  // ---- Live activity table ----
-  const q = fleetSearch.trim().toLowerCase();
-  const rows = acts.filter(({ n }) => !q || n.hostname.toLowerCase().includes(q));
-  document.getElementById('fleet-table').innerHTML = `<table class="fleet-tbl">
-    <colgroup><col style="width:16%"><col style="width:17%"><col style="width:12%"><col style="width:11%"><col style="width:21%"><col style="width:8%"><col style="width:9%"><col style="width:6%"></colgroup>
-    <thead><tr><th>Machine</th><th>Activity</th><th>GPU load</th><th>${AGENT_NAME}</th><th>GPU / driver</th><th>Disk</th><th>Seen</th><th></th></tr></thead>
-    <tbody>${rows.map(({ n, a }) => {
-      const load = (n.online && n.gpu_util != null)
-        ? `<span class="load"><i class="${n.gpu_util >= 20 ? 'hot' : ''}" style="width:${Math.min(100, n.gpu_util)}%"></i></span><span class="load-n">${n.gpu_util}%</span>`
-        : '<span class="muted">—</span>';
-      return `<tr>
-        <td title="${esc(n.hostname)}"><span class="node-cell">${osStatus(n)} ${esc(n.hostname)}</span></td>
-        <td><span class="act act-${a.cls}" title="${esc(a.label + (a.detail ? ' — ' + a.detail : ''))}"><span class="actd"></span>${esc(a.label)}${a.detail ? ` <em>${esc(a.detail)}</em>` : ''}</span></td>
-        <td class="gpuload">${load}</td>
-        <td>${beaconVer(n)}</td>
-        <td class="dim" title="${esc((n.gpu || '') + (n.gpu_driver ? ' · ' + n.gpu_driver : ''))}">${n.gpu ? esc(n.gpu) : '—'}${n.gpu_driver ? ` · ${esc(n.gpu_driver)}` : ''}</td>
-        <td class="dim">${n.disk_free_gb != null ? esc(n.disk_free_gb) + ' GB' : '—'}</td>
-        <td class="dim">${ago(n.last_seen)}</td>
-        <td class="fleet-act">${nodeActionBtn(n)}</td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="8" class="muted" style="text-align:center;padding:18px">No machines match.</td></tr>'}</tbody>
-  </table>`;
-
-  // ---- Beacon rollout ----
-  const bc = {};
-  nodes.forEach((n) => { const v = n.agent_version || 'unknown'; bc[v] = (bc[v] || 0) + 1; });
-  const bRows = Object.entries(bc)
-    .sort((x, y) => cmpVersion(y[0] === 'unknown' ? '0' : y[0], x[0] === 'unknown' ? '0' : x[0]))
-    .map(([v, count]) => ({
-      label: `${icon('beacon')}${v === 'unknown' ? 'no agent' : esc(v)}${v === latest ? ' <span class="tag-latest">latest</span>' : ''}`,
-      count, cls: v === latest ? 'ok' : (v === 'unknown' ? 'muted' : 'old'),
-    }));
-  const upToDate = nodes.filter((n) => n.agent_version === latest).length;
-  document.getElementById('fleet-beacon').innerHTML =
-    `<h2>${icon('beacon')} ${AGENT_NAME} agent</h2>
-     <div class="fp-sub">${upToDate}/${nodes.length} on the latest build · <b>${esc(latest || '?')}</b></div>
-     <div class="dist">${distRows(bRows, nodes.length)}</div>`;
-
-  // ---- OS spread ----
-  const oc = {};
-  nodes.forEach((n) => { const k = (n.os === 'windows' ? 'Windows ' : 'macOS ') + (osVerShort(n) || '?'); oc[k] = (oc[k] || 0) + 1; });
-  const oRows = Object.entries(oc).sort((x, y) => y[1] - x[1]).map(([label, count]) => ({ label: esc(label), count, cls: 'os' }));
-  document.getElementById('fleet-os').innerHTML =
-    `<h2>${icon('windows')} Operating systems</h2><div class="dist">${distRows(oRows, nodes.length)}</div>`;
-
-  // ---- GPU driver spread + drift ----
-  const gpuNodes = nodes.filter((n) => n.gpu_driver && /nvidia|geforce|rtx|gtx/i.test(n.gpu || ''));
-  if (!gpuNodes.length) {
-    document.getElementById('fleet-drivers').innerHTML = `<h2>${icon('cog')} GPU drivers</h2><div class="muted small">No NVIDIA nodes reporting.</div>`;
-  } else {
-    const dm = fleetDriver(gpuNodes);
-    const dc = {};
-    gpuNodes.forEach((n) => { dc[n.gpu_driver] = (dc[n.gpu_driver] || 0) + 1; });
-    // Neutral bars — legacy GPUs legitimately run an older driver track (581.x), so a
-    // non-top version is NOT "outdated". Genuinely-behind nodes are caught in Alerts.
-    const dRows = Object.entries(dc).sort((x, y) => y[1] - x[1]).map(([v, count]) => ({
-      label: esc(v) + (v === dm ? ' <span class="tag-latest">most common</span>' : ''),
-      count, cls: v === dm ? 'ok' : '',
-    }));
-    document.getElementById('fleet-drivers').innerHTML =
-      `<h2>${icon('cog')} GPU drivers</h2><div class="dist">${distRows(dRows, gpuNodes.length)}</div>`;
-  }
-
-  // ---- Alerts ----
-  const items = [];
-  nodes.filter((n) => !n.online).forEach((n) => items.push({ ic: 'power', cls: 'bad', t: `${n.hostname} offline`, s: 'last seen ' + ago(n.last_seen) }));
-  nodes.filter((n) => n.pending_reboot).forEach((n) => items.push({ ic: 'refresh', cls: 'warn', t: `${n.hostname} needs a reboot`, s: 'Windows update pending' }));
-  nodes.filter((n) => n.disk_free_gb != null && n.disk_free_gb < 20).forEach((n) => items.push({ ic: 'server', cls: 'warn', t: `${n.hostname} low disk`, s: `${n.disk_free_gb} GB free` }));
-  // GPU driver "behind" = installed driver older than the newest version THIS node's GPU
-  // supports (per-GPU target). A legacy Maxwell/Pascal card on 581.57 is at its MAX, not
-  // drifting; a non-NVIDIA box is n/a. productStatus encodes both (eol/na/uptodate vs
-  // patch/major), so trust it instead of comparing to the fleet's most-common version.
-  const nvProd = state.products.find((p) => p.key === 'nvidia');
-  if (nvProd) nodes.forEach((n) => {
-    const st = productStatus(n, nvProd);
-    if (['patch', 'major'].includes(st.status)) items.push({ ic: 'cog', cls: 'warn', t: `${n.hostname} GPU driver behind`, s: `${st.version || '—'} → ${nvidiaTarget(n, nvProd)}` });
-  });
-  nodes.filter((n) => n.agent_version && latest && cmpVersion(n.agent_version, latest) < 0).forEach((n) => items.push({ ic: 'beacon', cls: 'info', t: `${n.hostname} · ${AGENT_NAME} ${n.agent_version}`, s: `update to ${latest}` }));
-  state.jobs.filter((j) => j.status === 'failed').slice(0, 6).forEach((j) => items.push({ ic: 'alert', cls: 'bad', t: `${j.hostname}: ${PRODUCT_NAMES[j.product_key] || j.product_key} failed`, s: 'see Activity' }));
-  const aBody = items.length
-    ? items.map((i) => `<div class="alert-row ${i.cls}">${icon(i.ic)}<span><b>${esc(i.t)}</b><em>${esc(i.s)}</em></span></div>`).join('')
-    : `<div class="all-clear">${icon('check')} All systems healthy</div>`;
-  document.getElementById('fleet-alerts').innerHTML =
-    `<h2>${icon('alert')} Alerts${items.length ? ` <span class="cnt">${items.length}</span>` : ''}</h2><div class="alerts">${aBody}</div>`;
 }
 
 async function quickUpdate(nodeId, packageId, btn) {
@@ -690,42 +427,19 @@ async function removeNode(id, name) {
   refresh();
 }
 
-// Online machines get a Restart (reboot) button; offline ones get a Wake (power-on) button.
-function nodeActionBtn(n) {
-  if (n.online) {
-    return `<button class="node-reboot" title="Restart ${esc(n.hostname)} (reboots the machine; interrupts any active render)" onclick="rebootNode(${n.id})">${icon('power')}</button>`;
-  }
-  return `<button class="node-reboot wake" title="Wake ${esc(n.hostname)} — power it on via Wake-on-LAN" onclick="wakeNode(${n.id})">${icon('power')}</button>`;
-}
-
-// Reboot a machine — via the agent if it's online, else Deadline. Recovers a stuck node
-// and applies driver updates.
+// Reboot a machine via Deadline RemoteControl — recovers a wedged/hung agent.
 async function rebootNode(id) {
   const n = state.nodes.find((x) => x.id === id);
   const name = n ? n.hostname : `#${id}`;
-  if (!await uiConfirm(`Restart ${esc(name)}? It reboots the machine — via the tracker agent, or Deadline if the agent isn't reachable — and will interrupt any render running on it.`,
-    { title: 'Restart machine', confirmLabel: 'Restart', danger: true })) return;
+  if (!await uiConfirm(`Reboot ${esc(name)}? This goes through Deadline and will interrupt any render currently running on it. Use it to recover a stuck/unresponsive agent.`,
+    { title: 'Reboot machine', confirmLabel: 'Reboot', danger: true })) return;
   try {
     const r = await api('POST', `/api/nodes/${id}/reboot`);
-    toast(r.via === 'agent'
-      ? `Restart queued for ${name} via the tracker agent — it'll reboot within a minute.`
-      : r.confirmed
-        ? `Restart sent to ${name} — it'll drop offline and come back in a few minutes.`
-        : `Restart sent to ${name} — should drop offline shortly. (No confirmation returned, which is normal when a machine reboots before replying.)`,
+    toast(r.confirmed
+      ? `Reboot sent to ${name} — it'll drop offline and come back in a few minutes.`
+      : `Reboot sent to ${name} — should drop offline shortly. (Deadline didn't return a confirmation, which is normal when a machine reboots before replying.)`,
       'success');
   } catch (e) { toast(`Reboot failed for ${name}: ${e.message}`, 'error'); }
-}
-
-// Wake-on-LAN — power on an offline machine using the MAC(s) the agent last reported.
-async function wakeNode(id) {
-  const n = state.nodes.find((x) => x.id === id);
-  const name = n ? n.hostname : `#${id}`;
-  if (!await uiConfirm(`Send a Wake-on-LAN signal to ${esc(name)} to power it on? (Requires Wake-on-LAN enabled in its BIOS/network card.)`,
-    { title: 'Wake machine', confirmLabel: 'Wake' })) return;
-  try {
-    const r = await api('POST', `/api/nodes/${id}/wake`);
-    toast(`Wake signal sent to ${name} — it should power on shortly and check in within a minute.`, 'success');
-  } catch (e) { toast(`Wake failed for ${name}: ${e.message}`, 'error'); }
 }
 
 // wire toolbar (re-render locally without a network round-trip for snappy typing)
@@ -809,7 +523,6 @@ const INSTALL_PRESETS = {
   blender:       { windows: 'msiexec /i "{file}" /qn /norestart', macos: MACOS_BLENDER },
   ffmpeg:        { windows: WIN_FFMPEG, macos: MACOS_FFMPEG },
   notchlc:       { windows: '"{file}" /S', macos: MACOS_PKG },  // NSIS silent (Win) / .pkg (Mac)
-  nvidia:        { windows: '"{file}" -s -noreboot' },   // NVIDIA setup: silent in-place upgrade, no surprise reboot (Win-only; no -clean so a failed install keeps the old driver)
 };
 const presetCommand = (k, os) => (INSTALL_PRESETS[k] && INSTALL_PRESETS[k][os]) || (os === 'macos' ? MACOS_PKG : '"{file}"');
 
@@ -850,50 +563,14 @@ const versionFromFilename = (f) => { const m = String(f || '').match(/(\d+(?:\.\
 // Adobe = RUM (no staged file needed); otherwise a staged installer whose version is
 // >= the detected latest. A staged-but-older file does NOT count (it can't reach latest).
 function latestInstallerReady(prod, os) {
-  if (!appliesToOS(prod, os)) return true;   // Windows-only product (NVIDIA) — nothing to stage on macOS
   if (ADOBE_RUM[prod.key]) return !!ADOBE_RUM[prod.key][os];
-  const staged = stagedFor(prod, os);
-  if (!staged) return false;                 // nothing staged for this OS
   const want = latestForOS(prod, os);   // per-OS (NotchLC: win 1.3.1, mac 1.4.3)
-  const fv = versionFromFilename(staged);
-  // A custom product's manually-staged file is trusted even when its filename has no version
-  // (e.g. "ElementInstallerFull.dmg") — the user staged it on purpose. Built-ins still require
-  // a version match (their staged files always carry one).
-  if (!fv) return !!prod.custom;
-  return !want || cmpVersion(fv, want) >= 0;
-}
-// Can this product actually be installed (vs tracking-only)? True with Adobe RUM, a built-in
-// preset, a custom install command, a saved source link, or a staged installer. A custom
-// product with only a detection pattern/path (e.g. SABER) is tracking-only — never a deploy target.
-function isDeployable(prod) {
-  if (ADOBE_RUM[prod.key] || INSTALL_PRESETS[prod.key]) return true;
-  return !!(prod.install_cmd_win || prod.install_cmd_mac || prod.source_url_win || prod.source_url_mac
-    || prod.staged_win || prod.staged_mac);
+  const fv = versionFromFilename(stagedFor(prod, os));
+  return !!(fv && (!want || cmpVersion(fv, want) >= 0));
 }
 const wizOsList = () => (wizSel.os === 'both' ? ['windows', 'macos'] : [wizSel.os]);
-// A node already has an in-flight job for this product (queued / downloading / installing).
-const jobActiveFor = (node, productKey) => state.jobs.some((j) =>
-  j.hostname === node.hostname && j.product_key === productKey
-  && ['pending', 'downloading', 'installing'].includes(j.status));
-// "Needs queuing" = behind AND not already queued/installing — so once you've queued a
-// machine it drops out of the "to update" count (it moves to "updating"), which is what
-// you'd expect after pressing Update.
 const nodesByKind = (prod, osList, kinds) =>
-  state.nodes.filter((n) => {
-    if (!osList.includes(n.os) || jobActiveFor(n, prod.key)) return false;
-    const st = productStatus(n, prod).status;
-    if (!kinds.includes(st)) return false;
-    // A not-installed node is a deploy target only when the product is installable. Apps need a
-    // known target version too; scripts install by presence (a .jsx/.jsxbin often has no version).
-    if (st === 'missing') {
-      if (!isDeployable(prod)) return false;
-      if (prod.category !== 'script' && !latestForOS(prod, n.os)) return false;
-    }
-    return true;
-  });
-// Machines already mid-rollout for this product (queued or installing).
-const inProgressNodes = (prod, osList) =>
-  state.nodes.filter((n) => osList.includes(n.os) && jobActiveFor(n, prod.key));
+  state.nodes.filter((n) => osList.includes(n.os) && kinds.includes(productStatus(n, prod).status));
 // patch = safe in-place; major = older major + fresh installs (opt-in side-by-side).
 const patchNodes = (prod, osList) => nodesByKind(prod, osList, ['patch']);
 const majorNodes = (prod, osList) => nodesByKind(prod, osList, ['major', 'missing']);
@@ -972,30 +649,18 @@ const TILE = {
   blender:       ['Bl',  '#2a1c06', '#ffb04d'],
   ffmpeg:        ['FF',  '#0c2a1c', '#5ad18f'],
   notchlc:       ['NL',  '#0a2230', '#5fd0e6'],
-  nvidia:        ['NV',  '#16280a', '#76b900'],   // NVIDIA green
 };
 // Real app icons: PNGs from the installed apps (blender = its .app icon; ffmpeg = the
 // official logo from ffmpeg.org's favicon) plus a hand-made SVG for redshift (no good
 // extractable icon).
-const ICON_KEYS = new Set(['aftereffects', 'creativecloud', 'cinema4d', 'maxonapp', 'redshift', 'redgiant', 'blender', 'ffmpeg', 'notchlc', 'nvidia']);
+const ICON_KEYS = new Set(['aftereffects', 'creativecloud', 'cinema4d', 'maxonapp', 'redshift', 'redgiant', 'blender', 'ffmpeg', 'notchlc']);
 const SVG_ICONS = new Set(['redshift']);
-// If a custom product's favicon fails to load, swap the <img> for a colored monogram.
-function monoFallback(img, abbr, bg, fg) {
-  const s = document.createElement('span');
-  s.className = img.className; s.style.background = bg; s.style.color = fg; s.textContent = abbr;
-  img.replaceWith(s);
-}
 function tileLogo(key, cls = '') {
   if (ICON_KEYS.has(key)) {
     const ext = SVG_ICONS.has(key) ? 'svg' : 'png';
     return `<img class="cc-logo ${cls}" src="icons/${key}.${ext}" alt="${esc(PRODUCT_NAMES[key] || key)}" loading="lazy">`;
   }
-  const prod = state && state.products && state.products.find((p) => p.key === key);
-  const [abbr, bg, fg] = TILE[key] || [(PRODUCT_NAMES[key] || key).slice(0, 2).toUpperCase(), '#22303f', '#9fb3c8'];
-  // Custom product with an auto-fetched favicon → show it, falling back to the monogram.
-  if (prod && prod.icon_url) {
-    return `<img class="cc-logo ${cls}" src="${esc(prod.icon_url)}" alt="${esc(prod.name || key)}" loading="lazy" onerror="monoFallback(this,'${abbr}','${bg}','${fg}')">`;
-  }
+  const [abbr, bg, fg] = TILE[key] || [key.slice(0, 2).toUpperCase(), '#22303f', '#9fb3c8'];
   return `<span class="cc-logo ${cls}" style="background:${bg};color:${fg}">${abbr}</span>`;
 }
 
@@ -1004,27 +669,16 @@ function renderProductCards() {
   document.getElementById('up-products').innerHTML = state.products.filter((p) => !isHidden(p)).map((p) => {
     const patch = patchNodes(p, wizOsList()).length;
     const major = majorNodes(p, wizOsList()).length;
-    const inProg = inProgressNodes(p, wizOsList()).length;
     const ready = wizOsList().every((os) => latestInstallerReady(p, os));
     let badge, majBadge = '';
-    // Show machines mid-rollout as "updating" so a queued fleet doesn't keep reading
-    // "to update" — it only counts what still needs queuing.
-    const progBadge = inProg ? `<span class="cc-badge prog" title="${inProg} machine(s) queued or installing now">${icon('spinner', 'spin')} ${inProg} updating</span>` : '';
-    if (!isDeployable(p)) {
-      // Tracking-only product (e.g. a plug-in with only a detection rule) — show presence, not "update".
-      const installed = state.nodes.filter((n) => wizOsList().includes(n.os) && (n.software || []).some((sw) => sw.product_key === p.key)).length;
-      badge = `<span class="cc-badge ok" title="Tracking-only — no installer/command configured. Add one in Catalog (edit the product → Auto-update) to deploy or update it.">track only · ${installed} installed</span>`;
-      majBadge = '';
-    } else if (!patch && !major) {
-      badge = inProg ? progBadge : `<span class="cc-badge ok">all current</span>`;
-      majBadge = '';
+    if (!patch && !major) {
+      badge = `<span class="cc-badge ok">all current</span>`;
     } else if (!ready) {
       // A newer version was detected but its installer isn't on the server yet.
       badge = `<span class="cc-badge need" title="Version ${esc(p.latest_version || '')} was detected, but its installer isn't staged on the server. Add it via Options → source, then deploy.">${icon('alert')} installer needed</span>`;
     } else {
-      badge = patch ? `<span class="cc-badge">${patch} to update</span>` : (inProg ? progBadge : `<span class="cc-badge ok">all current</span>`);
+      badge = patch ? `<span class="cc-badge">${patch} to update</span>` : `<span class="cc-badge ok">all current</span>`;
       majBadge = major ? `<span class="cc-badge major" title="A newer major version exists — opt-in side-by-side install">${major} new major</span>` : '';
-      if (patch && inProg) majBadge = progBadge + majBadge;   // both: "X to update" + "Y updating"
     }
     return `<button type="button" class="choice-card ${wizSel.products.has(p.key) ? 'sel' : ''}" data-key="${p.key}">
       <span class="cc-check">${icon('check')}</span>
@@ -1098,15 +752,9 @@ function renderSegs() {
   }
 }
 
-// How many of the selected products this node is a real deploy target for (behind, or a
-// fresh install of a deployable product). Tracking-only / no-version products don't count.
+// How many of the selected products are outdated/missing on a node.
 function nodeNeedsCount(n) {
-  return wizProducts().filter((p) => {
-    const st = productStatus(n, p).status;
-    if (st === 'patch' || st === 'major') return true;
-    if (st === 'missing') return isDeployable(p) && (p.category === 'script' || !!latestForOS(p, n.os));
-    return false;
-  }).length;
+  return wizProducts().filter((p) => ['patch', 'major'].includes(productStatus(n, p).status)).length;
 }
 
 // Step 4 — filterable machine chips.
@@ -1130,13 +778,8 @@ function renderWizNodes() {
 function updateWizard() {
   const prods = wizProducts();
   if (!prods.length) {
-    // Nothing selected — reset the wizard to a clean zero state. If the whole fleet is
-    // already current, say so plainly instead of a bare "pick an app".
-    const anyBehind = state.products.filter((p) => !isHidden(p)).some((p) =>
-      state.nodes.some((n) => ['patch', 'major'].includes(productStatus(n, p).status)));
-    document.getElementById('up-current').innerHTML = anyBehind
-      ? '<span class="hint">Pick an app to update</span>'
-      : `<span class="hint allcurrent">${icon('check')} All software is up to date across the fleet</span>`;
+    // Nothing selected — reset the wizard to a clean zero state.
+    document.getElementById('up-current').innerHTML = '<span class="hint">Pick an app to update</span>';
     document.getElementById('up-target-count').textContent = '0 machine(s) will update';
     const gb = document.getElementById('up-go'); gb.disabled = true; gb.title = 'Pick at least one app first';
     ['up-preview', 'up-elev-warn', 'up-installer-warn', 'up-major-row'].forEach((id) => {
@@ -1164,10 +807,8 @@ function updateWizard() {
   document.querySelector('.machine-tools .search-wrap').style.display = choosing ? '' : 'none';
   document.getElementById('up-select-all').style.display = choosing ? '' : 'none';
   document.getElementById('up-nodes').style.display = choosing ? '' : 'none';
-  const inProgCount = (() => { const ids = new Set(); prods.forEach((p) => inProgressNodes(p, osList).forEach((n) => ids.add(n.id))); return ids.size; })();
   document.getElementById('up-target-count').textContent =
-    choosing ? `${wizChosen.size} selected`
-      : `${targetNodes.size} machine(s) will update${inProgCount ? ` · ${inProgCount} already updating` : ''}`;
+    choosing ? `${wizChosen.size} selected` : `${targetNodes.size} machine(s) will update`;
   // New-major / fresh-install opt-in: only relevant in "outdated only" mode.
   const majRow = document.getElementById('up-major-row');
   if (!choosing && majorIds.size) {
@@ -1202,9 +843,6 @@ function updateWizard() {
   const needInstaller = prods.filter((p) => !ADOBE_RUM[p.key]
     && (patchNodes(p, osList).length || majorNodes(p, osList).length)
     && !osList.every((os) => latestInstallerReady(p, os)));
-  // A selected product that has no installer/command at all is tracking-only — explain calmly
-  // (it's not a failure; it just can't be deployed from here).
-  const trackOnly = prods.filter((p) => !isDeployable(p));
   const instWarn = document.getElementById('up-installer-warn');
   if (needInstaller.length) {
     instWarn.style.display = '';
@@ -1212,20 +850,12 @@ function updateWizard() {
       + needInstaller.map((p) => `${esc(p.name)} ${esc(p.latest_version || '')}`).join(', ')
       + ` ${needInstaller.length > 1 ? 'have' : 'has'} a newer version detected, but the matching installer isn't staged. `
       + `Add it (drop the installer on the share, or set a source link in Options), then deploy.`;
-  } else if (trackOnly.length) {
-    instWarn.style.display = '';
-    instWarn.innerHTML = `${icon('alert')} <b>${trackOnly.map((p) => esc(p.name)).join(', ')} ${trackOnly.length > 1 ? 'are' : 'is'} tracking-only</b> — `
-      + `no installer or command is set, so ${trackOnly.length > 1 ? 'they' : 'it'} can be monitored but not deployed from here. `
-      + `To enable updates, edit the product in Catalog → turn on <b>Auto-update</b> and add an installer link + command.`;
   } else instWarn.style.display = 'none';
   // Disable Update now when nothing selected can actually deploy (would only hit the guard).
   const deployable = prods.some((p) => ADOBE_RUM[p.key] || osList.every((os) => latestInstallerReady(p, os)));
-  const haveTargets = (choosing ? wizChosen.size : targetNodes.size) > 0;
   const goBtn = document.getElementById('up-go');
-  goBtn.disabled = !deployable || !haveTargets;
-  goBtn.title = !deployable ? 'Stage the installer(s) first — see the warning above'
-    : !haveTargets ? (inProgCount ? 'All selected machines are already up to date or updating' : 'All selected machines are already up to date')
-    : '';
+  goBtn.disabled = !deployable;
+  goBtn.title = deployable ? '' : 'Stage the installer(s) first — see the warning above';
   if (!deployable && !choosing && targetNodes.size) {
     document.getElementById('up-target-count').textContent = `${targetNodes.size} behind — installer needed`;
   }
@@ -1287,7 +917,7 @@ async function runWizard() {
         // Per product+OS: use the staged installer, else download once from the
         // saved link (in-card bars show live progress), then queue.
         const tasks = [];
-        for (const prod of normalProds) for (const os of wizOsList()) if (appliesToOS(prod, os)) tasks.push({ prod, os });
+        for (const prod of normalProds) for (const os of wizOsList()) tasks.push({ prod, os });
         let downloading = 0;
         const tick = () => { prog.textContent =
           downloading ? `Downloading ${downloading} installer(s) to the server — progress on the cards above (keep this page open)…`
@@ -1314,7 +944,6 @@ async function runWizard() {
         // Download once, reuse: distribute the staged installer over the LAN.
         for (const prod of normalProds) {
           for (const os of wizOsList()) {
-            if (!appliesToOS(prod, os)) continue;   // Windows-only product (NVIDIA) — no macOS install
             const filename = stagedFor(prod, os);
             if (!filename) { skipped.push(`${prod.name} (${os}) — not on the server`); continue; }
             prog.textContent = `Queuing ${prod.name} (${os}) from server…`;
@@ -1461,8 +1090,7 @@ function renderDeploy() {
   const CAP = 60;
   const jt = document.getElementById('job-table');
   jt.innerHTML = rows.length
-    ? `<colgroup><col style="width:22%"><col style="width:30%"><col style="width:22%"><col style="width:10%"><col style="width:16%"></colgroup>`
-      + `<tr><th>Machine</th><th>Software</th><th>Status</th><th>Time</th><th></th></tr>` +
+    ? `<tr><th>Machine</th><th>Software</th><th>Status</th><th>ETA</th><th></th></tr>` +
       rows.slice(0, CAP).map((j) => {
         // Actions column: stop while running; log once finished. (Retry lives in the Status cell.)
         const stop = active(j.status)
@@ -1478,13 +1106,6 @@ function renderDeploy() {
         } else if (j.status === 'installing' && j.stalled) {
           // No progress for far longer than usual — the agent's installer is likely stuck.
           statusCell = `<span class="badge inprogress blocked" title="No progress for much longer than this install usually takes — the agent may be stuck. Use Stop, then Retry.">${icon('alert')} stalled</span>`;
-        } else if (j.status === 'installing' && j.inst_overrun) {
-          // Past this app's typical install time but still running (not yet stalled). Show an
-          // indeterminate "finishing…" bar with the live elapsed time — never a frozen 97%
-          // that reads as stuck. It auto-aborts on the agent side if it truly hangs.
-          const start = j.started_at || j.updated_at;
-          statusCell = `<span class="badge inprogress installing" title="Taking longer than this app usually does — still running. It auto-aborts if it truly hangs.">${icon('spinner', 'spin')}
-            <span class="dlbar indet"><span class="dlfill"></span></span>finishing… <span class="eta" data-timer="${start}">${fmtTook(Date.now() - start)}</span></span>`;
         } else if (j.status === 'installing') {
           // Progress is an estimate vs the learned typical install time for this product/OS.
           const pct = typeof j.inst_pct === 'number' ? j.inst_pct : null;
@@ -1509,15 +1130,12 @@ function renderDeploy() {
             ? `<button class="link-btn retry-inline" onclick="retryJob(${j.id})" title="Run this update again on ${esc(j.hostname)}">${icon('refresh')} retry</button>` : '';
           statusCell = pill + retryBtn;
         }
-        // Time column: a count-up timer that starts when the job leaves the queue and
-        // freezes when it finishes. No estimate — just elapsed run time.
+        // ETA column: time LEFT while installing, then how long it TOOK once finished.
         let etaCell = '<span class="eta-none">—</span>';
-        if (j.status === 'downloading' || j.status === 'installing') {
-          const start = j.started_at || j.updated_at;   // live timer (ticker updates it each second)
-          etaCell = `<span class="eta" data-timer="${start}">${fmtTook(Date.now() - start)}</span>`;
-        } else if (['success', 'failed', 'cancelled'].includes(j.status)) {
-          const dur = j.started_at ? (j.updated_at - j.started_at) : (j.install_ms || null);
-          if (dur != null && dur > 0) etaCell = `<span class="eta done" title="How long it ran">${fmtTook(dur)}</span>`;
+        if (j.status === 'installing' && !j.stalled && j.inst_eta_ms) {
+          etaCell = `<span class="eta">~${fmtDur(j.inst_eta_ms)} left</span>`;
+        } else if (j.status === 'success' && j.install_ms) {
+          etaCell = `<span class="eta done" title="How long the install took">took ${fmtTook(j.install_ms)}</span>`;
         }
         const jn = state.nodes.find((n) => n.hostname === j.hostname);
         return `<tr>
@@ -1625,277 +1243,10 @@ async function refreshInstallerFiles() {
 }
 
 // --------------------------------------------------------------- catalog ---
-// Add/edit-custom-product form. SIMPLE by default — Name + a URL, and "Auto-fill" grabs the
-// icon, latest version and installer. Everything it can't determine waits under "Advanced"
-// for manual entry (progressive disclosure — the modern pattern). Resolves to the field set.
-function customProductForm(prod, defaultCat) {
-  const v = (k) => (prod && prod[k] != null ? esc(prod[k]) : '');
-  const initCat = (prod && prod.category) || defaultCat || 'app';
-  // Derive initial UI state for edit mode from what's already configured.
-  const hasWin = prod && (prod.detect_path_win || prod.source_url_win || prod.install_cmd_win || prod.uninstall_cmd_win);
-  const hasMac = prod && (prod.detect_path_mac || prod.source_url_mac || prod.install_cmd_mac || prod.uninstall_cmd_mac);
-  const initOs = hasWin && hasMac ? 'both' : hasMac ? 'mac' : 'win';
-  // Plug-ins/scripts default to path detection (they're not in the uninstall list); apps to name.
-  const initMethod = (prod && (prod.detect_path_win || prod.detect_path_mac)) ? 'path'
-    : (prod ? 'name' : (initCat === 'app' ? 'name' : 'path'));
-  const initCheck = !!(prod && prod.check_url);
-  const initUpd = !!(prod && (prod.source_url_win || prod.source_url_mac || prod.install_cmd_win || prod.install_cmd_mac));
-  const initUnin = !!(prod && (prod.uninstall_cmd_win || prod.uninstall_cmd_mac));
-  const sel = (val, want) => (val === want ? ' selected' : '');
-  const cap = (id, on, text) => `<label class="switch cp-cap"><input type="checkbox" id="${id}"${on ? ' checked' : ''}><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">${text}</span></label>`;
-
-  return new Promise((resolve) => {
-    const ov = document.createElement('div');
-    ov.className = 'modal-overlay';
-    ov.innerHTML = `<div class="modal cp-modal" role="dialog" aria-modal="true">
-      <div class="modal-title">${prod ? 'Edit' : 'Add'} ${initCat === 'plugin' ? 'plug-in' : initCat === 'script' ? 'script' : 'app'}</div>
-      <div class="modal-body lic-form">
-        <div class="cp-head">
-          <span class="cp-icon" id="cp-iconprev">${prod && prod.icon_url ? `<img src="${esc(prod.icon_url)}" onerror="this.remove()">` : ''}</span>
-          <label style="flex:1">Name<input id="cp-name" placeholder="${initCat === 'script' ? 'e.g. Flow' : initCat === 'plugin' ? 'e.g. Element 3D' : 'e.g. 7-Zip'}" value="${v('name')}"></label>
-        </div>
-        <label>${initCat === 'script' ? 'Script link' : 'Link'} <span class="muted small">— ${initCat === 'script' ? 'direct .jsx/.jsxbin URL' : 'Auto-fill grabs icon, version &amp; installer'}</span>
-          <span class="cp-url"><input id="cp-url" placeholder="${initCat === 'script' ? 'https://…/MyScript.jsxbin' : 'https://www.7-zip.org/  ·  or a direct …/app.exe'}">
-            <button type="button" class="btn-soft primary" id="cp-fetch">Auto-fill</button></span></label>
-        <div class="hint small" id="cp-fillnote">Name + link is enough to start tracking. Options below are optional.</div>
-
-        <details class="up-adv cp-adv"${prod ? ' open' : ''}>
-          <summary><span data-ic="cog"></span> Options <span class="up-adv-hint">detection · updates · uninstall</span></summary>
-          <div class="up-adv-body cp-opts">
-            <div class="cp-srow">
-              <label class="cp-inline">Runs on
-                <select id="cp-os"><option value="win"${sel(initOs, 'win')}>Windows</option><option value="mac"${sel(initOs, 'mac')}>macOS</option><option value="both"${sel(initOs, 'both')}>Both</option></select></label>
-              <label class="cp-inline">Find it by
-                <select id="cp-method"><option value="name"${sel(initMethod, 'name')}>App name</option><option value="path"${sel(initMethod, 'path')}>File path</option></select></label>
-            </div>
-
-            <div id="cp-m-name">
-              <label>Detect by name <span class="muted small">(defaults to the product name)</span>
-                <input id="cp-pat" placeholder="e.g. 7-zip" value="${v('detect_pattern')}"></label>
-            </div>
-            <div id="cp-m-path" hidden>
-              <label class="cp-win">Detect path — Windows <span class="muted small">(glob ok)</span>
-                <input id="cp-pwin" placeholder="C:\\Program Files\\Adobe\\…\\Saber*" value="${v('detect_path_win')}"></label>
-              <label class="cp-mac">Detect path — macOS
-                <input id="cp-pmac" placeholder="/Library/Application Support/Adobe/…/Saber*" value="${v('detect_path_mac')}"></label>
-            </div>
-
-            <label>Latest version <span class="muted small">(optional)</span>
-              <input id="cp-ver" placeholder="e.g. 24.08" value="${v('latest_version')}"></label>
-            <label class="wiz-check"><input type="checkbox" id="cp-autocheck"${initCheck ? ' checked' : ''}> Check version from a web page</label>
-            <div id="cp-checkgroup" class="lic-form-row" hidden>
-              <label>Check URL<input id="cp-curl" value="${v('check_url')}"></label>
-              <label>Version regex <span class="muted small">(blank = highest no.)</span><input id="cp-cre" value="${v('check_regex')}"></label>
-            </div>
-
-            <div class="cp-cap-block">
-              ${cap('cp-tg-update', initUpd, 'Auto-update across the fleet')}
-              <div id="cp-updategroup" hidden>
-                <div class="cp-win">
-                  <label>Win installer URL<input id="cp-swin" value="${v('source_url_win')}"></label>
-                  <label>Win install cmd <span class="muted small">{file}=path</span><input id="cp-cwin" placeholder='"{file}" /S' value="${v('install_cmd_win')}"></label>
-                </div>
-                <div class="cp-mac">
-                  <label>Mac installer URL<input id="cp-smac" value="${v('source_url_mac')}"></label>
-                  <label>Mac install cmd<input id="cp-cmac" placeholder='installer -pkg "{file}" -target /' value="${v('install_cmd_mac')}"></label>
-                </div>
-              </div>
-            </div>
-
-            <div class="cp-cap-block">
-              ${cap('cp-tg-uninstall', initUnin, 'Allow uninstall')}
-              <div id="cp-uningroup" hidden>
-                <label class="cp-win">Win uninstall cmd<input id="cp-uwin" placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' value="${v('uninstall_cmd_win')}"></label>
-                <label class="cp-mac">Mac uninstall cmd<input id="cp-umac" placeholder='rm -rf "/Applications/App.app"' value="${v('uninstall_cmd_mac')}"></label>
-              </div>
-            </div>
-
-            <label class="cp-iconrow">Icon URL <span class="muted small">(auto-set; override if you like)</span><input id="cp-icon" value="${v('icon_url')}"></label>
-          </div>
-        </details>
-      </div>
-      <div class="modal-actions">
-        <button class="dlg-btn ghost" data-act="cancel">Cancel</button>
-        <button class="dlg-btn primary" data-act="ok">${prod ? 'Save' : 'Add'}</button>
-      </div></div>`;
-    document.body.appendChild(ov);
-    requestAnimationFrame(() => ov.classList.add('in'));
-    const $ = (id) => ov.querySelector('#' + id);
-    const g = (id) => $(id).value.trim() || null;
-    const close = (val) => { ov.classList.remove('in'); setTimeout(() => ov.remove(), 180); resolve(val); };
-    ov.querySelectorAll('[data-ic]').forEach((el) => { el.innerHTML = icon(el.dataset.ic); });
-
-    // Show only the fields relevant to the chosen OS, detection method, and enabled capabilities.
-    function sync() {
-      const os = $('cp-os').value, showWin = os !== 'mac', showMac = os !== 'win';
-      ov.querySelectorAll('.cp-win').forEach((e) => { e.hidden = !showWin; });
-      ov.querySelectorAll('.cp-mac').forEach((e) => { e.hidden = !showMac; });
-      const method = $('cp-method').value;
-      $('cp-m-name').hidden = method !== 'name';
-      $('cp-m-path').hidden = method !== 'path';
-      $('cp-checkgroup').hidden = !$('cp-autocheck').checked;
-      $('cp-updategroup').hidden = !$('cp-tg-update').checked;
-      $('cp-uningroup').hidden = !$('cp-tg-uninstall').checked;
-    }
-    ['cp-os', 'cp-method', 'cp-autocheck', 'cp-tg-update', 'cp-tg-uninstall']
-      .forEach((id) => $(id).addEventListener('change', sync));
-    sync();
-
-    // This dialog is dedicated to ONE kind (initCat) — App, Plug-in, or Script. Tailor it:
-    // plug-ins/scripts are AE-only, so hide the OS + detection-method controls (always the AE
-    // folders, both platforms) and set placeholders to suit.
-    if (initCat === 'script') {
-      $('cp-pwin').placeholder = 'auto: AE Scripts folder (override if needed)';
-      $('cp-pmac').placeholder = 'auto: AE Scripts folder';
-      $('cp-cwin').placeholder = 'auto: copies the .jsx into AE’s ScriptUI Panels';
-      $('cp-cmac').placeholder = 'auto: copies the .jsx into AE’s ScriptUI Panels';
-    } else {
-      $('cp-pwin').placeholder = initCat === 'plugin' ? 'auto: AE plug-ins folder (override if needed)' : 'C:\\Program Files\\…';
-      $('cp-pmac').placeholder = initCat === 'plugin' ? 'auto: AE plug-ins folder' : '/Applications/…';
-      $('cp-cwin').placeholder = '"{file}" /S';
-      $('cp-cmac').placeholder = 'installer -pkg "{file}" -target /';
-    }
-    if (initCat !== 'app') {
-      // AE plug-ins/scripts: not in the uninstall list, always both OS — hide OS + method pickers,
-      // force path detection across both platforms (the path auto-derives from the name on save).
-      const srow = ov.querySelector('.cp-srow'); if (srow) srow.hidden = true;
-      $('cp-method').value = 'path';
-      $('cp-os').value = 'both';
-    }
-    sync();
-
-    $('cp-fetch').addEventListener('click', async () => {
-      const url = $('cp-url').value.trim();
-      if (!url) { $('cp-url').focus(); return; }
-      const btn = $('cp-fetch'); btn.disabled = true; btn.textContent = '…';
-      try {
-        const r = await api('POST', '/api/products/inspect', { url });
-        const got = [];
-        if (r.icon_url) { $('cp-icon').value = r.icon_url; $('cp-iconprev').innerHTML = `<img src="${esc(r.icon_url)}" onerror="this.remove()">`; got.push('icon'); }
-        if (r.name && !$('cp-name').value.trim()) $('cp-name').value = r.name;
-        if (r.version) { $('cp-ver').value = r.version; got.push('version ' + r.version); }
-        if (r.check_url) { $('cp-curl').value = r.check_url; $('cp-autocheck').checked = true; }
-        if (r.source_url_win) { $('cp-swin').value = r.source_url_win; $('cp-tg-update').checked = true; if ($('cp-os').value === 'mac') $('cp-os').value = 'both'; got.push('Windows installer'); }
-        if (r.source_url_mac) { $('cp-smac').value = r.source_url_mac; $('cp-tg-update').checked = true; if ($('cp-os').value === 'win') $('cp-os').value = 'both'; got.push('macOS installer'); }
-        sync();
-        let note = `${icon('check')} Got the ${got.join(' + ') || 'icon'} — tracking's ready, just click ${prod ? 'Save' : 'Add'}.`;
-        if (r.version_guess && !$('cp-ver').value) note += ` (The page mentions <b>${esc(r.version_guess)}</b> — set it as the version if that's right.)`;
-        $('cp-fillnote').innerHTML = note;
-      } catch (e) { $('cp-fillnote').textContent = 'Couldn’t auto-fill from that link — fill the options below manually.'; }
-      btn.disabled = false; btn.textContent = 'Auto-fill';
-    });
-
-    ov.addEventListener('click', (e) => {
-      if (e.target === ov) return close(null);
-      const act = e.target.closest('[data-act]');
-      if (!act) return;
-      if (act.dataset.act === 'cancel') return close(null);
-      const name = $('cp-name').value.trim();
-      if (!name) { $('cp-name').focus(); return; }
-      // Toggles + OS selector are authoritative: only save fields for enabled capabilities/OS.
-      const cat = initCat;   // this dialog is dedicated to one kind
-      // Plug-ins & scripts are AE-only and live in AE's folders on both platforms → OS=both.
-      const os = (cat === 'plugin' || cat === 'script') ? 'both' : $('cp-os').value;
-      const win = os !== 'mac', mac = os !== 'win';
-      const method = $('cp-method').value, ac = $('cp-autocheck').checked;
-      // A script's "install" is a copy into AE's ScriptUI Panels on every installed AE version —
-      // auto-generated so the user never writes a command. Plug-ins use the silent installer cmd.
-      const scriptCmd = (osName) => osName === 'win'
-        ? 'for /d %i in ("C:\\Program Files\\Adobe\\Adobe After Effects *") do copy /Y "{file}" "%i\\Support Files\\Scripts\\ScriptUI Panels\\"'
-        : 'for d in /Applications/Adobe\\ After\\ Effects\\ */Scripts/ScriptUI\\ Panels; do cp "{file}" "$d/"; done';
-      const upd = cat === 'script' ? true : $('cp-tg-update').checked;
-      const unin = $('cp-tg-uninstall').checked;
-      // For AE plug-ins/scripts, auto-derive the detection path from the name (first word) so
-      // you don't have to type AE folder paths. e.g. "Element 3D" → look for Element*.aex in AE.
-      const tok = name.split(/[^A-Za-z0-9]+/).filter(Boolean)[0] || name;
-      const aePath = (osName) => {
-        if (cat === 'plugin') return osName === 'win'
-          ? `C:\\Program Files\\Adobe\\**\\${tok}*.aex` : `/Library/Application Support/Adobe/**/${tok}*.plugin`;
-        if (cat === 'script') return osName === 'win'
-          ? `C:\\Program Files\\Adobe\\**\\Scripts\\**\\${tok}*.jsx*` : `/Applications/Adobe After Effects */Scripts/**/${tok}*.jsx*`;
-        return null;
-      };
-      close({
-        name,
-        category: cat,
-        detect_pattern: (method === 'name' && cat === 'app') ? (g('cp-pat') || name.toLowerCase()) : null,
-        detect_path_win: win ? (g('cp-pwin') || aePath('win')) : null,
-        detect_path_mac: mac ? (g('cp-pmac') || aePath('mac')) : null,
-        latest_version: g('cp-ver'),
-        check_url: ac ? g('cp-curl') : null,
-        check_regex: ac ? g('cp-cre') : null,
-        source_url_win: (upd && win) ? (g('cp-swin') || (cat === 'script' ? $('cp-url').value.trim() || null : null)) : null,
-        install_cmd_win: (upd && win) ? (g('cp-cwin') || (cat === 'script' ? scriptCmd('win') : null)) : null,
-        source_url_mac: (upd && mac) ? (g('cp-smac') || (cat === 'script' ? $('cp-url').value.trim() || null : null)) : null,
-        install_cmd_mac: (upd && mac) ? (g('cp-cmac') || (cat === 'script' ? scriptCmd('mac') : null)) : null,
-        uninstall_cmd_win: (unin && win) ? g('cp-uwin') : null,
-        uninstall_cmd_mac: (unin && mac) ? g('cp-umac') : null,
-        icon_url: g('cp-icon'),
-      });
-    });
-    $('cp-name').focus();
-  });
-}
-async function addCustomProduct(category) {
-  const v = await customProductForm(null, category);
-  if (!v) return;
-  try {
-    await api('POST', '/api/products', v);
-    toast(`Tracking “${v.name}” — running a version check now…`, 'success', 6000);
-    // Kick an immediate check so the version + installer download happen right away.
-    try { await api('POST', '/api/check-maxon'); } catch { /* periodic check will catch it */ }
-    refresh();
-  } catch (e) { toast(e.message, 'error'); }
-}
-async function editProduct(key) {
-  const prod = state.products.find((x) => x.key === key);
-  if (!prod) return;
-  const v = await customProductForm(prod);
-  if (!v) return;
-  try { await api('PUT', `/api/products/${key}`, v); toast('Saved', 'success'); refresh(); }
-  catch (e) { toast(e.message, 'error'); }
-}
-async function deleteProduct(key) {
-  const p = state.products.find((x) => x.key === key);
-  if (!p) return;
-  if (!await uiConfirm(`Stop tracking “${p.name}” and remove it? This deletes the tracker record (not the app on any machine).`, { title: 'Delete custom product', confirmLabel: 'Delete', danger: true })) return;
-  try { await api('DELETE', `/api/products/${key}`); toast('Custom product removed', 'success'); refresh(); }
-  catch (e) { toast(e.message, 'error'); }
-}
-
-async function uninstallProduct(key) {
-  const prod = state.products.find((x) => x.key === key);
-  if (!prod) return;
-  const nodes = state.nodes.filter((n) => (n.software || []).some((s) => s.product_key === key));
-  if (!nodes.length) { toast(`No machines currently have ${prod.name}`, 'info'); return; }
-  const haveCmd = nodes.filter((n) => (n.os === 'windows' ? prod.uninstall_cmd_win : prod.uninstall_cmd_mac));
-  if (!haveCmd.length) { toast(`Set an uninstall command first — Edit ${prod.name} → Advanced`, 'error', 6000); return; }
-  const list = haveCmd.map((n) => n.hostname);
-  if (!await uiConfirm(`Uninstall “${prod.name}” from ${haveCmd.length} machine(s): ${list.slice(0, 8).join(', ')}${list.length > 8 ? '…' : ''}?`,
-    { title: 'Uninstall', confirmLabel: 'Uninstall', danger: true })) return;
-  try {
-    const r = await api('POST', '/api/uninstall', { product_key: key, node_ids: haveCmd.map((n) => n.id) });
-    toast(`Uninstall queued on ${r.queued.length} machine(s)`, 'success');
-    refresh();
-  } catch (e) { toast(e.message, 'error'); }
-}
-
 function renderCatalog() {
   const t = document.getElementById('catalog-table');
-  const catOf = (p) => (p.category === 'plugin' || p.category === 'script') ? p.category : 'app';
-  // Sub-tab counts.
-  document.querySelectorAll('#cat-subnav button').forEach((b) => {
-    const c = state.products.filter((p) => catOf(p) === b.dataset.cat).length;
-    const base = { app: 'Apps', plugin: 'Plug-ins', script: 'Scripts' }[b.dataset.cat];
-    b.textContent = `${base}${c ? ` (${c})` : ''}`;
-  });
-  const list = state.products.filter((p) => catOf(p) === catalogCat);
-  const versionLabel = catalogCat === 'script' ? 'Version' : 'Latest version';
-  if (!list.length) {
-    t.innerHTML = `<tr><td class="hint" style="padding:16px">No ${catalogCat === 'app' ? 'apps' : catalogCat + 's'} yet — click <b>Add</b> to track one.</td></tr>`;
-  } else {
-  t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>${versionLabel}</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th><th></th></tr>` +
-    list.map((p) => `<tr>
+  t.innerHTML = `<tr><th title="Track this app. When off it's removed from the dashboard, counts, wizard, version checks, installer fetches and auto-deploy.">Track</th><th>Product</th><th>Latest version</th><th>Updated</th><th title="Keep this app current across the fleet automatically — installs it on nodes that lack it and updates nodes that are behind, one canary node first, then the rest">Auto-deploy</th></tr>` +
+    state.products.map((p) => `<tr>
       <td class="track-cell"><label class="switch" title="Track ${esc(p.name)} — show it on the dashboard, counts, wizard. Off = ignore it.">
             <input type="checkbox" onchange="toggleDashboardVisible('${p.key}', this.checked)" ${p.dashboard_hidden ? '' : 'checked'}>
             <span class="switch-track"><span class="switch-thumb"></span></span>
@@ -1912,87 +1263,35 @@ function renderCatalog() {
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">${p.autodeploy ? 'On' : 'Off'}</span>
           </label>`}</td>
-      <td class="track-cell" style="white-space:nowrap">${p.custom ? `<button class="node-reboot" title="Edit" onclick="editProduct('${p.key}')">${icon('cog')}</button><button class="node-reboot" title="Uninstall from machines that have it" onclick="uninstallProduct('${p.key}')">${icon('x')}</button><button class="node-reboot" title="Delete this custom product (stops tracking; doesn't touch machines)" onclick="deleteProduct('${p.key}')">${icon('trash')}</button>` : ''}</td>
     </tr>`).join('');
-  }
 
-  // Download-folder panel — show only the active sub-tab's folder.
-  const dlVals = { 'dl-dir': state.downloadDir, 'dl-dir-plugins': state.downloadDirPlugins, 'dl-dir-scripts': state.downloadDirScripts };
-  for (const [id, val] of Object.entries(dlVals)) {
-    const el = document.getElementById(id);
-    if (el && document.activeElement !== el) el.value = val || '';
-  }
-  const catField = { app: 'downloadDir', plugin: 'downloadDirPlugins', script: 'downloadDirScripts' }[catalogCat];
-  const catWord = { app: 'Apps', plugin: 'Plug-ins', script: 'Scripts' }[catalogCat];
-  document.querySelectorAll('.dlf-row').forEach((r) => { r.hidden = r.querySelector('input').dataset.field !== catField; });
-  const fhead = document.getElementById('dlf-head'); if (fhead) fhead.textContent = `${catWord} — installer download folder`;
-  const fsub = document.getElementById('dlf-sub');
-  if (fsub) fsub.innerHTML = catalogCat === 'app'
-    ? 'Where app installers are staged / auto-fetched.'
-    : `Where ${catWord.toLowerCase()} installers go. Leave blank to use the Apps folder. (All folders are searched, so a file in any is found.)`;
+  // download-folder control
+  const dd = document.getElementById('dl-dir');
+  if (dd && document.activeElement !== dd) dd.value = state.downloadDir || '';
   const note = document.getElementById('dl-dir-note');
   if (note) {
-    const cur = catalogCat === 'app' ? state.downloadDir : catalogCat === 'plugin' ? state.downloadDirPlugins : state.downloadDirScripts;
-    note.innerHTML = /dropbox/i.test(cur || '')
-      ? `<span style="color:var(--warn)">${icon('alert')} This folder is inside Dropbox, so installers will sync to the cloud — pick a folder on your server/share instead.</span>`
-      : `Tip: in Finder, right-click a folder → <b>Copy as Pathname</b> (⌥⌘C), then paste it above.`;
+    note.innerHTML = /dropbox/i.test(state.downloadDir || '')
+      ? `<span style="color:var(--warn)">${icon('alert')} Warning: this folder is inside Dropbox, so every installer will sync to the cloud — pick a folder on your server/share instead.</span>`
+      : `Current: <code>${esc(state.downloadDir || '(default share)')}</code> &nbsp;·&nbsp; Tip: in Finder, right-click a folder → <b>Copy as Pathname</b> (⌥⌘C), then paste it above.`;
   }
-  // Slack + maintenance-window settings (don't clobber a field the user is editing).
-  const su = document.getElementById('slack-url');
-  if (su && document.activeElement !== su) su.value = state.slackWebhook || '';
-  const mw = state.maintenanceWindow || {};
-  const mwe = document.getElementById('mw-enabled'); if (mwe && document.activeElement !== mwe) mwe.checked = !!mw.enabled;
-  const mws = document.getElementById('mw-start'); if (mws && document.activeElement !== mws) mws.value = mw.start || '22:00';
-  const mwend = document.getElementById('mw-end'); if (mwend && document.activeElement !== mwend) mwend.value = mw.end || '06:00';
 }
 
-const DLF_LABEL = { downloadDir: 'Apps', downloadDirPlugins: 'Plug-ins', downloadDirScripts: 'Scripts' };
-const DLF_INPUT = { downloadDir: 'dl-dir', downloadDirPlugins: 'dl-dir-plugins', downloadDirScripts: 'dl-dir-scripts' };
-async function saveDownloadField(field, dir) {
-  if (dir == null) dir = document.getElementById(DLF_INPUT[field]).value;
-  dir = (dir || '').trim();
-  // Apps must always have a folder; plug-ins/scripts may be blank (= inherit Apps).
-  if (!dir && field === 'downloadDir') return;
-  try {
-    await api('POST', '/api/settings', { [field]: dir });
-    toast(dir ? `${DLF_LABEL[field]} folder set` : `${DLF_LABEL[field]} folder cleared (uses Apps)`, 'success');
-    refresh();
-  } catch (e) { toast(e.message, 'error'); }
+async function saveDownloadDir(dir) {
+  dir = (dir || document.getElementById('dl-dir').value || '').trim();
+  if (!dir) return;
+  try { await api('POST', '/api/settings', { downloadDir: dir }); toast('Download folder set to ' + dir, 'success'); refresh(); }
+  catch (e) { toast(e.message, 'error'); }
 }
-document.querySelectorAll('.dlf-save').forEach((b) => b.addEventListener('click', () => saveDownloadField(b.dataset.field)));
-document.querySelectorAll('.dlf-browse').forEach((b) => b.addEventListener('click', () => browseFolder(b.dataset.field)));
-document.querySelectorAll('.dlf-row input').forEach((inp) =>
-  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveDownloadField(inp.dataset.field); } }));
-
-// Slack alerts
-document.getElementById('slack-save').addEventListener('click', async () => {
-  try { await api('POST', '/api/settings', { slackWebhook: document.getElementById('slack-url').value.trim() });
-    toast('Slack settings saved.', 'success'); refresh(); } catch (e) { toast(e.message, 'error'); }
-});
-document.getElementById('slack-test').addEventListener('click', async () => {
-  const url = document.getElementById('slack-url').value.trim();
-  try {
-    if (url !== (state.slackWebhook || '')) await api('POST', '/api/settings', { slackWebhook: url });
-    await api('POST', '/api/slack-test'); toast('Test message sent to Slack.', 'success');
-  } catch (e) { toast(e.message, 'error'); }
-});
-// Maintenance window
-document.getElementById('mw-save').addEventListener('click', async () => {
-  try {
-    await api('POST', '/api/settings', { maintenanceWindow: {
-      enabled: document.getElementById('mw-enabled').checked,
-      start: document.getElementById('mw-start').value || '22:00',
-      end: document.getElementById('mw-end').value || '06:00',
-    } });
-    toast('Maintenance window saved.', 'success'); refresh();
-  } catch (e) { toast(e.message, 'error'); }
-});
+document.getElementById('dl-dir-browse').addEventListener('click', () => browseFolder());
+document.getElementById('dl-dir-save').addEventListener('click', () => saveDownloadDir());
+// Paste/type a path and press Enter to save it directly.
+document.getElementById('dl-dir').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveDownloadDir(); } });
 
 // Finder-style server folder picker: Favorites/Locations sidebar, clickable breadcrumb
 // path, a Name/Date/Size list (folders navigable, files shown for context), and a New
 // Folder action. "Use this folder" sets + saves it.
-async function browseFolder(field = 'downloadDir') {
-  const start = (document.getElementById(DLF_INPUT[field]) || {}).value || state[field] || state.downloadDir || '';
+async function browseFolder() {
+  const start = document.getElementById('dl-dir').value.trim() || state.downloadDir || '';
   const ov = document.createElement('div');
   ov.className = 'modal-overlay';
   ov.innerHTML = `<div class="modal fb-dialog" role="dialog" aria-modal="true" aria-label="Choose folder">
@@ -2097,24 +1396,13 @@ async function browseFolder(field = 'downloadDir') {
     const act = e.target.closest('[data-act]');
     if (!act) return;
     if (act.dataset.act === 'newfolder') return newFolderRow();
-    if (act.dataset.act === 'use') { close(); saveDownloadField(field, cur); }
+    if (act.dataset.act === 'use') { close(); saveDownloadDir(cur); }
     else close();
   });
   load(start);
 }
 
 // Manual "Check now" — detect newest Maxon versions + auto-fetch installers on demand.
-// Catalog sub-tabs (Apps / Plug-ins / Scripts) — keep the catalog uncrowded.
-let catalogCat = 'app';
-document.querySelectorAll('#cat-subnav button').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    catalogCat = btn.dataset.cat;
-    document.querySelectorAll('#cat-subnav button').forEach((b) => b.classList.toggle('active', b === btn));
-    if (state) renderCatalog();
-  });
-});
-// "Add" pre-selects the type matching the current sub-tab (Plug-in / Script / App).
-document.getElementById('cat-add').addEventListener('click', () => addCustomProduct(catalogCat));
 document.getElementById('cat-refresh').addEventListener('click', async (e) => {
   const btn = e.currentTarget; const orig = btn.innerHTML;
   btn.disabled = true; btn.innerHTML = `${icon('refresh', 'spin')} checking…`;
@@ -2123,7 +1411,7 @@ document.getElementById('cat-refresh').addEventListener('click', async (e) => {
     const parts = [];
     if (r.bumped && r.bumped.length) parts.push('new: ' + r.bumped.join(', '));
     if (r.fetched && r.fetched.length) parts.push('fetching ' + r.fetched.length + ' installer(s)');
-    toast(parts.length ? parts.join(' · ') : 'Checked — all app versions are current (Maxon, Blender, FFmpeg, NotchLC, NVIDIA).', parts.length ? 'success' : 'info');
+    toast(parts.length ? parts.join(' · ') : 'Checked — all Maxon versions are current.', parts.length ? 'success' : 'info');
     refresh();
   } catch (err) { toast(err.message, 'error'); }
   finally { btn.disabled = false; btn.innerHTML = orig; }
@@ -2240,7 +1528,6 @@ async function refresh() {
       p.latest_version = max || p.latest_version;
     }
     renderDashboard();
-    renderFleet();
     if (!editingWizard()) renderWizard();
     renderDeploy();
     if (!editingCatalog) renderCatalog();
@@ -2271,17 +1558,12 @@ async function loadEnrolCommands() {
 
 // Paint all static icon placeholders (tabs, brand, search, labels).
 function paintIcons() {
+  document.getElementById('brand-ic').innerHTML = icon('server');
   document.querySelectorAll('[data-ic]').forEach((el) => {
     if (!el.dataset.painted) { el.innerHTML = icon(el.dataset.ic); el.dataset.painted = '1'; }
   });
 }
 paintIcons();
-
-// Lock background scroll whenever a modal is open, so the wheel scrolls the dialog (not the
-// page behind it). Generic — covers every overlay (Add/Edit form, confirms, folder browser).
-new MutationObserver(() => {
-  document.body.classList.toggle('modal-open', !!document.querySelector('.modal-overlay'));
-}).observe(document.body, { childList: true });
 
 loadEnrolCommands();
 refresh();

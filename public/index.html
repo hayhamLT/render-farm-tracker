@@ -8,12 +8,12 @@
 </head>
 <body>
 <header>
+  <h1><span class="brand-ic" id="brand-ic"></span> Render Farm</h1>
   <nav>
     <button data-tab="dashboard" class="active"><span class="tab-ic" data-ic="grid"></span>Dashboard</button>
     <button data-tab="deploy"><span class="tab-ic" data-ic="download"></span>Updates</button>
-    <button data-tab="fleet"><span class="tab-ic" data-ic="beacon"></span>Fleet</button>
-    <button data-tab="activity"><span class="tab-ic" data-ic="activity"></span>Activity</button>
     <button data-tab="catalog"><span class="tab-ic" data-ic="package"></span>Catalog</button>
+    <button data-tab="activity"><span class="tab-ic" data-ic="activity"></span>Activity</button>
     <button data-tab="setup"><span class="tab-ic" data-ic="help"></span>Help</button>
   </nav>
   <span id="refresh-indicator" title="Live — auto-refreshes every few seconds">●</span>
@@ -56,39 +56,28 @@
     <div id="node-grid"></div>
   </section>
 
-  <section id="tab-fleet" class="tab">
-    <div id="fleet-kpis" class="fleet-kpis"></div>
-    <div class="fleet-cols">
-      <div class="fleet-main">
-        <div class="panel fleet-panel">
-          <div class="fleet-panel-head">
-            <h2><span class="fp-ic" data-ic="activity"></span> Live activity</h2>
-            <span class="search-wrap"><span class="search-ic" data-ic="search"></span><input id="fleet-search" placeholder="Filter machines…" autocomplete="off"></span>
-          </div>
-          <div id="fleet-table"></div>
-        </div>
-      </div>
-      <aside class="fleet-side">
-        <div class="panel fleet-panel" id="fleet-beacon"></div>
-        <div class="panel fleet-panel" id="fleet-os"></div>
-        <div class="panel fleet-panel" id="fleet-drivers"></div>
-        <div class="panel fleet-panel" id="fleet-alerts"></div>
-      </aside>
-    </div>
-  </section>
-
   <section id="tab-deploy" class="tab">
     <div class="panel" id="wizard-panel">
       <div class="up-head">
-        <h2>Deploy updates</h2>
+        <h2>Update software</h2>
         <span class="hint" id="up-current" style="margin:0"></span>
       </div>
-
-      <div class="up-step"><span class="up-step-n">1</span> Pick software</div>
       <div id="up-products" class="choice-cards"></div>
 
+      <div class="up-action">
+        <span id="up-target-count" class="up-count"></span>
+        <button id="up-go" class="wiz-go"><span data-ic="download"></span> Update now</button>
+      </div>
+      <label class="up-major-row" id="up-major-row" style="display:none">
+        <input type="checkbox" id="up-major"> <span id="up-major-label"></span>
+      </label>
+      <div id="up-preview" class="up-preview" style="display:none"></div>
+      <div id="up-progress" class="hint" style="display:none"></div>
+      <div id="up-installer-warn" class="hint warn-hint" style="display:none"></div>
+      <div id="up-elev-warn" class="hint warn-hint" style="display:none"></div>
+
       <details class="up-adv">
-        <summary><span class="up-step-n">2</span> Machines &amp; options <span class="up-adv-hint">platform · source · choose machines</span></summary>
+        <summary><span data-ic="cog"></span> Options <span class="up-adv-hint">platform · source · choose machines</span></summary>
         <div class="up-adv-body">
           <div class="adv-field">
             <span class="adv-label">Platform</span>
@@ -138,24 +127,11 @@
           </div>
         </div>
       </details>
-
-      <label class="up-major-row" id="up-major-row" style="display:none">
-        <input type="checkbox" id="up-major"> <span id="up-major-label"></span>
-      </label>
-      <div id="up-preview" class="up-preview" style="display:none"></div>
-      <div id="up-installer-warn" class="hint warn-hint" style="display:none"></div>
-      <div id="up-elev-warn" class="hint warn-hint" style="display:none"></div>
-
-      <div class="up-action">
-        <span id="up-target-count" class="up-count"></span>
-        <button id="up-go" class="wiz-go"><span data-ic="download"></span> Update now</button>
-      </div>
-      <div id="up-progress" class="hint" style="display:none"></div>
     </div>
 
     <div class="panel">
       <div class="act-head">
-        <h2>Recent jobs</h2>
+        <h2>Update activity</h2>
         <span id="job-summary" class="hint"></span>
         <div class="act-actions">
           <button class="link-btn" id="job-clear" style="display:none" onclick="clearFinishedJobs()"><span data-ic="trash"></span> Clear all</button>
@@ -189,64 +165,21 @@
       <div class="act-head">
         <h2>Tracked software — latest available versions</h2>
         <span class="hint" id="cat-refresh-note" style="margin:0"></span>
-        <button class="link-btn" id="cat-add" title="Add a custom app, plug-in or script to track / deploy. No code change needed."><span data-ic="download"></span> Add</button>
-        <button class="link-btn" id="cat-refresh" title="Check the latest versions for every auto-detected app (Maxon, Blender, FFmpeg, NotchLC, NVIDIA) and fetch any new installers. After Effects updates separately via Adobe RUM on each machine's check-in."><span data-ic="refresh"></span> Check now</button>
-      </div>
-      <div id="cat-subnav" class="cat-subnav">
-        <button type="button" data-cat="app" class="active">Apps</button>
-        <button type="button" data-cat="script">Scripts</button>
+        <button class="link-btn" id="cat-refresh"><span data-ic="refresh"></span> Check now</button>
       </div>
       <table id="catalog-table"></table>
     </div>
     <div class="panel">
-      <h2 id="dlf-head">Installer download folder</h2>
-      <p class="hint" id="dlf-sub" style="margin:-4px 0 12px"></p>
-      <div class="dlf-grid">
-        <div class="dlf-row">
-          <span class="dlf-label">Apps</span>
-          <div class="path-field"><span class="path-ic" data-ic="folder"></span><input id="dl-dir" data-field="downloadDir" placeholder="Paste a path…" autocomplete="off" spellcheck="false"></div>
-          <button class="btn-soft dlf-save" data-field="downloadDir" title="Save"><span data-ic="check"></span></button>
-          <button class="btn-soft primary dlf-browse" data-field="downloadDir" title="Browse"><span data-ic="folder"></span></button>
-        </div>
-        <div class="dlf-row">
-          <span class="dlf-label">Scripts</span>
-          <div class="path-field"><span class="path-ic" data-ic="folder"></span><input id="dl-dir-scripts" data-field="downloadDirScripts" placeholder="(uses Apps folder)" autocomplete="off" spellcheck="false"></div>
-          <button class="btn-soft dlf-save" data-field="downloadDirScripts" title="Save"><span data-ic="check"></span></button>
-          <button class="btn-soft primary dlf-browse" data-field="downloadDirScripts" title="Browse"><span data-ic="folder"></span></button>
-        </div>
-      </div>
-      <div class="hint" id="dl-dir-note" style="margin-top:10px"></div>
-    </div>
-
-    <div class="panel">
-      <h2>Slack alerts</h2>
+      <h2>Installer download folder</h2>
       <div class="wiz-row" style="gap:10px">
         <div class="path-field">
-          <span class="path-ic" data-ic="activity"></span>
-          <input id="slack-url" placeholder="https://hooks.slack.com/services/…" autocomplete="off" spellcheck="false">
+          <span class="path-ic" data-ic="folder"></span>
+          <input id="dl-dir" placeholder="Paste a path and press Enter…" autocomplete="off" spellcheck="false">
         </div>
-        <button class="btn-soft" id="slack-test" title="Send a test message"><span data-ic="play"></span> Test</button>
-        <button class="btn-soft primary" id="slack-save"><span data-ic="check"></span> Save</button>
+        <button class="btn-soft" id="dl-dir-save" title="Save the typed path"><span data-ic="check"></span> Save</button>
+        <button class="btn-soft primary" id="dl-dir-browse" title="Browse the server's folders"><span data-ic="folder"></span> Browse…</button>
       </div>
-      <div class="hint" style="margin-top:8px">Paste a Slack <b>Incoming Webhook</b> URL to get alerts on failed installs, halted
-        auto-deploys, machines offline 15+ min, and newly-detected versions. Leave blank to turn off.</div>
-    </div>
-
-    <div class="panel">
-      <h2>Maintenance window</h2>
-      <div class="wiz-row" style="gap:14px; align-items:center">
-        <label class="switch" title="Limit auto-deploy to a time window">
-          <input type="checkbox" id="mw-enabled">
-          <span class="switch-track"><span class="switch-thumb"></span></span>
-        </label>
-        <span class="hint" style="margin:0">Only auto-deploy between</span>
-        <input type="time" id="mw-start" class="time-input">
-        <span class="hint" style="margin:0">and</span>
-        <input type="time" id="mw-end" class="time-input">
-        <button class="btn-soft primary" id="mw-save"><span data-ic="check"></span> Save</button>
-      </div>
-      <div class="hint" style="margin-top:8px">When on, the server's <b>auto-deploy</b> only rolls out inside this window (handy for off-hours).
-        Manual updates from the Updates tab always run immediately.</div>
+      <div class="hint" id="dl-dir-note" style="margin-top:8px"></div>
     </div>
   </section>
 
@@ -273,55 +206,41 @@
 
   <section id="tab-setup" class="tab">
 
-    <div class="help-head">
-      <h2>Help &amp; documentation</h2>
-      <p class="hint">How the farm tracker discovers machines, keeps software current, and what to do when something looks off.</p>
-    </div>
-    <div class="help-subnav" id="help-subnav">
-      <button data-sub="start" class="active"><span data-ic="server"></span>Getting started</button>
-      <button data-sub="updates"><span data-ic="download"></span>How updates work</button>
-      <button data-sub="custom"><span data-ic="package"></span>Your own apps &amp; scripts</button>
-      <button data-sub="gpu"><span data-ic="activity"></span>GPU drivers</button>
-      <button data-sub="adobe"><span data-ic="refresh"></span>Adobe &amp; After Effects</button>
-      <button data-sub="badges"><span data-ic="check"></span>Badges &amp; status</button>
-      <button data-sub="trouble"><span data-ic="help"></span>Troubleshooting</button>
-    </div>
-
-    <!-- ───────────── GETTING STARTED ───────────── -->
-    <div class="help-sub active" id="sub-start">
     <div class="panel setup-hero">
       <div class="hero-ic" data-ic="check"></div>
       <div>
         <h2>New machines join by themselves</h2>
-        <p class="hint">A machine shows up within a few minutes of the tracker agent running on it. With a
-          <b>Deadline Worker</b> that's automatic; <b>without Deadline</b>, install the agent once — via the
-          commands below, or pushed to many machines at once with Group Policy / a startup script.</p>
+        <p class="hint">Any machine running a <b>Deadline Worker</b> is discovered and added to the
+          dashboard automatically within a few minutes of coming online — nothing to install by hand.</p>
       </div>
     </div>
 
     <div class="guide-grid">
       <div class="panel guide-card">
         <h3><span data-ic="windows"></span> New Windows machine</h3>
-        <p class="hint">Once it's on the dashboard, do this <b>once, in person</b> to allow silent installs (Windows can't enable this remotely):</p>
+        <p class="hint">It appears on the dashboard by itself. One click unlocks silent installs
+          (Windows requires this once, in person — it can't be done remotely):</p>
         <ol class="steps">
-          <li>Open <code>\\THIS-server\INSTALLERS</code></li>
+          <li>On that machine, open <code>\\THIS-server\INSTALLERS</code></li>
           <li>Right-click <b>Elevate-Tracker.cmd</b> → <b>Run as administrator</b></li>
-          <li>Click <b>Yes</b> — done</li>
+          <li>Click <b>Yes</b> on the prompt — done</li>
         </ol>
-        <p class="hint">The green <span class="badge icon elev-ok demo" data-ic="shieldOk"></span> shield appears within a minute. (Not on the dashboard yet? See <i>Enroll a machine yourself</i> below.)</p>
+        <p class="hint">The green <span class="badge icon elev-ok demo" data-ic="shieldOk"></span> shield
+          shows up on its card within a minute.</p>
       </div>
 
       <div class="panel guide-card">
         <h3><span data-ic="apple"></span> New Mac</h3>
-        <p class="hint">Nothing to do — with a Deadline Worker a Mac enrolls <i>and</i> elevates itself; the green shield appears on its own.</p>
-        <p class="hint">No Deadline, or it's stuck? Run the macOS commands below once.</p>
+        <p class="hint">Fully automatic — discovery <i>and</i> elevation. The Mac is enrolled,
+          switched to a root agent, and shows the green shield with no action from you.</p>
+        <p class="hint">If one ever gets stuck, the manual commands below fix it.</p>
       </div>
     </div>
 
     <details class="panel">
-      <summary>Enroll a machine yourself (no Deadline needed)</summary>
-      <p class="hint">Run on the machine: <b>Step 1</b> adds it to the dashboard, <b>Step 2</b> enables silent installs.
-        For many machines at once, run Step 1 as a <b>Group Policy / login startup script</b> — same command, no Deadline.</p>
+      <summary>Manual enrolment — for machines without a Deadline Worker</summary>
+      <p class="hint">Run on the machine itself. <b>Step 1</b> puts it on the dashboard (no admin).
+        <b>Step 2</b> enables prompt-free installs. Address and key are baked in.</p>
       <div class="enrol-step"><span class="enrol-n">1</span> Monitor <span class="hint">(no admin)</span></div>
       <table>
         <tr>
@@ -350,91 +269,34 @@
       </table>
       <p class="hint">Windows needs Python 3 (the script offers winget). The node appears within a minute.</p>
     </details>
-    </div><!-- /sub-start -->
 
-    <!-- ───────────── HOW UPDATES WORK ───────────── -->
-    <div class="help-sub" id="sub-updates">
     <div class="panel">
       <h2>How updates work</h2>
       <div class="how-grid">
-        <div class="how-card"><span data-ic="search"></span><b>It spots what's old</b>
-          <p class="hint">Every machine reports what it has installed. Anything out of date lights up yellow.</p></div>
-        <div class="how-card"><span data-ic="download"></span><b>Downloads once</b>
-          <p class="hint">The installer downloads to the server one time — every machine then grabs it over the local network.</p></div>
-        <div class="how-card"><span data-ic="shieldOk"></span><b>Installs quietly</b>
-          <p class="hint">Updates install in the background with no pop-ups, and are double-checked afterward.</p></div>
-        <div class="how-card"><span data-ic="play"></span><b>Hands-off option</b>
-          <p class="hint">Turn on <b>Auto-deploy</b> for an app in the Catalog and the server keeps it current everywhere by itself. Off unless you switch it on.</p></div>
+        <div class="how-card"><span data-ic="search"></span><b>Track</b>
+          <p class="hint">Every machine reports its installed versions once a minute. The latest
+            releases are checked online automatically, so outdated installs light up yellow.</p></div>
+        <div class="how-card"><span data-ic="download"></span><b>Download once</b>
+          <p class="hint">An installer is fetched a single time to the server, then every machine
+            pulls it over the LAN — fast, and nothing hammers the internet.</p></div>
+        <div class="how-card"><span data-ic="shieldOk"></span><b>Install safely</b>
+          <p class="hint">Files are integrity-checked (SHA-256), installs run silently with no
+            pop-ups, and the version is verified afterwards so a failed install can't pretend.</p></div>
+        <div class="how-card"><span data-ic="cog"></span><b>Queue &amp; control</b>
+          <p class="hint">Updates roll out a few machines at a time; the rest queue. Any running
+            install can be stopped from its progress chip.</p></div>
+        <div class="how-card"><span data-ic="play"></span><b>Auto-deploy (optional)</b>
+          <p class="hint">Flip an app's <b>Auto-deploy</b> toggle in the Catalog and the server keeps it
+            current across the whole fleet by itself — installs it where missing, updates where behind,
+            one canary machine first then the rest. Off by default.</p></div>
+        <div class="how-card"><span data-ic="package"></span><b>Catalog &amp; settings</b>
+          <p class="hint">The <b>Catalog</b> lists every tracked app and its latest version (auto-detected
+            per vendor). Each app's <b>Track</b> toggle adds or removes it from the dashboard, counts and
+            updates. Set the installer download folder there too — keep it on your server/share, not a
+            synced folder like Dropbox, so multi-GB installers don't sync.</p></div>
       </div>
     </div>
-    </div><!-- /sub-updates -->
 
-    <!-- ───────────── YOUR OWN APPS & SCRIPTS ───────────── -->
-    <div class="help-sub" id="sub-custom">
-    <div class="panel">
-      <h2>Track &amp; update your own apps and scripts</h2>
-      <p class="hint">Beyond the built-in apps, the <b>Catalog</b> lets you add anything else on the farm and
-        install, update or remove it from the <b>Updates</b> tab — just like the built-ins. The Catalog has
-        two tabs: <b>Apps</b> and <b>Scripts</b>, each with its own installer download folder.</p>
-      <div class="how-grid">
-        <div class="how-card"><span data-ic="package"></span><b>Add an app</b>
-          <p class="hint">Catalog → <b>Apps</b> → <b>Add</b>. Type a name and paste the app's website or installer link, then <b>Auto-fill</b> grabs the icon, version and installer. Works on Windows &amp; macOS.</p></div>
-        <div class="how-card"><span data-ic="file"></span><b>Add an AE script</b>
-          <p class="hint">Catalog → <b>Scripts</b> → <b>Add</b>. Point it at a <code>.jsx</code>/<code>.jsxbin</code>; it copies into After Effects' <i>ScriptUI&nbsp;Panels</i> on every machine. Set an uninstall command to allow removing it.</p></div>
-        <div class="how-card"><span data-ic="download"></span><b>Auto everything</b>
-          <p class="hint">With an installer link + a silent install command, the server downloads it once and rolls it out; turn on <b>Auto-deploy</b> to keep it current by itself.</p></div>
-        <div class="how-card"><span data-ic="check"></span><b>Install / uninstall</b>
-          <p class="hint">Custom apps and scripts appear in the <b>Updates</b> tab and on the dashboard, and can be pushed or removed across the fleet like any built-in.</p></div>
-      </div>
-      <details class="qa"><summary>Auto-fill couldn't read a site (e.g. aescripts.com)</summary>
-        <p class="hint">Some stores sit behind login or bot protection, so the server can't read the page. Type the
-          name and version yourself — the icon still loads from the site — then download the file with your
-          account and drop it in the Catalog's download folder for that tab.</p></details>
-      <details class="qa"><summary>It didn't find my installer / picked the wrong one</summary>
-        <p class="hint">Give the product a name that appears in the installer's filename (e.g. an app called
-          <b>VLC</b> matches <code>vlc-3.0.23-win64.exe</code>), and keep one installer per OS in the download
-          folder. A version in the filename lets the tracker confirm it's the right build.</p></details>
-    </div>
-    </div><!-- /sub-custom -->
-
-    <!-- ───────────── GPU DRIVERS ───────────── -->
-    <div class="help-sub" id="sub-gpu">
-    <div class="panel">
-      <h2>Graphics drivers</h2>
-      <p class="hint">NVIDIA drivers are kept current automatically, just like apps. Each machine gets the newest driver
-        <b>its own card supports</b>.</p>
-      <div class="how-grid">
-        <div class="how-card"><span data-ic="check"></span><b>Right driver per card</b>
-          <p class="hint">Newer cards get the latest driver; older cards get the newest one that still works on them — shown as up to date, not behind.</p></div>
-        <div class="how-card"><span data-ic="clock"></span><b>Never during a render</b>
-          <p class="hint">A driver install briefly resets the card, so it waits until the machine is idle. A render is never interrupted.</p></div>
-        <div class="how-card"><span data-ic="shieldOk"></span><b>Safe</b>
-          <p class="hint">If an install fails, the old working driver stays in place. Nothing is left broken.</p></div>
-        <div class="how-card"><span data-ic="power"></span><b>Restart to finish</b>
-          <p class="hint">Most apply right away; if one needs it, use the <b>⏻ Restart</b> button on the machine's card.</p></div>
-      </div>
-      <p class="hint">Machines without an NVIDIA card show <b>n/a</b> and are skipped.</p>
-    </div>
-    </div><!-- /sub-gpu -->
-
-    <!-- ───────────── ADOBE ───────────── -->
-    <div class="help-sub" id="sub-adobe">
-    <div class="panel">
-      <h2>Adobe &amp; After Effects</h2>
-      <p class="hint">Adobe apps update automatically through Adobe's own updater — quietly, with no downloads to manage, and never during a render.</p>
-      <div class="how-grid">
-        <div class="how-card"><span data-ic="check"></span><b>Handled automatically</b>
-          <p class="hint">The tracker shows the latest After Effects version Adobe offers and rolls it out to any machine that's behind — no manual installer needed.</p></div>
-        <div class="how-card"><span data-ic="clock"></span><b>New versions can take a little while</b>
-          <p class="hint">A brand-new release may not appear right away — Adobe publishes it to its update feed on its own schedule. Once it does, the tracker picks it up and updates the fleet on its own.</p></div>
-        <div class="how-card"><span data-ic="refresh"></span><b>Creative Cloud app</b>
-          <p class="hint">The Creative Cloud app updates itself — shown for info only.</p></div>
-      </div>
-    </div>
-    </div><!-- /sub-adobe -->
-
-    <!-- ───────────── BADGES ───────────── -->
-    <div class="help-sub" id="sub-badges">
     <div class="panel">
       <h2>What the badges mean</h2>
       <table class="legend">
@@ -447,37 +309,33 @@
         <tr><td><span class="badge icon major demo" data-ic="up"></span></td><td><b>New major available</b> — a newer major version; opt-in side-by-side install</td></tr>
         <tr><td><span class="badge icon missing demo" data-ic="x"></span></td><td>Not installed — product not found on the machine</td></tr>
         <tr><td><span class="badge icon selfupd demo" data-ic="refresh"></span></td><td>Self-updating — Adobe keeps Creative Cloud current; not managed here</td></tr>
-        <tr><td><span class="badge icon na demo">–</span></td><td><b>n/a</b> — the product doesn't apply to this machine (e.g. an NVIDIA driver on a Mac, or on a non-NVIDIA box)</td></tr>
-        <tr><td><span class="node-reboot demo"><span data-ic="power"></span></span></td><td><b>Restart</b> — on an <b>online</b> machine: reboots it (recovers a stuck agent or applies a driver); interrupts any active render</td></tr>
-        <tr><td><span class="node-reboot wake demo"><span data-ic="power"></span></span></td><td><b>Wake</b> — on an <b>offline</b> machine: powers it on via Wake-on-LAN</td></tr>
       </table>
     </div>
-    </div><!-- /sub-badges -->
 
-    <!-- ───────────── TROUBLESHOOTING ───────────── -->
-    <div class="help-sub" id="sub-trouble">
     <div class="panel">
       <h2>Troubleshooting</h2>
       <details class="qa"><summary>A machine shows offline but it's switched on</summary>
-        <p class="hint">Give it ~90 seconds — that's the check-in grace. Still offline? Its agent stopped; it usually relaunches itself within a few minutes (built-in watchdog). If it doesn't come back, reboot the machine. (If it's actually powered <b>off</b>, use the <b>⏻ Wake</b> button to turn it on.)</p></details>
-      <details class="qa"><summary>The ⏻ Wake button doesn't power a machine on</summary>
-        <p class="hint">The agent already enables Wake-on-LAN on each machine's network card automatically (and re-applies it on every boot), so waking from <b>sleep</b> works out of the box. Waking from a <b>full shutdown</b> needs one setting the tracker can't reach — it's in the machine's BIOS/UEFI:</p>
-        <ul class="hint" style="margin:6px 0 0 18px">
-          <li>Enter the BIOS/UEFI (usually <b>Del</b> or <b>F2</b> at power-on) and enable <b>Wake on LAN</b> / <b>Power On by PCIe</b> / <b>Resume by Magic Packet</b>.</li>
-          <li>Disable <b>ErP</b> / <b>EuP</b> (deep power-saving) — it cuts standby power to the network card when off, which blocks wake.</li>
-          <li>Make sure the <b>plugged-in</b> network port is the one with WoL enabled (machines with two NICs report several).</li>
-        </ul>
-        <p class="hint" style="margin-top:6px">This is a one-time, per-machine step. Tip: <b>sleep</b> idle machines instead of shutting them down and the Wake button works without touching the BIOS.</p></details>
+        <p class="hint">Give it two minutes — agents check in once a minute. Still offline? Its agent
+          stopped — click the <b>↻ reboot</b> button on the machine's card to restart it remotely (a
+          reboot relaunches the agent on its own). On Windows, re-running <b>Elevate-Tracker.cmd</b> also
+          works — both are safe to repeat.</p></details>
       <details class="qa"><summary>A machine is online but updates never run on it</summary>
-        <p class="hint">The agent is stuck. It usually fixes itself; to fix it now, click the <b>⏻ Restart</b> button on its card. (A restart interrupts any render on that machine.)</p></details>
+        <p class="hint">Its agent is alive but stuck — it still checks in, but queued installs sit
+          waiting. The agent now <b>self-restarts</b> if this happens (a built-in watchdog catches a
+          stalled agent on its own). To fix it instantly, click the <b>↻ reboot</b> button on its card —
+          that bounces the machine through Deadline even when the agent is hung, and a fresh agent picks
+          up the queue. (A reboot interrupts any render running on that node.)</p></details>
       <details class="qa"><summary>A machine never appears on the dashboard</summary>
-        <p class="hint">It needs the tracker agent installed. With a Deadline Worker that's automatic; otherwise install it once — the commands above, or pushed via Group Policy / a startup script.</p></details>
+        <p class="hint">Auto-discovery rides on Deadline — make sure the Deadline Worker is installed
+          and running on it. No Deadline? Use the manual enrolment commands above.</p></details>
       <details class="qa"><summary>An update ran but the version didn't change</summary>
-        <p class="hint">The tracker double-checks every install, so it flags one that didn't actually change. Usually it's Redshift bundled inside Cinema 4D — update Cinema 4D instead.</p></details>
+        <p class="hint">The job is marked failed on purpose — the install is verified against the
+          actual version on disk. Common cause: Redshift bundled with Cinema 4D won't downgrade or
+          override; update Cinema 4D instead.</p></details>
       <details class="qa"><summary>An install is stuck or taking too long</summary>
-        <p class="hint">In <b>Updates</b>, press ✕ on its progress bar to stop it. Stuck jobs also clear themselves after 45 minutes.</p></details>
+        <p class="hint">Open <b>Updates</b> and press the ✕ on its progress chip to stop it. Stale
+          jobs are also cleaned up automatically after 45 minutes.</p></details>
     </div>
-    </div><!-- /sub-trouble -->
   </section>
 </main>
 

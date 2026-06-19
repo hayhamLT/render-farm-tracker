@@ -977,7 +977,13 @@ function wakeOnLan(macs, nodeIp) {
   }
   // The node's own /24 broadcast (handles a routed subnet or a missing interface match).
   const ip4 = String(nodeIp || '').replace(/^::ffff:/, '');
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(ip4)) targets.push({ addr: ip4.replace(/\.\d+$/, '.255'), bind: null });
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(ip4)) {
+    targets.push({ addr: ip4.replace(/\.\d+$/, '.255'), bind: null });
+    // Also fire the magic packet straight at the node's last-known IP. While its ARP/switch
+    // CAM entry is still warm (just after shutdown) this reaches the exact port as a directed
+    // unicast — which wakes NICs even when the switch drops broadcast WoL traffic.
+    targets.push({ addr: ip4, bind: null });
+  }
 
   for (const t of targets) {
     const sock = dgram.createSocket('udp4');
