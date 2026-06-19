@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.25.0"
+AGENT_VERSION = "2.26.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -178,6 +178,41 @@ def ensure_fast_startup_disabled():
         if cur != 0:
             winreg.SetValueEx(key, "HiberbootEnabled", 0, winreg.REG_DWORD, 0)
         winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+def ensure_wol_enabled():
+    """Enable Wake-on-LAN at the OS / NIC level so the tracker's Wake button can power a
+    halted machine back on.
+
+    Windows: for every physical NIC that's up, turn on 'wake on magic packet' + 'allow this
+    device to wake the computer', and prefer magic-packet-only (no spurious pattern wakes).
+    macOS: enable wake-on-magic-packet (pmset womp). Idempotent, best-effort, never raises;
+    only takes effect as admin/root (the elevated agent) and is re-applied on every start so a
+    driver update can't silently turn it back off.
+
+    NOTE: this is the OS half only. Waking from a FULL shutdown (S5) ALSO requires the machine's
+    BIOS/UEFI 'Wake on LAN from S5' enabled and ErP/EuP power-saving disabled — that's firmware
+    and cannot be set from software; it must be done once per machine in the BIOS.
+    """
+    try:
+        if IS_WINDOWS:
+            ps = (
+                "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | "
+                "Where-Object {$_.Status -eq 'Up'} | ForEach-Object { $n=$_.Name;"
+                "try{Set-NetAdapterPowerManagement -Name $n -WakeOnMagicPacket Enabled "
+                "-WakeOnPattern Disabled -ErrorAction SilentlyContinue}catch{};"
+                "try{Set-NetAdapterAdvancedProperty -Name $n -RegistryKeyword '*WakeOnMagicPacket' "
+                "-RegistryValue 1 -ErrorAction SilentlyContinue}catch{};"
+                "try{powercfg /deviceenablewake \"$($_.InterfaceDescription)\" | Out-Null}catch{} }"
+            )
+            import base64
+            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                            "-EncodedCommand", enc], capture_output=True, timeout=60)
+        elif IS_MACOS:
+            subprocess.run(["pmset", "-a", "womp", "1"], capture_output=True, timeout=30)
     except Exception:
         pass
 
@@ -1318,6 +1353,7 @@ def main():
     # Fast Startup so reboots cold-boot the agent before login (and Wake-on-LAN works).
     ensure_task_watchdog()
     ensure_fast_startup_disabled()
+    ensure_wol_enabled()
 
     # Wedge watchdog: force a restart if the loop stalls or a job hangs (see above).
     watch_state = {"tick": time.time(), "busy_since": None}
