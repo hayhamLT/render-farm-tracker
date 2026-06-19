@@ -460,6 +460,14 @@
       <h2>Troubleshooting</h2>
       <details class="qa"><summary>A machine shows offline but it's switched on</summary>
         <p class="hint">Give it ~90 seconds — that's the check-in grace. Still offline? Its agent stopped; it usually relaunches itself within a few minutes (built-in watchdog). If it doesn't come back, reboot the machine. (If it's actually powered <b>off</b>, use the <b>⏻ Wake</b> button to turn it on.)</p></details>
+      <details class="qa"><summary>The ⏻ Wake button doesn't power a machine on</summary>
+        <p class="hint">The agent already enables Wake-on-LAN on each machine's network card automatically (and re-applies it on every boot), so waking from <b>sleep</b> works out of the box. Waking from a <b>full shutdown</b> needs one setting the tracker can't reach — it's in the machine's BIOS/UEFI:</p>
+        <ul class="hint" style="margin:6px 0 0 18px">
+          <li>Enter the BIOS/UEFI (usually <b>Del</b> or <b>F2</b> at power-on) and enable <b>Wake on LAN</b> / <b>Power On by PCIe</b> / <b>Resume by Magic Packet</b>.</li>
+          <li>Disable <b>ErP</b> / <b>EuP</b> (deep power-saving) — it cuts standby power to the network card when off, which blocks wake.</li>
+          <li>Make sure the <b>plugged-in</b> network port is the one with WoL enabled (machines with two NICs report several).</li>
+        </ul>
+        <p class="hint" style="margin-top:6px">This is a one-time, per-machine step. Tip: <b>sleep</b> idle machines instead of shutting them down and the Wake button works without touching the BIOS.</p></details>
       <details class="qa"><summary>A machine is online but updates never run on it</summary>
         <p class="hint">The agent is stuck. It usually fixes itself; to fix it now, click the <b>⏻ Restart</b> button on its card. (A restart interrupts any render on that machine.)</p></details>
       <details class="qa"><summary>A machine never appears on the dashboard</summary>
