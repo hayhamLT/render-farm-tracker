@@ -24,6 +24,7 @@ Deployments run installer commands, so run the agent with admin rights:
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -39,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.14.0"
+AGENT_VERSION = "2.26.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -73,6 +74,29 @@ if IS_WINDOWS:
     subprocess.Popen = _SilentPopen
 
 
+def hide_own_console():
+    """Hide the agent's OWN console window on Windows.
+
+    The agent is meant to run as the hidden SYSTEM scheduled task, which has no console at
+    all. But if it ever runs interactively — a Startup-folder shortcut, a manual start, or
+    the Fast-Startup fallback on a node where the AtStartup SYSTEM task didn't fire (AVA-01)
+    — python.exe attaches a visible MS-DOS console. A user who closes that window KILLS the
+    agent mid-install and the node drops offline. So hide our own console window immediately:
+    there's then no window to see or accidentally close. Best-effort, never raises. Under
+    pythonw.exe or the SYSTEM task there is no console, so GetConsoleWindow() returns 0 and
+    this is a harmless no-op.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+    except Exception:
+        pass
+
+
 def acquire_single_instance():
     """Ensure only one agent runs per machine.
 
@@ -97,30 +121,98 @@ def acquire_single_instance():
 
 
 def ensure_task_watchdog():
-    """Self-heal the elevated scheduled task so the agent restarts on its own.
+    """Self-heal the elevated scheduled task so the agent ALWAYS restarts on its own.
 
-    The task was created to fire only at startup; if the agent process is later
-    killed (render-load OOM, console logoff sending Ctrl+C, etc.) nothing relaunches
-    it until the next reboot — the node then shows "offline" while it keeps rendering.
-    Running as SYSTEM (the elevated task), add a 5-minute repetition trigger so a dead
-    agent is relaunched within minutes (the single-instance mutex makes re-firing a
-    no-op when it's already alive). Best-effort: never raise, never block the agent.
+    The original task attached its 5-minute repetition to the AtStartup trigger. If
+    AtStartup never fired — which is exactly what Windows **Fast Startup** does (a
+    "shutdown" becomes a hybrid resume, not a cold boot, so AtStartup tasks are skipped)
+    — the repetition never started either, so a rebooted node could sit powered-on but
+    with NO agent until someone logged in (the MARS-02 / AVA-01 symptom).
+
+    Fix: give the task an INDEPENDENT time-based heartbeat trigger (every 5 min,
+    StartWhenAvailable) that fires regardless of how the machine powered on, plus the
+    AtStartup trigger. The single-instance mutex makes a re-fire a no-op when the agent
+    is already alive. Idempotent (re-set on each agent start); best-effort, never raises.
     """
     if not IS_WINDOWS:
         return
     ps = (
         "$t=Get-ScheduledTask -TaskName 'TrackerAgentElevated' -ErrorAction SilentlyContinue;"
-        "if($t){$rep=$false;foreach($g in $t.Triggers){if($g.Repetition -and $g.Repetition.Interval){$rep=$true}};"
-        "if(-not $rep){$nt=New-ScheduledTaskTrigger -AtStartup;"
-        "$tmp=New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650);"
-        "$nt.Repetition=$tmp.Repetition;"
-        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger $nt | Out-Null}}"
+        "if($t){"
+        "$boot=New-ScheduledTaskTrigger -AtStartup;"
+        "$beat=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1) "
+        "-RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650);"
+        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger @($boot,$beat) | Out-Null}"
     )
     try:
         import base64
         enc = base64.b64encode(ps.encode("utf-16-le")).decode()
         subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                         "-EncodedCommand", enc], capture_output=True, timeout=60)
+    except Exception:
+        pass
+
+
+def ensure_fast_startup_disabled():
+    """Turn OFF Windows Fast Startup so a 'shutdown' is a TRUE cold boot.
+
+    Fast Startup ("HiberbootEnabled") makes a shutdown a hybrid-hibernate: the next
+    power-on RESUMES the saved kernel session instead of cold-booting, so AtStartup
+    scheduled tasks don't fire (agent never comes back) AND Wake-on-LAN from S5 often
+    fails. Disabling it makes shutdown/restart behave predictably. Idempotent registry
+    write; only succeeds as SYSTEM/admin (the elevated task), silently no-ops otherwise.
+    Leaves normal hibernate/sleep untouched. This auto-propagates fleet-wide as agents
+    self-update — no manual re-elevation needed.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SYSTEM\CurrentControlSet\Control\Session Manager\Power",
+                             0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+        try:
+            cur, _ = winreg.QueryValueEx(key, "HiberbootEnabled")
+        except OSError:
+            cur = None
+        if cur != 0:
+            winreg.SetValueEx(key, "HiberbootEnabled", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+def ensure_wol_enabled():
+    """Enable Wake-on-LAN at the OS / NIC level so the tracker's Wake button can power a
+    halted machine back on.
+
+    Windows: for every physical NIC that's up, turn on 'wake on magic packet' + 'allow this
+    device to wake the computer', and prefer magic-packet-only (no spurious pattern wakes).
+    macOS: enable wake-on-magic-packet (pmset womp). Idempotent, best-effort, never raises;
+    only takes effect as admin/root (the elevated agent) and is re-applied on every start so a
+    driver update can't silently turn it back off.
+
+    NOTE: this is the OS half only. Waking from a FULL shutdown (S5) ALSO requires the machine's
+    BIOS/UEFI 'Wake on LAN from S5' enabled and ErP/EuP power-saving disabled — that's firmware
+    and cannot be set from software; it must be done once per machine in the BIOS.
+    """
+    try:
+        if IS_WINDOWS:
+            ps = (
+                "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | "
+                "Where-Object {$_.Status -eq 'Up'} | ForEach-Object { $n=$_.Name;"
+                "try{Set-NetAdapterPowerManagement -Name $n -WakeOnMagicPacket Enabled "
+                "-WakeOnPattern Disabled -ErrorAction SilentlyContinue}catch{};"
+                "try{Set-NetAdapterAdvancedProperty -Name $n -RegistryKeyword '*WakeOnMagicPacket' "
+                "-RegistryValue 1 -ErrorAction SilentlyContinue}catch{};"
+                "try{powercfg /deviceenablewake \"$($_.InterfaceDescription)\" | Out-Null}catch{} }"
+            )
+            import base64
+            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
+            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                            "-EncodedCommand", enc], capture_output=True, timeout=60)
+        elif IS_MACOS:
+            subprocess.run(["pmset", "-a", "womp", "1"], capture_output=True, timeout=30)
     except Exception:
         pass
 
@@ -143,11 +235,53 @@ PRODUCT_PATTERNS = {
 }
 
 
+# User-added products, pushed by the server in the check-in response (custom catalog
+# entries). Lets the farm track a new app/plugin with NO code change.
+CUSTOM_PATTERNS = {}             # {key: [compiled_regex, ...]} — matched vs installed-app names
+CUSTOM_PATHS = {}                # {key: {"win": glob, "mac": glob}} — for plug-ins / folder apps
+
+
+def set_custom_products(defs):
+    """Rebuild CUSTOM_PATTERNS + CUSTOM_PATHS from the server's list of
+    {key, pattern, path_win, path_mac}. A pattern is one or more comma/newline-separated
+    regexes (bad regex → literal). A path is a glob the agent scans for plug-ins/folder apps
+    that aren't in the uninstall registry. Best-effort — never raise (must not break detection)."""
+    global CUSTOM_PATTERNS, CUSTOM_PATHS
+    pats_out, paths_out = {}, {}
+    for d in (defs or []):
+        key = (d.get("key") or "").strip()
+        if not key:
+            continue
+        raw = (d.get("pattern") or "").strip()
+        if raw:
+            pats = []
+            for part in re.split(r"[,\n]", raw):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    pats.append(re.compile(part, re.IGNORECASE))
+                except re.error:
+                    pats.append(re.compile(re.escape(part), re.IGNORECASE))
+            if pats:
+                pats_out[key] = pats
+        pw, pm = (d.get("path_win") or "").strip(), (d.get("path_mac") or "").strip()
+        if pw or pm:
+            paths_out[key] = {"win": pw, "mac": pm}
+    CUSTOM_PATTERNS = pats_out
+    CUSTOM_PATHS = paths_out
+
+
 def _match_product(display_name):
     low = display_name.lower()
     for key, patterns in PRODUCT_PATTERNS.items():
         for pat in patterns:
             if re.search(pat, low):
+                return key
+    # Built-ins win; then try user-added custom products.
+    for key, regs in CUSTOM_PATTERNS.items():
+        for rg in regs:
+            if rg.search(display_name):
                 return key
     return None
 
@@ -464,6 +598,64 @@ def detect_ffmpeg():
     return None
 
 
+def _win_file_version(path):
+    """Read a Windows binary's version (e.g. a .aex/.dll plug-in) via its file properties.
+    Tries ProductVersion, then FileVersion, then the numeric Major.Minor.Build.Private parts
+    (some plug-ins leave the string fields blank but fill the numeric ones). Returns "" when
+    nothing usable is found, so the caller falls back to presence-only."""
+    try:
+        ps = ("$ErrorActionPreference='SilentlyContinue';"
+              "$v=[System.Diagnostics.FileVersionInfo]::GetVersionInfo('%s');"
+              "if($v.ProductVersion){$v.ProductVersion.Trim()}"
+              "elseif($v.FileVersion){$v.FileVersion.Trim()}"
+              "else{'{0}.{1}.{2}.{3}' -f $v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart,$v.FilePrivatePart}"
+              % path.replace("'", "''"))
+        out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+        m = re.search(r"\d+(?:\.\d+){1,3}", out)
+        v = m.group(0) if m else ""
+        return "" if v in ("0.0.0.0", "0.0.0", "0.0", "0") else v
+    except Exception:
+        return ""
+
+
+def detect_custom_paths():
+    """Detect plug-ins / folder apps that aren't in the uninstall registry or /Applications,
+    by globbing a user-supplied path (per OS) and reading a version from the matched
+    file/bundle. Presence alone is useful even when no version can be read."""
+    found = {}
+    if not CUSTOM_PATHS:
+        return found
+    osk = "win" if IS_WINDOWS else "mac" if IS_MACOS else None
+    if not osk:
+        return found
+    for key, paths in CUSTOM_PATHS.items():
+        patt = (paths.get(osk) or "").strip()
+        if not patt:
+            continue
+        try:
+            matches = sorted(glob.glob(patt, recursive=True))
+        except Exception:
+            matches = []
+        if not matches:
+            continue
+        path = matches[-1]   # if several, the last sorted (often the newest version folder)
+        ver = ""
+        try:
+            low = path.lower()
+            if IS_MACOS and low.endswith((".plugin", ".bundle", ".app", ".framework")):
+                ver = _plist_version(path)
+            elif IS_WINDOWS and os.path.isfile(path) and low.endswith((".aex", ".dll", ".exe", ".aip", ".cdl64")):
+                ver = _win_file_version(path)
+            if not ver:                                   # fall back to a version in the name/path
+                m = re.search(r"\d+(?:\.\d+){1,3}", os.path.basename(path)) or re.search(r"\d+(?:\.\d+){1,3}", path)
+                ver = m.group(0) if m else ""
+        except Exception:
+            ver = ""
+        found[key] = (ver, path)
+    return found
+
+
 def detect_software():
     found = detect_windows() if IS_WINDOWS else detect_macos() if IS_MACOS else {}
     # mx1 only knows Maxon-App-managed installs — a standalone installer (e.g.
@@ -476,10 +668,203 @@ def detect_software():
     ff = detect_ffmpeg()
     if ff:
         found["ffmpeg"] = ff
+    nv = detect_nvidia_driver()
+    if nv:
+        found["nvidia"] = nv
+    # Path-glob detection for plug-ins / folder apps (additive — never overrides a real
+    # registry/bundle hit, only fills products the name scan couldn't see).
+    for key, val in detect_custom_paths().items():
+        if key not in found:
+            found[key] = val
     return [
         {"product": key, "version": ver or None, "path": path or None}
         for key, (ver, path) in sorted(found.items())
     ]
+
+
+def detect_nvidia_driver():
+    """The installed NVIDIA GeForce driver, reported as a trackable product so the server
+    can flag out-of-date nodes and deploy the latest like any other app. Windows-only —
+    the farm's NVIDIA cards are on Windows render nodes; macs are Apple Silicon. nvidia-smi
+    reports the same public version string the tracker auto-detects (e.g. "610.62"), so the
+    two compare directly. Returns (version, None) or None."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=15).stdout or ""
+        drv = next((l.strip() for l in out.splitlines() if l.strip()), "")
+        # Only accept a clean version string (e.g. "610.62"). When the driver is broken
+        # or absent, nvidia-smi prints an ERROR to stdout ("NVIDIA-SMI has failed…") —
+        # never store that as a "version" (it would look like a node perpetually behind).
+        return (drv, None) if re.match(r"^\d+(\.\d+)+$", drv) else None
+    except Exception:
+        return None
+
+
+def _gpu_rendering():
+    """True only when the GPU is ACTIVELY computing a render (high utilization). We must
+    NOT use "is any process on the GPU" (compute-apps): on a Deadline farm the Worker
+    service holds a persistent CUDA context even when idle, so that would defer the driver
+    update forever and mislabel an idle node as "rendering". An actual render pins the GPU
+    near 90-100%; an idle held context sits at ~0%. Windows render nodes only; if nvidia-smi
+    can't run (broken/absent driver) we can't be rendering anyway, so don't block recovery."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        p = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=15)
+        if p.returncode != 0:
+            return False
+        utils = [int(x.strip()) for x in (p.stdout or "").splitlines() if x.strip().isdigit()]
+        return any(u >= 20 for u in utils)
+    except Exception:
+        return False
+
+
+_MAC_CACHE = None
+def _mac_addresses():
+    """All hardware MAC addresses on this machine (for Wake-on-LAN). Cached — they don't
+    change. Best-effort and stdlib-only; sending a wake packet to an extra/virtual MAC is
+    harmless, so we don't try to filter perfectly."""
+    global _MAC_CACHE
+    if _MAC_CACHE is not None:
+        return _MAC_CACHE
+    macs = set()
+    try:
+        if IS_WINDOWS:
+            out = subprocess.run(["getmac", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=15).stdout or ""
+        elif IS_MACOS:
+            out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=15).stdout or ""
+        else:
+            out = subprocess.run(["ip", "link"], capture_output=True, text=True, timeout=15).stdout or ""
+        for m in re.findall(r"([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5})", out):
+            mm = m.replace("-", ":").lower()
+            if mm not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+                macs.add(mm)
+    except Exception:
+        pass
+    _MAC_CACHE = sorted(macs)
+    return _MAC_CACHE
+
+
+def _fmt_gpus(names):
+    """Collapse a multi-GPU list for display: identical cards become "2× Model"; mixed
+    cards stay listed in full (e.g. "RTX 4090, GTX 1080"). Keeping every distinct model in
+    the string matters — the server picks the NVIDIA driver track by regex over this text, so
+    a machine with even one legacy (Maxwell/Pascal) card is correctly targeted to the driver
+    that still supports its OLDEST card."""
+    counts, order = {}, []
+    for n in names:
+        if n not in counts:
+            counts[n] = 0
+            order.append(n)
+        counts[n] += 1
+    return ", ".join(("%d× %s" % (counts[n], n)) if counts[n] > 1 else n for n in order)
+
+
+def detect_health():
+    """Machine health + GPU telemetry — every field is best-effort and independently
+    guarded so a missing tool never breaks the check-in."""
+    h = {}
+    h["macs"] = _mac_addresses()   # for Wake-on-LAN (power a machine back on)
+    # GPU + driver via nvidia-smi (Windows/Linux render nodes with NVIDIA). Report EVERY card
+    # — many render nodes have multiple GPUs — and the single shared driver version.
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=15).stdout or ""
+        names, drv = [], ""
+        for ln in out.splitlines():
+            if "," in ln:
+                nm, dv = [x.strip() for x in ln.split(",", 1)]
+                if nm:
+                    names.append(nm)
+                if dv and not drv:
+                    drv = dv   # all GPUs in one machine run the same driver version
+        if names:
+            h["gpu"] = _fmt_gpus(names)
+        if drv:
+            h["gpuDriver"] = drv
+    except Exception:
+        pass
+    # No NVIDIA card found via nvidia-smi → fall back to Windows WMI, which lists EVERY
+    # display adapter (AMD/Radeon, Intel, virtual). Lets the dashboard show a node's GPU
+    # even when it isn't NVIDIA (e.g. Node-00), and surfaces any AMD hardware on the farm.
+    if not h.get("gpu") and IS_WINDOWS:
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Csv -NoTypeInformation"],
+                capture_output=True, text=True, timeout=25).stdout or ""
+            rows = []
+            for ln in out.splitlines():
+                m = re.match(r'^"?(.*?)"?,"?(.*?)"?$', ln.strip())
+                if m and m.group(1) and m.group(1).lower() != "name":
+                    rows.append((m.group(1).strip(), m.group(2).strip()))
+            # Prefer a real GPU over generic/virtual adapters (Basic Display, RDP, etc.).
+            def rank(n):
+                nl = n.lower()
+                if any(k in nl for k in ("radeon", "amd", "nvidia", "geforce")): return 3
+                if "intel" in nl: return 2
+                if any(k in nl for k in ("basic", "remote", "virtual", "dameware", "mirror")): return 0
+                return 1
+            rows.sort(key=lambda r: rank(r[0]), reverse=True)
+            if rows:
+                h["gpu"] = rows[0][0]
+                if rows[0][1] and not h.get("gpuDriver"):
+                    h["gpuDriver"] = rows[0][1]
+        except Exception:
+            pass
+    if not h.get("gpu") and IS_MACOS:  # Apple Silicon Macs have no NVIDIA — report the chip
+        try:
+            chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                                  capture_output=True, text=True, timeout=10).stdout.strip()
+            if chip:
+                h["gpu"] = chip
+        except Exception:
+            pass
+    # Live GPU utilization (%) so the Fleet view can show which nodes are ACTIVELY rendering.
+    # Windows/NVIDIA only — an idle held CUDA context sits near 0%, a real render pins it near
+    # 100% (same signal _gpu_rendering uses to gate installs). Best-effort.
+    if IS_WINDOWS:
+        try:
+            pu = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                capture_output=True, text=True, timeout=15)
+            if pu.returncode == 0:
+                us = [int(x.strip()) for x in (pu.stdout or "").splitlines() if x.strip().isdigit()]
+                if us:
+                    h["gpuUtil"] = max(us)
+        except Exception:
+            pass
+    # Free space on the system/install drive.
+    try:
+        du = shutil.disk_usage("C:\\" if IS_WINDOWS else "/")
+        h["diskFreeGB"] = round(du.free / 1e9, 1)
+        h["diskTotalGB"] = round(du.total / 1e9, 1)
+    except Exception:
+        pass
+    # OS version.
+    try:
+        h["osVersion"] = ("Windows " + platform.version()) if IS_WINDOWS else ("macOS " + platform.mac_ver()[0])
+    except Exception:
+        pass
+    # Windows pending-reboot (the common registry markers).
+    if IS_WINDOWS:
+        try:
+            import winreg
+            pending = 0
+            for sub in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"):
+                try:
+                    winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub).Close()
+                    pending = 1
+                    break
+                except OSError:
+                    pass
+            h["pendingReboot"] = pending
+        except Exception:
+            pass
+    return h
 
 
 # --------------------------------------------------------------------------
@@ -502,7 +887,7 @@ class Server:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
 
-    def checkin(self, software, latest=None):
+    def checkin(self, software, latest=None, health=None):
         # software=None is a lightweight heartbeat (used while monitoring is paused).
         payload = {
             "hostname": socket.gethostname(),
@@ -514,6 +899,8 @@ class Server:
             payload["software"] = software
         if latest:
             payload["latest"] = latest
+        if health:
+            payload["health"] = health
         return self._request("POST", "/api/agent/checkin", payload)
 
     def get_agent_code(self):
@@ -635,11 +1022,16 @@ def _restart_cc():
 # update. A "gui" process is the app left open idle — safe to close. (Cinema 4D
 # can't be told apart from a C4D render by name, so we never auto-close it.)
 def _blockers(product_key):
-    ae_gui = ["AfterFX.exe"] if IS_WINDOWS else ["After Effects"]
+    # RUM HANGS if a target app is open. AE updates touch After Effects AND Media Encoder
+    # (AEFT,AME), so DEFER the patch while any of them — or the render engine — is running,
+    # rather than force-closing an artist's session or letting the install stall. It retries
+    # automatically each check-in once they're closed.
+    ae_apps = (["AfterFX.exe", "AfterFX.com", "aerender.exe", "Adobe Media Encoder.exe", "AfterFXLib.dll"]
+               if IS_WINDOWS else ["After Effects", "aerender", "Adobe Media Encoder"])
     ae_render = ["aerender.exe"] if IS_WINDOWS else ["aerender"]
     c4d = ["Cinema 4D.exe"] if IS_WINDOWS else ["Cinema 4D"]
     return {
-        "aftereffects": {"render": ae_render, "gui": ae_gui},
+        "aftereffects": {"render": ae_apps, "gui": []},
         "cinema4d":     {"render": c4d, "gui": []},
         "redshift":     {"render": c4d, "gui": []},
         "redgiant":     {"render": c4d + ae_render, "gui": []},
@@ -652,6 +1044,12 @@ def prepare_for_install(product_key):
     """(proceed, note). proceed=False => defer: the node is rendering and must not
     be interrupted (it retries automatically next check-in). An idle blocking app
     is closed gracefully so the install isn't blocked."""
+    # The GPU driver is special: installing it RESETS the GPU and would crash any active
+    # render (and the install itself fails, "device in use"). It has no single render
+    # process to watch, so gate on whether the GPU is actually busy with compute work.
+    if product_key == "nvidia" and _gpu_rendering():
+        return False, ("Deferred — the GPU is busy rendering; the NVIDIA driver update "
+                       "will run automatically once the GPU is idle.")
     b = _blockers(product_key)
     if not b["render"] and not b["gui"]:
         return True, ""
@@ -664,6 +1062,20 @@ def prepare_for_install(product_key):
     return True, ""
 
 
+def _reboot_machine():
+    """Reboot this machine on the server's request — the agent-side fallback for when
+    Deadline RemoteControl can't reach the box. The agent runs elevated (Windows) / as root
+    (mac), so the OS reboot command works without a prompt."""
+    try:
+        if IS_WINDOWS:
+            subprocess.Popen('shutdown /r /t 5 /f /c "Restart requested from the Render Farm tracker"', shell=True)
+        else:
+            subprocess.Popen(["/sbin/shutdown", "-r", "now"])
+        print("  ⏻ reboot requested by server — restarting now")
+    except Exception as e:
+        print("  ! reboot command failed: %s" % e)
+
+
 def run_job(server, job):
     job_id = job["id"]
     kind = job.get("kind", "installer")
@@ -674,6 +1086,17 @@ def run_job(server, job):
     if not proceed:
         server.report(job_id, "pending", defer_note)
         print("  ⏸ %s" % defer_note)
+        return
+
+    # "Refresh Creative Cloud" action: restart the CC desktop app so it re-checks Adobe and
+    # applies any pending app updates (e.g. an After Effects build that ships via the CC
+    # channel, not RUM). Render-gated above. No install/version change to verify.
+    if kind == "command" and (job.get("install_command") or "").strip() == "__RESTART_CC__":
+        _restart_cc()
+        server.report(job_id, "success",
+                      "Creative Cloud restarted — it will check Adobe for pending app "
+                      "updates (applies in the background if auto-update is on and the app is closed).")
+        print("  ✓ Creative Cloud refreshed")
         return
 
     # Snapshot the version before installing so we can verify it actually changed.
@@ -716,13 +1139,17 @@ def run_job(server, job):
 
     server.report(job_id, "installing", "Running: %s" % cmd)
     print("  running: %s" % cmd)
+    # Per-product timeout: Adobe RUM installs run ~10-15 min, so cap them at 30 min — a hung
+    # RUM (e.g. an in-use app it can't patch) self-aborts and frees the machine fast instead
+    # of tying it up for the full hour. Everything else keeps the long default.
+    job_timeout = 1800 if job["product_key"] in ("aftereffects", "creativecloud") else INSTALL_TIMEOUT
     try:
         proc = subprocess.run(
             cmd,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=INSTALL_TIMEOUT,
+            timeout=job_timeout,
         )
         tail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[-4000:]
         if proc.returncode != 0:
@@ -733,24 +1160,68 @@ def run_job(server, job):
             # proof (e.g. a downloader that doesn't install would exit 0 too).
             after_ver = _installed_version(job["product_key"])
             target = job.get("version") or ""
+            # Presence: does the product's detect-path now match a file on disk? Scripts and
+            # some plug-ins carry no readable version, so presence (not a version bump) is the proof.
+            present_after = job["product_key"] in detect_custom_paths()
+
+            # Uninstall jobs (packaged with version "uninstall") succeed when the product is
+            # GONE — no installed version AND no detect-path match. The version-change checks
+            # below are for installs only and would wrongly fail a successful removal.
+            if target == "uninstall":
+                if not after_ver and not present_after:
+                    server.report(job_id, "success", "Uninstalled — no longer present on the node.\n%s" % tail)
+                    print("  ✓ uninstalled")
+                else:
+                    server.report(job_id, "failed",
+                                  "Uninstall ran (exit 0) but the product is still present (%s).\n%s"
+                                  % (after_ver or "files remain", tail))
+                    print("  ✗ still present after uninstall")
+                return
+
             changed = after_ver and after_ver != before_ver
             reached = after_ver and target and _version_tuple(after_ver) >= _version_tuple(target)
-            # Creative Cloud self-updates asynchronously after a nudge, so the version
-            # won't change during the job — exit 0 is success for it.
-            if changed or reached or job["product_key"] == "creativecloud":
-                server.report(job_id, "success",
-                              "Installed: %s -> %s\n%s" % (before_ver, after_ver, tail))
+            # A version-less product (script / some plug-ins): exit 0 + now present on disk = installed.
+            presence_ok = (not after_ver) and present_after
+            # Some installs don't reflect the new version during the job:
+            #  • NVIDIA driver — installed with -noreboot, so nvidia-smi keeps reporting
+            #    the OLD version until the machine reboots. Exit 0 IS the install proof.
+            #  • Creative Cloud — self-updates asynchronously after a nudge.
+            reboot_deferred = job["product_key"] == "nvidia"
+            # Adobe RUM ran fine but had nothing to install: the node is already current
+            # per Adobe's update source. This is NOT a failure — RUM simply can't deliver a
+            # version that isn't in its catalog (e.g. an AE release that shipped via the
+            # Creative Cloud app). Treat exit-0 + "no applicable updates" as a clean no-op.
+            tl = tail.lower()
+            rum_noop = ("no new applicable updates" in tl
+                        or "all products are up-to-date" in tl
+                        or "all products are up to date" in tl)
+            if changed or reached or presence_ok or reboot_deferred or job["product_key"] == "creativecloud":
+                if reboot_deferred and not (changed or reached):
+                    note = ("Installed (target %s) — takes effect after reboot; nvidia-smi "
+                            "still reports %s until then.\n%s" % (target, after_ver, tail))
+                elif presence_ok and not (changed or reached):
+                    note = "Installed (no version to read) — now present on the node.\n%s" % tail
+                else:
+                    note = "Installed: %s -> %s\n%s" % (before_ver, after_ver, tail)
+                server.report(job_id, "success", note)
                 print("  ✓ success (%s -> %s)" % (before_ver, after_ver))
                 # Restart Creative Cloud right after any install so it self-updates too.
                 if job["product_key"] != "creativecloud":
                     _restart_cc()
+            elif rum_noop:
+                server.report(job_id, "success",
+                              "No RUM update needed — Adobe RUM reports this node is already "
+                              "current per Adobe's update source. A release like %s ships "
+                              "through the Creative Cloud app, not RUM, so RUM can't deliver "
+                              "it (and didn't fail).\n%s" % (target or "the latest", tail))
+                print("  ✓ RUM no-op (current per Adobe source, %s)" % after_ver)
             else:
                 server.report(job_id, "failed",
                               "Command exited 0 but version unchanged (still %s) — "
                               "nothing installed.\n%s" % (after_ver, tail))
                 print("  ✗ no-op (version unchanged: %s)" % after_ver)
     except subprocess.TimeoutExpired:
-        server.report(job_id, "failed", "Command timed out after %ds" % INSTALL_TIMEOUT)
+        server.report(job_id, "failed", "Command timed out after %ds (no progress — the agent aborted it to free the machine)" % job_timeout)
     except Exception as e:
         server.report(job_id, "failed", "Execution error: %s" % e)
     finally:
@@ -848,6 +1319,12 @@ def main():
     ap.add_argument("--once", action="store_true", help="check in once and exit")
     args = ap.parse_args()
 
+    # First thing on Windows: hide any console window we were launched with, so the agent is
+    # truly invisible and can't be closed out from under an install. (Skipped for --once so
+    # manual test runs still print to the terminal.)
+    if not args.once:
+        hide_own_console()
+
     cfg = {}
     cfg_path = args.config or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                            "agent_config.json")
@@ -872,8 +1349,11 @@ def main():
     print("Tracker agent %s on %s (%s) -> %s"
           % (AGENT_VERSION, socket.gethostname(), platform.system(), server_url))
 
-    # Make the elevated task self-restart (no-op on non-elevated/macOS nodes).
+    # Make the elevated task self-restart (no-op on non-elevated/macOS nodes), and turn off
+    # Fast Startup so reboots cold-boot the agent before login (and Wake-on-LAN works).
     ensure_task_watchdog()
+    ensure_fast_startup_disabled()
+    ensure_wol_enabled()
 
     # Wedge watchdog: force a restart if the loop stalls or a job hangs (see above).
     watch_state = {"tick": time.time(), "busy_since": None}
@@ -893,6 +1373,7 @@ def main():
 
     was_active = None
     last_latest = 0.0  # when we last asked mx1 for latest-available versions
+    last_health = 0.0  # when we last gathered GPU/disk/OS telemetry
     while True:
         sleep_for = interval
         watch_state["tick"] = time.time()   # prove the main loop is alive to the watchdog
@@ -901,7 +1382,17 @@ def main():
             watch_state["busy_since"] = (watch_state["busy_since"] or time.time()) if busy else None
             # Lightweight heartbeat first — learn whether monitoring is switched on.
             resp = server.checkin(None)
+            # Server asked us to reboot (fallback when Deadline RemoteControl can't reach us).
+            if resp.get("reboot"):
+                _reboot_machine()
+                time.sleep(30)   # let the OS begin shutting down; the process dies with it
+                continue
+            # Pull user-added (custom) product patterns BEFORE the full check-in's detection below.
+            set_custom_products(resp.get("products"))
             active = resp.get("active", True)
+            # Check-in cadence is server-controlled (≈ offline-threshold ÷ 3), so offline
+            # detection speed is tunable from the server alone. Falls back to the local interval.
+            sleep_for = resp.get("pollSeconds") or interval
             if active != was_active:
                 print("Monitoring %s" % ("ON — reporting versions" if active else "OFF — standing by"))
                 was_active = active
@@ -918,8 +1409,13 @@ def main():
                 if not busy and time.time() - last_latest > 1800:
                     latest = {**detect_maxon_latest(), **detect_adobe_latest()}
                     last_latest = time.time()
+                # Health/GPU telemetry ~every 5 min (cheap, but no need every minute).
+                health = None
+                if time.time() - last_health > 300:
+                    health = detect_health()
+                    last_health = time.time()
                 # Always report software so the dashboard shows us online, even mid-install.
-                resp = server.checkin(detect_software(), latest=latest)
+                resp = server.checkin(detect_software(), latest=latest, health=health)
                 if not busy:
                     jobs = [j for j in resp.get("jobs", []) if j["status"] == "pending"]
                     if jobs:

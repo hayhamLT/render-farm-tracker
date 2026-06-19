@@ -1,22 +1,64 @@
 # Render Farm Update Tracker
 
-A local web app for monitoring and deploying software updates across a mixed
-Windows/macOS render farm. Tracks **Maxon Cinema 4D**, **Redshift**,
-**Red Giant**, and **Adobe After Effects** out of the box.
+A self-hosted web app for monitoring and deploying software updates across a
+mixed Windows/macOS render farm. Tracks **Cinema 4D, Redshift, Red Giant, After
+Effects, Blender, FFmpeg, NotchLC, NVIDIA Studio drivers** and the Creative
+Cloud / Maxon manager apps — shows each node's installed vs. latest version and
+rolls out updates with progress, retries, and a failure circuit breaker.
 
-- **Zero dependencies** — the server is plain Node.js (≥ 22.5, uses the
-  built-in SQLite module). No `npm install`.
-- **One agent script** — a stdlib-only Python 3 script runs on every node,
-  Windows and macOS alike.
+- **Zero dependencies** — the server is plain Node.js (**≥ 22.5**, uses the
+  built-in `node:sqlite` module). No `npm install`, no build step.
+- **One agent script** — a stdlib-only Python 3 script (`agents/render_agent.py`)
+  runs on every node, Windows and macOS alike. It self-updates from the server.
 
 ```
-┌─────────────┐   check-in every 60s    ┌──────────────────────┐
+┌─────────────┐   check-in (poll)       ┌──────────────────────┐
 │ render node │ ──────────────────────▶ │  tracker server      │
-│  (agent.py) │ ◀── queued jobs ─────── │  node server.js      │
-│             │ ──── job status ──────▶ │  dashboard :4400     │
-│             │ ◀── installer files ─── │  installers/ folder  │
+│  ("Beacon"  │ ◀── queued jobs ─────── │  node server.js      │
+│   agent.py) │ ──── job status ──────▶ │  dashboard :4400     │
+│             │ ◀── installer files ─── │  + SQLite tracker.db │
 └─────────────┘                         └──────────────────────┘
 ```
+
+The UI has six tabs: **Dashboard** (per-node software versions + actions),
+**Updates** (deploy wizard + recent jobs), **Fleet** (live NOC view: what every
+machine is doing, agent rollout, GPU/driver/disk health, alerts), **Activity**
+(event log), **Catalog** (product/version config + settings), **Help**.
+
+---
+
+## 👋 Handing this off / integrating into a bigger app
+
+**Start with [`HANDOFF.md`](HANDOFF.md).** It is the engineering reference:
+architecture, component/file map, the SQLite data model, the **full HTTP API
+reference**, configuration & hard-coded assumptions, a step-by-step
+**"merging onto a custom domain / mounting under a bigger app"** guide
+(reverse proxy, `X-Forwarded-*`, the agent re-pointing gotcha, sub-path
+mounting), the **security must-fix list** before exposing beyond the LAN, and a
+final **merge checklist**.
+
+Integration in one line: everything the UI needs comes from a single polled
+endpoint, **`GET /api/state`** (denormalized JSON snapshot). External consumers
+should call the API, never read `tracker.db` directly — many fields (`online`,
+`dl_pct`, job progress) are computed per-request and don't exist as columns.
+
+---
+
+## After cloning (what's gitignored)
+
+These are intentionally **not** in the repo (secrets / state / large binaries) —
+see `.gitignore`:
+
+| Path | What it is | How to recreate |
+|---|---|---|
+| `config.json` | port + plaintext **agent key** + Slack webhook | **Auto-generated on first `node server.js`** (key printed to console). See `config.example.json` for the shape. |
+| `tracker.db*` | SQLite state (nodes, jobs, history) | Created empty on first run. |
+| `installers/` | staged installer binaries (large / licensed) | Drop files in per deployment. |
+| `.claude/` | local editor/tooling settings | n/a |
+
+Requires **Node ≥ 22.5** and **Python 3.8+** on the nodes.
+
+---
 
 ## 1. Start the server
 
@@ -24,109 +66,79 @@ Windows/macOS render farm. Tracks **Maxon Cinema 4D**, **Redshift**,
 node server.js
 ```
 
-- Dashboard: **http://localhost:4400** (reachable on your LAN at
-  `http://<this-machine>:4400`)
-- On first start it writes `config.json` with a generated **agent key** —
-  printed to the console, also available at `/api/agent-setup`.
-- Data lives in `tracker.db` (SQLite). Delete it to start fresh.
+- Dashboard: **http://localhost:4400** (LAN: `http://<this-machine>:4400`).
+- First start writes `config.json` with a generated **agent key** (printed to
+  the console; also at `GET /api/agent-setup`).
+- State lives in `tracker.db`. Delete it to start fresh.
 
-To keep it running on this Mac: `nohup node server.js >> tracker.log 2>&1 &`,
-or create a LaunchAgent.
+Keep it running with a LaunchAgent/systemd unit, or
+`nohup node server.js >> tracker.log 2>&1 &`.
 
 ## 2. Enrol the render nodes
 
-Each node needs **Python 3.8+** (preinstalled on macOS; install from
-python.org on Windows) and a copy of `agents/render_agent.py`.
+The **Help** tab shows copy-paste one-liners (they fetch a generated installer
+that embeds the server URL + agent key):
 
-Quick test on any node:
+- **macOS** — `curl -fsSL http://TRACKER-HOST:4400/enroll.sh | bash`, then once
+  with admin rights: `curl -fsSL http://TRACKER-HOST:4400/setup.sh | sudo bash`
+- **Windows** (PowerShell) — `irm http://TRACKER-HOST:4400/enroll.ps1 | iex`,
+  then once elevated: `irm http://TRACKER-HOST:4400/elevate.ps1 | iex`
+
+The elevation step installs the agent as a SYSTEM scheduled task (Windows) /
+root LaunchDaemon (macOS) so it can run installers headlessly. Nodes appear on
+the Dashboard within seconds with detected versions.
+
+> ⚠️ The enrol/setup scripts **embed the agent key in plaintext** — serve them
+> only on a trusted LAN, never expose them publicly. (See HANDOFF §8.)
+
+Quick manual test on a node:
 
 ```sh
 python3 render_agent.py --server http://TRACKER-HOST:4400 --key <AGENT_KEY> --once
 ```
 
-The node appears on the dashboard within seconds, with detected versions.
-
-Run it permanently **with admin rights** (required so it can run installers):
-
-- **macOS** — edit `agents/com.tracker.agent.plist` (server URL + key), then:
-  ```sh
-  sudo mkdir -p /usr/local/tracker
-  sudo cp render_agent.py /usr/local/tracker/
-  sudo cp com.tracker.agent.plist /Library/LaunchDaemons/
-  sudo launchctl load -w /Library/LaunchDaemons/com.tracker.agent.plist
-  ```
-- **Windows** — from an elevated PowerShell prompt:
-  ```powershell
-  .\install-windows-task.ps1 -Server "http://TRACKER-HOST:4400" -Key "<AGENT_KEY>"
-  ```
-
-### How version detection works
-
-| OS | Method |
-|---|---|
-| Windows | Uninstall registry (`DisplayName`/`DisplayVersion`), fallback to Program Files folder names |
-| macOS | `/Applications` app-bundle `Info.plist` versions + `pkgutil` package receipts |
-
-Products are matched by name patterns (Cinema 4D, Redshift, Red Giant /
-Trapcode / Magic Bullet / Universe, After Effects) — edit
-`PRODUCT_PATTERNS` in `render_agent.py` to tune.
-
 ## 3. Track latest versions
 
-On the **Catalog** tab, enter the newest released version of each product
-(check the Maxon and Adobe release-notes pages). Every node is compared
-against these values and flagged **up to date / outdated / not installed**
-on the dashboard.
+Most products auto-detect "latest" server-side (Maxon Zendesk feed, NVIDIA's
+public driver lookup, Adobe RUM for After Effects, gyan.dev/evermeet for
+FFmpeg). The **Catalog** tab lets you override versions, set install sources,
+and toggle per-product **auto-deploy** (canary-first).
 
 ## 4. Deploy updates
 
-1. Drop the installer file(s) into the `installers/` folder on the server
-   (e.g. the offline C4D installer, Redshift installer, AE admin package).
-2. On the **Deploy** tab, register a *package*: product, version, target OS,
-   the file, and a silent-install command. `{file}` is replaced with the
-   downloaded installer path on the node. Typical commands:
+On the **Updates** tab: pick software → choose machines (outdated only, or pick)
+→ options (platform/source) → **Update now**. Deploys are a **bounded rolling
+rollout** (`maxConcurrentInstalls` at a time) with a **circuit breaker** (pauses
+if 3+ fail with no success). Watch live progress, Stop/Retry per job, in the
+**Recent jobs** table and the **Fleet** tab.
 
-   | Product / OS | Command |
-   |---|---|
-   | Cinema 4D, Windows | `"{file}" --mode unattended --unattendedmodeui none` |
-   | Cinema 4D, macOS (pkg) | `installer -pkg "{file}" -target /` |
-   | Redshift, Windows | `"{file}" /S` |
-   | After Effects (admin pkg), Windows | `"{file}\setup.exe" --silent` (zip the built package; or use the msi with `msiexec /i "{file}" /qn`) |
-   | Generic macOS pkg | `installer -pkg "{file}" -target /` |
-
-   Always verify the silent flags for the exact installer build you
-   downloaded — vendors change them between releases. Test on one node first.
-
-3. Pick the package, tick target nodes (OS-mismatched nodes are disabled
-   automatically), and click **Deploy**. Each node picks the job up at its
-   next check-in (≤ 60 s), downloads the installer, runs the command, and
-   reports back. Watch progress and per-job logs in the **Jobs** table; the
-   node re-scans immediately after installing so the dashboard reflects the
-   new version.
+Installer commands use `{file}` for the downloaded path. Examples and the silent
+flags per product are in HANDOFF and the in-app Catalog presets.
 
 ## Notes & limits
 
-- **Security**: agent endpoints require the agent key; the dashboard itself
-  has no login — run it on a trusted LAN (or bind it behind a firewall/VPN).
-  Anyone who can reach the dashboard can deploy packages.
-- Adobe apps are normally deployed via Creative Cloud **admin packages**
-  (built in the Adobe Admin Console) — build the package, then distribute its
-  installer through this tool.
-- Maxon apps can also be updated via `mx1` / Maxon App CLI; if you prefer
-  that route, set the package command accordingly
-  (e.g. `"C:\Program Files\Maxon\Tools\mx1.exe" install ...`).
-- A node is shown **offline** after 3 missed check-ins
-  (`offlineAfterSeconds` in `config.json`, default 180 s).
+- **Security**: agent endpoints require the agent key; **the dashboard/admin API
+  has no login** — run it on a trusted LAN or behind a VPN/reverse-proxy auth.
+  Anyone who can reach the dashboard can deploy. (Full list: HANDOFF §8.)
+- Adobe After Effects updates via **RUM** (patch-only within the installed
+  major); the Creative Cloud desktop app self-updates and is not managed here.
+- A node shows **offline** after ~3 missed check-ins (`offlineAfterSeconds`,
+  default 180 s). Offline machines can be woken via **Wake-on-LAN**.
 
 ## File map
 
 ```
-server.js                       HTTP server + API (zero-dep Node)
-lib/db.js                       SQLite schema (tracker.db)
-public/                         dashboard UI
-agents/render_agent.py          cross-platform node agent
+server.js                       HTTP server + all API routes (zero-dep Node)
+lib/db.js                       SQLite schema + migrations (tracker.db)
+lib/extra_versions.js           NVIDIA driver latest-version detection
+lib/maxon_versions.js           Maxon release-notes feed parsing
+public/                         dashboard UI (vanilla JS — app.js / index.html / style.css)
+agents/render_agent.py          cross-platform "Beacon" node agent (self-updating)
 agents/com.tracker.agent.plist  macOS LaunchDaemon template
 agents/install-windows-task.ps1 Windows scheduled-task installer
-installers/                     drop installer files here
-config.json                     port + agent key (created on first run)
+deploy/                         fleet enrol/elevate helper scripts
+installers/                     drop installer files here (gitignored)
+config.json                     port + agent key (created on first run; gitignored)
+config.example.json             reference shape for config.json
+HANDOFF.md                      ★ engineering + integration reference
 ```
