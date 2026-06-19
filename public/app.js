@@ -464,10 +464,29 @@ function renderDashboard() {
         ${sub ? `<span class="ds-sub ${subCls || ''}">${esc(sub)}</span>` : ''}
       </span>
     </button>`;
+  // The three fleet-health stats (total / online / ready) merge into one wide card; Updates
+  // and Active jobs stay as their own action cards.
+  const fleetCard = `
+    <button class="ds-card ds-fleet ${offline || notReady ? 'warn' : 'ok'}" onclick="goToFleet()" title="Open Fleet — live status of every machine">
+      <span class="ds-ic">${icon('server')}</span>
+      <span class="dsf-head">
+        <span class="ds-n">${nodes.length}</span>
+        <span class="dsf-meta"><span class="ds-l">Machines</span><span class="ds-sub">${win} Win · ${mac} Mac</span></span>
+      </span>
+      <span class="dsf-div"></span>
+      <span class="dsf-stats">
+        <span class="dsf-stat ${onlineCls}" title="${esc(offline ? ('Offline: ' + offHosts.join(', ')) : 'Every machine has checked in recently')}">
+          <span class="dsf-ic">${icon('dot')}</span>
+          <span class="dsf-vt"><b>${online}<i> / ${nodes.length}</i></b><span>Online${offline ? ` · ${offline} off` : ''}</span></span>
+        </span>
+        <span class="dsf-stat ${readyCls}" title="${esc(notReady ? ('Needs elevation: ' + notReadyHosts.join(', ')) : 'All machines can install silently')}">
+          <span class="dsf-ic">${icon('shieldOk')}</span>
+          <span class="dsf-vt"><b>${elevated}<i> / ${nodes.length}</i></b><span>Ready${notReady ? ` · ${notReady} to set up` : ''}</span></span>
+        </span>
+      </span>
+    </button>`;
   document.getElementById('summary-cards').innerHTML = `<div class="ds-bar">
-    ${card('', 'server', nodes.length, 'Machines', `${win} Win · ${mac} Mac`, '', 'goToFleet()', 'All enrolled machines — open Fleet')}
-    ${card(onlineCls, 'dot', online, 'Online', offline ? `${offline} offline` : 'all reporting', offline ? 'warn' : '', 'goToFleet()', offline ? ('Offline: ' + offHosts.join(', ')) : 'Every machine has checked in recently')}
-    ${card(readyCls, 'shieldOk', elevated, 'Ready', notReady ? `${notReady} need setup` : 'silent installs on', notReady ? 'warn' : '', 'goToFleet()', notReady ? ('Needs elevation: ' + notReadyHosts.join(', ')) : 'All machines can install silently')}
+    ${fleetCard}
     ${card(behind ? 'warn' : 'ok', 'download', behind, 'Updates', behind ? 'pending' : 'up to date', behind ? 'warn' : '', 'goToUpdates()', 'Open Update software')}
     ${card(activeJobs ? 'accent' : '', 'activity', activeJobs, 'Active jobs', activeJobs ? 'running now' : 'idle', activeJobs ? 'accent' : '', 'goToActivity()', 'See running installs in Update activity')}
   </div>`;

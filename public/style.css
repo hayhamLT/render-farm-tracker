@@ -131,7 +131,7 @@ code {
 .dash-head #toolbar { margin-bottom: 0; width: 100%; }
 #summary-cards { margin-bottom: 22px; }
 /* dashboard KPI cards — at-a-glance fleet status, each clickable to the relevant view */
-.ds-bar { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; width: 100%; }
+.ds-bar { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; width: 100%; }
 .ds-card {
   display: flex; align-items: center; gap: 14px; text-align: left; width: 100%;
   padding: 15px 16px; border-radius: 14px; position: relative; overflow: hidden;
@@ -165,8 +165,26 @@ code {
 .ds-card.accent .ds-ic { background: rgba(90,169,255,.15); color: var(--accent); }
 .ds-card.accent .ds-n { color: var(--accent); }
 .ds-card.accent::after { background: var(--accent); }
-@media (max-width: 900px) { .ds-bar { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 560px) { .ds-bar { grid-template-columns: repeat(2, 1fr); } }
+/* merged fleet-health card: total machines + online + ready in one wider card */
+.ds-fleet { gap: 16px; }
+.ds-fleet .ds-ic { width: 44px; height: 44px; }
+.dsf-head { display: flex; align-items: baseline; gap: 10px; flex: none; }
+.dsf-head .ds-n { font-size: 1.9rem; }
+.dsf-meta { display: flex; flex-direction: column; gap: 1px; }
+.dsf-div { width: 1px; align-self: stretch; background: var(--border); margin: 3px 4px; flex: none; }
+.dsf-stats { display: flex; gap: 26px; flex: 1; flex-wrap: wrap; }
+.dsf-stat { display: flex; align-items: center; gap: 10px; }
+.dsf-ic { width: 30px; height: 30px; border-radius: 9px; flex: none; display: grid; place-items: center; background: rgba(255,255,255,.05); color: var(--muted); }
+.dsf-ic svg { width: 16px; height: 16px; }
+.dsf-vt { display: flex; flex-direction: column; line-height: 1.12; }
+.dsf-vt b { font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); }
+.dsf-vt b i { font-style: normal; font-size: .8rem; color: var(--muted); font-weight: 600; }
+.dsf-vt > span { font-size: .7rem; color: var(--muted); }
+.dsf-stat.ok .dsf-ic { background: rgba(54,211,153,.13); color: var(--ok); }
+.dsf-stat.warn .dsf-ic { background: rgba(251,191,69,.15); color: var(--warn); }
+.dsf-stat.warn .dsf-vt b { color: var(--warn); }
+@media (max-width: 820px) { .ds-bar { grid-template-columns: 1fr 1fr; } .ds-fleet { grid-column: 1 / -1; } }
+@media (max-width: 480px) { .ds-fleet { flex-wrap: wrap; } .dsf-div { display: none; } }
 .badge.inprogress .eta { color: var(--muted); margin-left: 5px; font-variant-numeric: tabular-nums; }
 .eta { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .eta.done { color: var(--muted); }
