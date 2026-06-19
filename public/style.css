@@ -127,28 +127,46 @@ code {
 /* summary cards */
 /* stats + filters share one row (wraps on narrow screens) */
 .dash-head { display: flex; flex-direction: column; align-items: stretch; gap: 14px; margin-bottom: 18px; }
-.dash-head #summary-cards { margin-bottom: 0; align-self: center; }
+.dash-head #summary-cards { margin-bottom: 0; align-self: stretch; width: 100%; }
 .dash-head #toolbar { margin-bottom: 0; width: 100%; }
 #summary-cards { margin-bottom: 22px; }
-/* one panel of stats, divided (Nodes | Online | Ready | …) */
-.stat-panel {
-  display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%;
-  background: linear-gradient(180deg, var(--panel), rgba(20,27,35,.6));
-  border: 1px solid var(--border); border-radius: var(--radius);
-  box-shadow: var(--shadow); overflow: hidden;
+/* dashboard KPI cards — at-a-glance fleet status, each clickable to the relevant view */
+.ds-bar { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; width: 100%; }
+.ds-card {
+  display: flex; align-items: center; gap: 14px; text-align: left; width: 100%;
+  padding: 15px 16px; border-radius: 14px; position: relative; overflow: hidden;
+  background: linear-gradient(180deg, var(--panel), rgba(20, 27, 35, .55));
+  border: 1px solid var(--border); box-shadow: var(--shadow);
+  font: inherit; color: var(--text); cursor: pointer;
+  transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease;
 }
-.stat {
-  flex: 0 0 auto; min-width: 0; padding: 16px 22px;
-  display: flex; flex-direction: column; gap: 3px;
-  border-left: 1px solid var(--border);
-}
-.stat:first-child { border-left: none; }
-.stat .num { font-size: 1.8rem; font-weight: 700; letter-spacing: -.5px; line-height: 1.05; color: var(--text); }
-.stat .label { color: var(--muted); font-size: .78rem; }
-.stat.ok .num { color: var(--ok); }
-.stat.warn .num { color: var(--warn); }
-.stat.link { cursor: pointer; transition: background .12s; }
-.stat.link:hover { background: rgba(255,255,255,.05); }
+.ds-card:hover { transform: translateY(-2px); border-color: #3a4b5e; box-shadow: 0 10px 30px rgba(0,0,0,.42); }
+.ds-card:active { transform: translateY(0); }
+.ds-card:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(90,169,255,.35); }
+.ds-card::after { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: transparent; }
+.ds-ic { width: 40px; height: 40px; border-radius: 11px; flex: none; display: grid; place-items: center;
+  background: rgba(255,255,255,.05); color: var(--muted); }
+.ds-ic svg { width: 20px; height: 20px; }
+.ds-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ds-n { font-size: 1.65rem; font-weight: 750; letter-spacing: -.5px; line-height: 1.08; color: var(--text); font-variant-numeric: tabular-nums; }
+.ds-l { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-weight: 600; }
+.ds-sub { font-size: .72rem; color: var(--muted); margin-top: 1px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ds-sub.warn { color: var(--warn); }
+.ds-sub.bad { color: var(--bad); }
+.ds-sub.accent { color: var(--accent); }
+.ds-card.ok .ds-ic { background: rgba(54,211,153,.13); color: var(--ok); }
+.ds-card.ok::after { background: var(--ok); }
+.ds-card.warn .ds-ic { background: rgba(251,191,69,.15); color: var(--warn); }
+.ds-card.warn .ds-n { color: var(--warn); }
+.ds-card.warn::after { background: var(--warn); }
+.ds-card.bad .ds-ic { background: rgba(245,97,115,.15); color: var(--bad); }
+.ds-card.bad .ds-n { color: var(--bad); }
+.ds-card.bad::after { background: var(--bad); }
+.ds-card.accent .ds-ic { background: rgba(90,169,255,.15); color: var(--accent); }
+.ds-card.accent .ds-n { color: var(--accent); }
+.ds-card.accent::after { background: var(--accent); }
+@media (max-width: 900px) { .ds-bar { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 560px) { .ds-bar { grid-template-columns: repeat(2, 1fr); } }
 .badge.inprogress .eta { color: var(--muted); margin-left: 5px; font-variant-numeric: tabular-nums; }
 .eta { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .eta.done { color: var(--muted); }

@@ -410,6 +410,9 @@ function goToActivity() {
   renderDeploy();
   document.querySelector('.act-head')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+function goToFleet() {
+  document.querySelector('nav button[data-tab="fleet"]')?.click();
+}
 
 // Compact duration: 45s, 2m, 1h10m.
 function fmtDur(ms) {
@@ -442,22 +445,32 @@ function renderDashboard() {
     ['pending', 'downloading', 'installing'].includes(j.status)).length;
   const elevated = nodes.filter((n) => n.elevated === 1).length;
 
-  const onlineCls = online === nodes.length ? 'ok' : 'warn';
-  const readyCls = elevated === nodes.length ? 'ok' : 'warn';
-  document.getElementById('summary-cards').innerHTML = `
-    <div class="stat-panel">
-      <div class="stat combo">
-        <div class="trio">
-          <span class="t"><b>${nodes.length}</b><em>nodes</em></span>
-          <span class="sep">/</span>
-          <span class="t"><b class="${onlineCls}">${online}</b><em>online</em></span>
-          <span class="sep">/</span>
-          <span class="t"><b class="${readyCls}">${elevated}</b><em>ready</em></span>
-        </div>
-      </div>
-      <div class="stat link ${behind ? 'warn' : 'ok'}" onclick="goToUpdates()" title="Open Update software"><span class="num">${behind}</span><span class="label">updates</span></div>
-      <div class="stat link ${activeJobs ? 'warn' : ''}" onclick="goToActivity()" title="See active jobs in Update activity"><span class="num">${activeJobs}</span><span class="label">active jobs</span></div>
-    </div>`;
+  const offline = nodes.length - online;
+  const notReady = nodes.length - elevated;
+  const win = nodes.filter((n) => n.os === 'windows').length;
+  const mac = nodes.filter((n) => n.os === 'macos').length;
+  const offHosts = nodes.filter((n) => !n.online).map((n) => n.hostname);
+  const notReadyHosts = nodes.filter((n) => n.elevated !== 1).map((n) => n.hostname);
+  const onlineCls = offline ? 'warn' : 'ok';
+  const readyCls = notReady ? 'warn' : 'ok';
+  // Each KPI is a clickable card: status-coloured, with a contextual sub-line, that jumps to
+  // the relevant view (Fleet / Updates / Activity).
+  const card = (cls, ic, num, label, sub, subCls, onclick, title) => `
+    <button class="ds-card ${cls}" onclick="${onclick}" title="${esc(title || '')}">
+      <span class="ds-ic">${icon(ic)}</span>
+      <span class="ds-body">
+        <span class="ds-n">${num}</span>
+        <span class="ds-l">${label}</span>
+        ${sub ? `<span class="ds-sub ${subCls || ''}">${esc(sub)}</span>` : ''}
+      </span>
+    </button>`;
+  document.getElementById('summary-cards').innerHTML = `<div class="ds-bar">
+    ${card('', 'server', nodes.length, 'Machines', `${win} Win · ${mac} Mac`, '', 'goToFleet()', 'All enrolled machines — open Fleet')}
+    ${card(onlineCls, 'dot', online, 'Online', offline ? `${offline} offline` : 'all reporting', offline ? 'warn' : '', 'goToFleet()', offline ? ('Offline: ' + offHosts.join(', ')) : 'Every machine has checked in recently')}
+    ${card(readyCls, 'shieldOk', elevated, 'Ready', notReady ? `${notReady} need setup` : 'silent installs on', notReady ? 'warn' : '', 'goToFleet()', notReady ? ('Needs elevation: ' + notReadyHosts.join(', ')) : 'All machines can install silently')}
+    ${card(behind ? 'warn' : 'ok', 'download', behind, 'Updates', behind ? 'pending' : 'up to date', behind ? 'warn' : '', 'goToUpdates()', 'Open Update software')}
+    ${card(activeJobs ? 'accent' : '', 'activity', activeJobs, 'Active jobs', activeJobs ? 'running now' : 'idle', activeJobs ? 'accent' : '', 'goToActivity()', 'See running installs in Update activity')}
+  </div>`;
 
   // product filter options (once)
   const pf = document.getElementById('f-product');
