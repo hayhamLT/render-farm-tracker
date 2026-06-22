@@ -1329,6 +1329,23 @@ function fullState() {
 }
 
 // ------------------------------------------------------ API: agent check-in -
+// One-time fleet migration: when config.rehome is enabled, tell agents to repoint
+// themselves at a different tracker server (URL + key) and relaunch there. Gated so it
+// only fires for the hostnames we've opted in — set `only` to canary a couple of nodes,
+// then clear it (or set to []) to migrate the whole fleet. `exclude` always wins.
+// Only rehome-capable agents (>= 2.27.0) act on it; older ones ignore the field. Default
+// (no config.rehome): never emitted. config.json is read at startup, so reload to apply.
+function rehomeFor(hostname) {
+  const r = config.rehome;
+  if (!r || !r.enabled || !r.server || !r.key) return undefined;
+  const hn = String(hostname).toUpperCase();
+  const only = (Array.isArray(r.only) ? r.only : []).map((s) => String(s).toUpperCase());
+  const exclude = (Array.isArray(r.exclude) ? r.exclude : []).map((s) => String(s).toUpperCase());
+  if (exclude.includes(hn)) return undefined;
+  if (only.length && !only.includes(hn)) return undefined;
+  return { server: String(r.server).replace(/\/+$/, ''), key: r.key };
+}
+
 function handleCheckin(body) {
   // Strip the DNS/mDNS suffix: macOS flips between "<name>.lan" (DHCP) and
   // "<name>.local" (Bonjour), which would register the same machine twice.
@@ -1493,6 +1510,8 @@ function handleCheckin(body) {
     jobs,
     // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
     reboot: pendingAgentReboot.delete(node.id) ? true : undefined,
+    // One-time fleet migration to a new tracker server (gated by config.rehome).
+    rehome: rehomeFor(hostname),
     // User-added (custom) products + their detection patterns, so the agent can detect them
     // without a code change. Built-ins are hardcoded in the agent; only customs are sent.
     products: db.prepare(

@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.26.0"
+AGENT_VERSION = "2.27.1"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1280,6 +1280,205 @@ def self_update(server, latest):
 
 
 # --------------------------------------------------------------------------
+# Re-home — migrate this agent to a DIFFERENT tracker server on the server's
+# request (a one-time directive in the check-in response). We rewrite our OWN
+# persistent launch config — the macOS LaunchDaemon/LaunchAgent plist or the
+# Windows SYSTEM scheduled task / HKCU Run key — to the new server URL + key so
+# the move survives a reboot, then relaunch against the new server immediately.
+# Conservative by design: if the durable rewrite fails we do NOT relaunch, so a
+# node we couldn't migrate cleanly stays manageable on its current server and
+# simply retries on the next check-in.
+# --------------------------------------------------------------------------
+
+def _plist_paths():
+    """Candidate LaunchDaemon/Agent plists for this agent, most-authoritative first."""
+    paths = ["/Library/LaunchDaemons/com.tracker.agent.plist"]
+    try:
+        paths.append(os.path.join(os.path.expanduser("~"),
+                                  "Library/LaunchAgents/com.tracker.agent.plist"))
+    except Exception:
+        pass
+    return paths
+
+
+def _rewrite_plist(plist_path, new_server, new_key):
+    """Point a plist's --server/--key ProgramArguments at the new server (atomic write).
+    Returns True only if the file on disk now actually contains BOTH new values."""
+    import plistlib
+    with open(plist_path, "rb") as f:
+        pl = plistlib.load(f)
+    args = list(pl.get("ProgramArguments") or [])
+    for i, a in enumerate(args):
+        if a == "--server" and i + 1 < len(args):
+            args[i + 1] = new_server
+        elif a == "--key" and i + 1 < len(args):
+            args[i + 1] = new_key
+    pl["ProgramArguments"] = args
+    tmp = plist_path + ".new"
+    with open(tmp, "wb") as f:
+        plistlib.dump(pl, f)
+    os.replace(tmp, plist_path)            # atomic swap
+    with open(plist_path, "rb") as f:
+        chk = list(plistlib.load(f).get("ProgramArguments") or [])
+    return new_server in chk and new_key in chk
+
+
+def _ps(cmd, timeout=90):
+    """Run a PowerShell command, return stdout (best-effort, never raises)."""
+    try:
+        return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+                              capture_output=True, text=True, timeout=timeout).stdout or ""
+    except Exception as e:
+        return "ERR:%s" % e
+
+
+def _rewrite_windows_launch(script, new_server, new_key, interval):
+    """Repoint this Windows agent's persistence at the new server+key. Robust to however
+    the node was enrolled: rewrites EVERY scheduled task whose action references the agent
+    (any name/folder — Set-ScheduledTask -Action keeps the SYSTEM/Highest principal so
+    elevation survives), plus the HKLM/HKCU Run keys, and — if nothing was found and we're
+    elevated — registers a fresh SYSTEM task as a catch-all so durable persistence exists at
+    the new server. Returns (ok, detail); detail is uploaded to the old server on failure so
+    a stuck node is diagnosable. """
+    detail = []
+    py = sys.executable
+    arg = '"%s" --server "%s" --key "%s" --interval %d' % (script, new_server, new_key, interval)
+    py_ps, arg_ps = py.replace("'", "''"), arg.replace("'", "''")
+    ok = False
+
+    # 1) Every scheduled task whose action invokes render_agent.py — rewrite its action.
+    enum = (
+        "$c=0;Get-ScheduledTask | ForEach-Object { $t=$_;"
+        "if($t.Actions | Where-Object { $_.Arguments -like '*render_agent.py*' }){"
+        "try{$a=New-ScheduledTaskAction -Execute '%s' -Argument '%s';"
+        "Set-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Action $a | Out-Null;"
+        "Write-Output ('TASK:'+$t.TaskPath+$t.TaskName);$c++}"
+        "catch{Write-Output ('TASKERR:'+$t.TaskName+':'+$_.Exception.Message)}}}"
+        "Write-Output ('COUNT:'+$c)" % (py_ps, arg_ps)
+    )
+    out = _ps(enum)
+    detail.append("enum=" + " ".join(out.split()))
+    if "TASK:" in out:
+        ok = True
+
+    # 2) HKLM + HKCU Run keys (covers run-key persistence under SYSTEM or a user).
+    try:
+        import winreg
+        for hive, name in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")):
+            try:
+                with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
+                                    winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+                    try:
+                        cur, _ = winreg.QueryValueEx(k, "TrackerAgent")
+                    except OSError:
+                        cur = None
+                    if cur:
+                        winreg.SetValueEx(k, "TrackerAgent", 0, winreg.REG_SZ, '"%s" %s' % (py, arg))
+                        detail.append("runkey:%s" % name)
+                        ok = True
+            except OSError:
+                pass
+    except Exception as e:
+        detail.append("runkey-err:%s" % e)
+
+    # 3) Catch-all: nothing found but we're elevated → make a fresh SYSTEM task at the new server.
+    if not ok and is_elevated():
+        mk = (
+            "try{$a=New-ScheduledTaskAction -Execute '%s' -Argument '%s';"
+            "$tr=New-ScheduledTaskTrigger -AtStartup;"
+            "$pr=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest;"
+            "$se=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Days 3650) "
+            "-RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable;"
+            "Register-ScheduledTask -TaskName 'TrackerAgent' -Action $a -Trigger $tr -Principal $pr "
+            "-Settings $se -Force | Out-Null;Write-Output 'MKOK'}"
+            "catch{Write-Output ('MKERR:'+$_.Exception.Message)}" % (py_ps, arg_ps)
+        )
+        out2 = _ps(mk)
+        detail.append("mktask=" + " ".join(out2.split()))
+        if "MKOK" in out2:
+            ok = True
+
+    return ok, " ;; ".join(detail)
+
+
+def _report_rehome_failure(cur_server, detail):
+    """Best-effort: upload the rehome-failure detail to the CURRENT server so a node that
+    couldn't migrate is diagnosable from the dashboard side (lands in the installers dir)."""
+    if not cur_server:
+        return
+    try:
+        host = socket.gethostname().split(".")[0]
+        blob = ("rehome failed on %s (agent %s, %s):\n%s\n"
+                % (host, AGENT_VERSION, platform.system(), detail)).encode("utf-8", "replace")
+        req = urllib.request.Request(
+            cur_server.base + "/api/agent/upload?filename=rehome_%s.txt" % host,
+            data=blob, method="POST", headers={"X-Agent-Key": cur_server.key})
+        urllib.request.urlopen(req, timeout=20).read()
+    except Exception:
+        pass
+
+
+def rehome(new_server, new_key, interval, cur_server=None):
+    """Migrate this agent to new_server: rewrite durable launch config, then relaunch."""
+    new_server = (new_server or "").rstrip("/")
+    if not new_server or not new_key:
+        return
+    script = os.path.abspath(__file__)
+    print("Re-home requested -> %s (rewriting launch config)" % new_server)
+    try:
+        if IS_MACOS:
+            wrote = False
+            for pl in _plist_paths():
+                if not os.path.exists(pl):
+                    continue
+                try:
+                    if _rewrite_plist(pl, new_server, new_key):
+                        wrote = True
+                        print("  rewrote %s" % pl)
+                except Exception as e:
+                    print("  ! could not rewrite %s: %s" % (pl, e))
+            if not wrote:
+                print("  ! re-home aborted: no launch plist rewritten — staying on current server")
+                _report_rehome_failure(cur_server, "macos: no plist rewritten (%s)" % ",".join(_plist_paths()))
+                return
+        elif IS_WINDOWS:
+            ok, detail = _rewrite_windows_launch(script, new_server, new_key, interval)
+            if not ok:
+                print("  ! re-home aborted: could not rewrite Windows persistence — staying put")
+                _report_rehome_failure(cur_server, detail)
+                return
+        else:
+            return
+    except Exception as e:
+        print("  ! re-home config rewrite failed (%s) — staying on current server" % e)
+        _report_rehome_failure(cur_server, "exception: %s" % e)
+        return
+
+    # Durable config now points at the new server. Relaunch the live process there too.
+    new_argv = [sys.executable, script, "--server", new_server, "--key", new_key,
+                "--interval", str(interval)]
+    print("Re-homed -> %s, relaunching agent" % new_server)
+    try:
+        if IS_WINDOWS:
+            # Same relaunch dance as self_update: a detached, job-breakaway child survives
+            # this process exiting; the scheduled task's restart-on-failure is the net if it
+            # doesn't (it now starts with the NEW args), and the single-instance mutex stops a
+            # double-up. Exit NON-ZERO so that net fires.
+            DETACHED, NEW_GROUP, BREAKAWAY = 0x00000008, 0x00000200, 0x01000000
+            try:
+                subprocess.Popen(new_argv, creationflags=DETACHED | NEW_GROUP | BREAKAWAY, close_fds=True)
+            except OSError:
+                subprocess.Popen(new_argv, creationflags=DETACHED | NEW_GROUP, close_fds=True)
+            os._exit(1)
+        else:
+            os.execv(sys.executable, new_argv)   # in-place; launchd keeps watching the same job
+    except Exception as e:
+        # Durable config is already updated, so a reboot/KeepAlive brings it up on the new
+        # server regardless. Keep running here for now and let the next cycle retry.
+        print("  ! re-home relaunch failed: %s (takes effect on next restart)" % e)
+
+
+# --------------------------------------------------------------------------
 # Wedge watchdog
 # --------------------------------------------------------------------------
 # The agent keeps heartbeating (stays "online") even if its work loop stalls or a job
@@ -1387,6 +1586,13 @@ def main():
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
                 continue
+            # Server asked us to MOVE to a different tracker server (fleet migration). One-time:
+            # rewrite our launch config to the new URL+key and relaunch there. Never mid-install
+            # (don't migrate while an installer is running). If rehome() returns, the migration
+            # didn't complete — stay on this server and retry next check-in.
+            rh = resp.get("rehome")
+            if rh and not busy and rh.get("server") and rh.get("key"):
+                rehome(rh["server"], rh["key"], interval, server)
             # Pull user-added (custom) product patterns BEFORE the full check-in's detection below.
             set_custom_products(resp.get("products"))
             active = resp.get("active", True)
