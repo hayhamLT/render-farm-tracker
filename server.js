@@ -1371,6 +1371,34 @@ function rehomeFor(hostname) {
   return { server: String(r.server).replace(/\/+$/, ''), key: r.key };
 }
 
+// A job is only "failed" if the software didn't actually land. Installers sometimes exit
+// non-zero after a good install (the NVIDIA driver returns 1 on a benign warning), and
+// agents older than 2.28.1 trusted the exit code alone. So on every check-in, compare
+// this node's REPORTED inventory against its recently failed jobs: if the node now runs
+// the job's version (or newer), the install worked — correct the job to success.
+const RECONCILE_WINDOW_MS = 24 * 3600 * 1000;
+function reconcileFailedJobs(node, software, now) {
+  const installed = new Map();
+  for (const s of software) if (s && s.product && s.version) installed.set(String(s.product), String(s.version));
+  if (!installed.size) return;
+  const failed = db.prepare(
+    `SELECT j.id, j.log, p.product_key, p.version FROM jobs j JOIN packages p ON p.id = j.package_id
+      WHERE j.node_id = ? AND j.status = 'failed' AND j.updated_at > ?`
+  ).all(node.id, now - RECONCILE_WINDOW_MS);
+  for (const j of failed) {
+    const have = installed.get(j.product_key);
+    if (!have || !j.version || j.version === 'uninstall') continue;
+    if (cmpVersionServer(have, j.version) < 0) continue;
+    const note = `Verified on check-in: ${node.hostname} now reports ${j.product_key} ${have} `
+      + `(target ${j.version}), so this install succeeded — the failure came from the `
+      + `installer's exit code, not from the install.\n--- original report ---\n`;
+    db.prepare("UPDATE jobs SET status = 'success', log = ? WHERE id = ? AND status = 'failed'")
+      .run((note + (j.log || '')).slice(0, 20000), j.id);
+    clearRolloutHaltFlag(j.product_key, j.version);
+    logEvent('job', `Job #${j.id} corrected to success: ${j.product_key} ${j.version} is installed on ${node.hostname} (${have})`);
+  }
+}
+
 function handleCheckin(body) {
   // Strip the DNS/mDNS suffix: macOS flips between "<name>.lan" (DHCP) and
   // "<name>.local" (Bonjour), which would register the same machine twice.
@@ -1439,6 +1467,7 @@ function handleCheckin(body) {
       }
       ins.run(node.id, String(s.product), ver, s.path ? String(s.path) : null, now);
     }
+    reconcileFailedJobs(node, body.software, now);
   }
 
   // Self-correct the catalog from reality: if a node actually RUNS a version newer than

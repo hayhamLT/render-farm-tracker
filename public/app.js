@@ -1549,11 +1549,23 @@ function renderDeploy() {
           if (node && !node.online) { warn = 'machine offline'; hint = 'Runs when the machine is back online.'; }
           else if (node && node.elevated === 0) { warn = 'needs elevation'; hint = 'Run Elevate-Tracker.cmd on it once (see Setup tab).'; }
           else if (/deferr|rendering/i.test(j.log || '')) { warn = 'rendering'; hint = 'Held so it never interrupts a render — runs when the machine is idle.'; }
+          // Not blocked — just waiting its turn. Say which kind of wait it is.
+          const busyHere = jobs.some((o) => o.id !== j.id && o.hostname === j.hostname && active(o.status) && o.status !== 'pending');
+          const limit = state.maxConcurrentInstalls || 4;
+          const running = jobs.filter((o) => o.status === 'downloading' || o.status === 'installing').length;
+          let waitLabel = 'queued', waitHint = 'Waiting to be picked up on the machine\'s next check-in.';
+          if (busyHere) { waitLabel = 'after current job'; waitHint = 'This machine runs one update at a time — it starts when the current one finishes.'; }
+          else if (running >= limit) { waitLabel = `waiting for slot · ${running}/${limit}`; waitHint = `Only ${limit} updates run at once across the farm — it starts when a slot frees up.`; }
           statusCell = warn
             ? `<span class="badge inprogress blocked" title="Queued — ${warn}. ${hint}">${icon('alert')} ${warn}</span>`
-            : `<span class="badge inprogress pending">${icon('clock')}queued</span>`;
+            : `<span class="badge inprogress pending" title="${waitHint}">${icon('clock')}${waitLabel}</span>`;
         } else {
-          const pill = j.status === 'success' ? `<span class="badge uptodate">${icon('check')} success</span>`
+          // Name the cause on the badge when the agent could tell (full detail in the log).
+          const needsReboot = j.status === 'failed' && /REBOOT NEEDED/.test(j.log || '');
+          const corrected = j.status === 'success' && /^Verified on check-in:/.test(j.log || '');
+          const pill = j.status === 'success'
+            ? `<span class="badge uptodate"${corrected ? ' title="The installer returned an error code, but the machine reports the new version — the install worked."' : ''}>${icon('check')} success</span>`
+            : needsReboot ? `<span class="badge ev-bad" title="Windows has a restart pending, so the installer refused to run. Reboot the machine, then retry.">${icon('alert')} failed · reboot needed</span>`
             : j.status === 'failed' ? `<span class="badge ev-bad">${icon('alert')} failed</span>`
             : `<span class="badge ev-system">${icon('x')} stopped</span>`;
           // Retry sits right next to the status (not in the actions/log column).

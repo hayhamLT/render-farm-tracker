@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.28.0"
+AGENT_VERSION = "2.28.1"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -850,21 +850,28 @@ def detect_health():
         pass
     # Windows pending-reboot (the common registry markers).
     if IS_WINDOWS:
-        try:
-            import winreg
-            pending = 0
-            for sub in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
-                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"):
-                try:
-                    winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub).Close()
-                    pending = 1
-                    break
-                except OSError:
-                    pass
-            h["pendingReboot"] = pending
-        except Exception:
-            pass
+        pending = _windows_reboot_pending()
+        if pending is not None:
+            h["pendingReboot"] = 1 if pending else 0
     return h
+
+
+def _windows_reboot_pending():
+    """True if Windows is waiting on a restart (Windows Update / servicing), False if not,
+    None if it can't be read. Installers — notably the NVIDIA driver — refuse to run
+    while one is pending, so a failed install reports this as the likely cause."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for sub in (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"):
+        try:
+            winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub).Close()
+            return True
+        except OSError:
+            pass
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -1167,74 +1174,100 @@ def run_job(server, job):
             timeout=job_timeout,
         )
         tail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[-4000:]
-        if proc.returncode != 0:
-            server.report(job_id, "failed", "Exit code %d\n%s" % (proc.returncode, tail))
-            print("  ✗ failed (exit %d)" % proc.returncode)
-        else:
-            # Verify the install actually changed the version — exit 0 alone is not
-            # proof (e.g. a downloader that doesn't install would exit 0 too).
-            after_ver = _installed_version(job["product_key"])
-            target = job.get("version") or ""
-            # Presence: does the product's detect-path now match a file on disk? Scripts and
-            # some plug-ins carry no readable version, so presence (not a version bump) is the proof.
-            present_after = job["product_key"] in detect_custom_paths()
+        rc = proc.returncode
+        # The exit code is NOT the verdict — what's actually installed afterwards is. Some
+        # installers exit non-zero after a successful install (the NVIDIA driver returns 1
+        # on a benign warning), and a downloader that installs nothing still exits 0. So
+        # read the installed version on EVERY exit code and decide from that.
+        after_ver = _installed_version(job["product_key"])
+        target = job.get("version") or ""
+        # Presence: does the product's detect-path now match a file on disk? Scripts and
+        # some plug-ins carry no readable version, so presence (not a version bump) is the proof.
+        present_after = job["product_key"] in detect_custom_paths()
+        exit_note = "installer exited %d (0x%08X)" % (rc, rc & 0xFFFFFFFF)
 
-            # Uninstall jobs (packaged with version "uninstall") succeed when the product is
-            # GONE — no installed version AND no detect-path match. The version-change checks
-            # below are for installs only and would wrongly fail a successful removal.
-            if target == "uninstall":
-                if not after_ver and not present_after:
-                    server.report(job_id, "success", "Uninstalled — no longer present on the node.\n%s" % tail)
-                    print("  ✓ uninstalled")
-                else:
-                    server.report(job_id, "failed",
-                                  "Uninstall ran (exit 0) but the product is still present (%s).\n%s"
-                                  % (after_ver or "files remain", tail))
-                    print("  ✗ still present after uninstall")
-                return
-
-            changed = after_ver and after_ver != before_ver
-            reached = after_ver and target and _version_tuple(after_ver) >= _version_tuple(target)
-            # A version-less product (script / some plug-ins): exit 0 + now present on disk = installed.
-            presence_ok = (not after_ver) and present_after
-            # Some installs don't reflect the new version during the job:
-            #  • NVIDIA driver — installed with -noreboot, so nvidia-smi keeps reporting
-            #    the OLD version until the machine reboots. Exit 0 IS the install proof.
-            #  • Creative Cloud — self-updates asynchronously after a nudge.
-            reboot_deferred = job["product_key"] == "nvidia"
-            # Adobe RUM ran fine but had nothing to install: the node is already current
-            # per Adobe's update source. This is NOT a failure — RUM simply can't deliver a
-            # version that isn't in its catalog (e.g. an AE release that shipped via the
-            # Creative Cloud app). Treat exit-0 + "no applicable updates" as a clean no-op.
-            tl = tail.lower()
-            rum_noop = ("no new applicable updates" in tl
-                        or "all products are up-to-date" in tl
-                        or "all products are up to date" in tl)
-            if changed or reached or presence_ok or reboot_deferred or job["product_key"] == "creativecloud":
-                if reboot_deferred and not (changed or reached):
-                    note = ("Installed (target %s) — takes effect after reboot; nvidia-smi "
-                            "still reports %s until then.\n%s" % (target, after_ver, tail))
-                elif presence_ok and not (changed or reached):
-                    note = "Installed (no version to read) — now present on the node.\n%s" % tail
-                else:
-                    note = "Installed: %s -> %s\n%s" % (before_ver, after_ver, tail)
-                server.report(job_id, "success", note)
-                print("  ✓ success (%s -> %s)" % (before_ver, after_ver))
-                # Restart Creative Cloud right after any install so it self-updates too.
-                if job["product_key"] != "creativecloud":
-                    _restart_cc()
-            elif rum_noop:
-                server.report(job_id, "success",
-                              "No RUM update needed — Adobe RUM reports this node is already "
-                              "current per Adobe's update source. A release like %s ships "
-                              "through the Creative Cloud app, not RUM, so RUM can't deliver "
-                              "it (and didn't fail).\n%s" % (target or "the latest", tail))
-                print("  ✓ RUM no-op (current per Adobe source, %s)" % after_ver)
+        # Uninstall jobs (packaged with version "uninstall") succeed when the product is
+        # GONE — no installed version AND no detect-path match. The version-change checks
+        # below are for installs only and would wrongly fail a successful removal.
+        if target == "uninstall":
+            if not after_ver and not present_after:
+                server.report(job_id, "success", "Uninstalled — no longer present on the node.%s\n%s"
+                              % ("" if rc == 0 else " (%s, but the product is gone)" % exit_note, tail))
+                print("  ✓ uninstalled")
             else:
                 server.report(job_id, "failed",
-                              "Command exited 0 but version unchanged (still %s) — "
-                              "nothing installed.\n%s" % (after_ver, tail))
-                print("  ✗ no-op (version unchanged: %s)" % after_ver)
+                              "Uninstall ran (%s) but the product is still present (%s).\n%s"
+                              % (exit_note, after_ver or "files remain", tail))
+                print("  ✗ still present after uninstall")
+            return
+
+        changed = after_ver and after_ver != before_ver
+        reached = after_ver and target and _version_tuple(after_ver) >= _version_tuple(target)
+        # A version-less product (script / some plug-ins): exit 0 + now present on disk = installed.
+        presence_ok = (not after_ver) and present_after
+        # Some installs don't reflect the new version during the job:
+        #  • NVIDIA driver — installed with -noreboot, so nvidia-smi may keep reporting
+        #    the OLD version until the machine reboots. Exit 0 IS the install proof.
+        #  • Creative Cloud — self-updates asynchronously after a nudge.
+        reboot_deferred = job["product_key"] == "nvidia"
+        # Adobe RUM ran fine but had nothing to install: the node is already current
+        # per Adobe's update source. This is NOT a failure — RUM simply can't deliver a
+        # version that isn't in its catalog (e.g. an AE release that shipped via the
+        # Creative Cloud app). Treat exit-0 + "no applicable updates" as a clean no-op.
+        tl = tail.lower()
+        rum_noop = ("no new applicable updates" in tl
+                    or "all products are up-to-date" in tl
+                    or "all products are up to date" in tl)
+
+        if rc == 0:
+            succeeded = changed or reached or presence_ok or reboot_deferred or job["product_key"] == "creativecloud"
+        else:
+            # Non-zero exit: only hard evidence counts — the version now meets the target
+            # (or, with no target to compare, it moved). Presence alone isn't enough here:
+            # a failing installer can leave partial files behind.
+            succeeded = bool(reached or (not target and changed))
+
+        if succeeded:
+            if rc == 0 and reboot_deferred and not (changed or reached):
+                note = ("Installed (target %s) — takes effect after reboot; nvidia-smi "
+                        "still reports %s until then.\n%s" % (target, after_ver, tail))
+            elif rc == 0 and presence_ok and not (changed or reached):
+                note = "Installed (no version to read) — now present on the node.\n%s" % tail
+            elif rc != 0:
+                note = ("Installed: %s -> %s (%s, but the node now reports %s, so the install "
+                        "worked — the exit code was a benign warning).\n%s"
+                        % (before_ver, after_ver, exit_note, after_ver, tail))
+            else:
+                note = "Installed: %s -> %s\n%s" % (before_ver, after_ver, tail)
+            server.report(job_id, "success", note)
+            print("  ✓ success (%s -> %s%s)" % (before_ver, after_ver, "" if rc == 0 else ", " + exit_note))
+            # Restart Creative Cloud right after any install so it self-updates too.
+            if job["product_key"] != "creativecloud":
+                _restart_cc()
+        elif rc == 0 and rum_noop:
+            server.report(job_id, "success",
+                          "No RUM update needed — Adobe RUM reports this node is already "
+                          "current per Adobe's update source. A release like %s ships "
+                          "through the Creative Cloud app, not RUM, so RUM can't deliver "
+                          "it (and didn't fail).\n%s" % (target or "the latest", tail))
+            print("  ✓ RUM no-op (current per Adobe source, %s)" % after_ver)
+        elif rc == 0:
+            server.report(job_id, "failed",
+                          "Command exited 0 but version unchanged (still %s) — "
+                          "nothing installed.\n%s" % (after_ver, tail))
+            print("  ✗ no-op (version unchanged: %s)" % after_ver)
+        else:
+            # A real failure: say WHY where we can tell, not just a bare exit code.
+            still = "still %s" % after_ver if after_ver else "not detected"
+            if IS_WINDOWS and _windows_reboot_pending():
+                reason = ("REBOOT NEEDED — Windows has a restart pending (Windows Update or an "
+                          "earlier install), and the installer won't run until it's done. "
+                          "Reboot this machine, then retry.")
+            else:
+                reason = "The installer reported an error and the version didn't change."
+            server.report(job_id, "failed", "%s\n%s; %s (target %s).\n%s"
+                          % (reason, exit_note[0].upper() + exit_note[1:], still, target or "?", tail))
+            print("  ✗ failed (%s; %s)" % (exit_note, still))
     except subprocess.TimeoutExpired:
         server.report(job_id, "failed", "Command timed out after %ds (no progress — the agent aborted it to free the machine)" % job_timeout)
     except Exception as e:
