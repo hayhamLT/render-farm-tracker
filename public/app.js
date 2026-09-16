@@ -1532,11 +1532,11 @@ function renderDeploy() {
           statusCell = `<span class="badge inprogress blocked" title="No progress for much longer than this install usually takes — the agent may be stuck. Use Stop, then Retry.">${icon('alert')} stalled</span>`;
         } else if (j.status === 'installing' && j.inst_overrun) {
           // Past this app's typical install time but still running (not yet stalled). Show an
-          // indeterminate "finishing…" bar with the live elapsed time — never a frozen 97%
-          // that reads as stuck. It auto-aborts on the agent side if it truly hangs.
-          const start = j.started_at || j.updated_at;
+          // indeterminate "finishing…" bar — never a frozen 97% that reads as stuck. It
+          // auto-aborts on the agent side if it truly hangs. The elapsed time lives in the
+          // Time column (below); don't repeat it here or the row shows the duration twice.
           statusCell = `<span class="badge inprogress installing" title="Taking longer than this app usually does — still running. It auto-aborts if it truly hangs.">${icon('spinner', 'spin')}
-            <span class="dlbar indet"><span class="dlfill"></span></span>finishing… <span class="eta" data-timer="${start}">${fmtTook(Date.now() - start)}</span></span>`;
+            <span class="dlbar indet"><span class="dlfill"></span></span>finishing…</span>`;
         } else if (j.status === 'installing') {
           // Progress is an estimate vs the learned typical install time for this product/OS.
           const pct = typeof j.inst_pct === 'number' ? j.inst_pct : null;
