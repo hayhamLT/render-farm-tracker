@@ -1410,7 +1410,7 @@ async function runWizard() {
 
     const uniq = [...new Set(allQueued)];
     prog.innerHTML = (uniq.length
-      ? `Update queued on <b>${uniq.length}</b> machine(s) — they run a few at a time. `
+      ? `Update queued on <b>${uniq.length}</b> machine(s) — each starts as soon as it's free (the first 3 test a new version before the rest). `
       : 'Nothing queued — targets are current, offline, or already queued. ')
       + (skipped.length ? `<br><b style="color:var(--warn)">Skipped:</b> ${skipped.map(esc).join(' · ')}` : '');
     refresh();
@@ -1551,11 +1551,15 @@ function renderDeploy() {
           else if (/deferr|rendering/i.test(j.log || '')) { warn = 'rendering'; hint = 'Held so it never interrupts a render — runs when the machine is idle.'; }
           // Not blocked — just waiting its turn. Say which kind of wait it is.
           const busyHere = jobs.some((o) => o.id !== j.id && o.hostname === j.hostname && active(o.status) && o.status !== 'pending');
-          const limit = state.maxConcurrentInstalls || 4;
-          const running = jobs.filter((o) => o.status === 'downloading' || o.status === 'installing').length;
-          let waitLabel = 'queued', waitHint = 'Waiting to be picked up on the machine\'s next check-in.';
+          // Mirrors the server's canary: until one machine succeeds with this version, only
+          // CANARY run it at once, so a broken update can't hit the whole farm.
+          const CANARY = 3;
+          const same = jobs.filter((o) => o.product_key === j.product_key && o.package_version === j.package_version);
+          const proven = same.some((o) => o.status === 'success');
+          const trying = same.filter((o) => o.status === 'downloading' || o.status === 'installing').length;
+          let waitLabel = 'queued', waitHint = 'Starts on the machine\'s next check-in (within about a minute).';
           if (busyHere) { waitLabel = 'after current job'; waitHint = 'This machine runs one update at a time — it starts when the current one finishes.'; }
-          else if (running >= limit) { waitLabel = `waiting for slot · ${running}/${limit}`; waitHint = `Only ${limit} updates run at once across the farm — it starts when a slot frees up.`; }
+          else if (!proven && trying >= CANARY) { waitLabel = `testing on ${trying} first`; waitHint = `Nobody has installed this version successfully yet, so it runs on ${CANARY} machines first. As soon as one succeeds, every machine starts.`; }
           statusCell = warn
             ? `<span class="badge inprogress blocked" title="Queued — ${warn}. ${hint}">${icon('alert')} ${warn}</span>`
             : `<span class="badge inprogress pending" title="${waitHint}">${icon('clock')}${waitLabel}</span>`;

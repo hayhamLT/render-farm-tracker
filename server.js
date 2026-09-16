@@ -89,6 +89,24 @@ function rolloutHalted(productKey, version) {
   const success = rows.filter((r) => r.status === 'success').length;
   return success === 0 && failed >= ROLLOUT_HALT_THRESHOLD;
 }
+// How many machines try a product@version at once before anyone has succeeded with it.
+// Equal to the halt threshold, so a broken update stops after exactly these fail.
+const ROLLOUT_CANARY = ROLLOUT_HALT_THRESHOLD;
+const RUNNING = "('downloading','installing')";
+function dispatchSlotFree(job) {
+  if (job.kind === 'command') {
+    const vendor = db.prepare(
+      `SELECT COUNT(*) AS c FROM jobs j JOIN packages p ON p.id = j.package_id
+        WHERE j.status IN ${RUNNING} AND p.kind = 'command'`
+    ).get().c;
+    if (vendor >= (config.maxConcurrentInstalls || 4)) return false;
+  }
+  const v = db.prepare(
+    `SELECT SUM(j.status = 'success') AS ok, SUM(j.status IN ${RUNNING}) AS running
+       FROM jobs j JOIN packages p ON p.id = j.package_id WHERE p.product_key = ? AND p.version = ?`
+  ).get(job.product_key, job.version);
+  return (v.ok || 0) > 0 || (v.running || 0) < ROLLOUT_CANARY;
+}
 function flagRolloutHalt(productKey, version) {
   const key = `${productKey}|${version}`;
   if (_rolloutHaltAlerted.has(key)) return;
@@ -1511,31 +1529,29 @@ function handleCheckin(body) {
     }
   }
 
-  // Concurrency throttle: don't let the whole farm download from the vendor at
-  // once (that overwhelms Maxon/Adobe and fails). Each node runs ONE job at a
-  // time, and farm-wide only `maxConcurrentInstalls` run at once.
-  const limit = config.maxConcurrentInstalls || 4;
+  // Dispatch: each node runs ONE job at a time, and an idle node takes its next job right
+  // away — no farm-wide cap. Installers stream from this server over the LAN, so there's
+  // no vendor to overwhelm. Two exceptions:
+  //  • Canary: until some machine has installed a product@version successfully, at most
+  //    ROLLOUT_CANARY run it at once. If those fail, the circuit breaker halts the rollout
+  //    before a broken update reaches every machine. After one success, everyone goes.
+  //  • Vendor-download commands (Adobe RUM, Maxon App CLI) pull from the internet, so only
+  //    `maxConcurrentInstalls` of those run farm-wide.
   const jobCols = `j.id, j.status, p.id AS package_id, p.product_key, p.version, p.filename, p.install_command, p.kind`;
   // This node's already-running jobs always come back (so it keeps reporting).
   const jobs = db.prepare(
     `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
       WHERE j.node_id = ? AND j.status IN ('downloading', 'installing') ORDER BY j.id`
   ).all(node.id);
-  // Hand out one new pending job only if this node is idle AND a global slot is free.
   if (jobs.length === 0) {
-    const activeGlobal = db.prepare(
-      "SELECT COUNT(*) AS c FROM jobs WHERE status IN ('downloading','installing')"
-    ).get().c;
-    if (activeGlobal < limit) {
-      const next = db.prepare(
-        `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
-          WHERE j.node_id = ? AND j.status = 'pending' ORDER BY j.id LIMIT 1`
-      ).get(node.id);
-      // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
-      // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
-      if (next && rolloutHalted(next.product_key, next.version)) flagRolloutHalt(next.product_key, next.version);
-      else if (next) jobs.push(next);
-    }
+    const next = db.prepare(
+      `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
+        WHERE j.node_id = ? AND j.status = 'pending' ORDER BY j.id LIMIT 1`
+    ).get(node.id);
+    // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
+    // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
+    if (next && rolloutHalted(next.product_key, next.version)) flagRolloutHalt(next.product_key, next.version);
+    else if (next && dispatchSlotFree(next)) jobs.push(next);
   }
 
   // Attach the installer's SHA256 so the agent can verify integrity before running.
