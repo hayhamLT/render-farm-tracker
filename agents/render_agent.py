@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.28.1"
+AGENT_VERSION = "2.29.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -182,39 +182,140 @@ def ensure_fast_startup_disabled():
         pass
 
 
-def ensure_wol_enabled():
-    """Enable Wake-on-LAN at the OS / NIC level so the tracker's Wake button can power a
-    halted machine back on.
+# Wired-NIC driver settings that decide whether a powered-OFF machine can be woken. Each is
+# applied only if the card's driver actually has it. Standard (*) keywords come from the
+# Windows NDIS spec; the rest are the common Realtek / Intel names for the same switches.
+#  • wake on magic packet ON, pattern wake OFF (no spurious wakes)
+#  • S5WakeOnLan (Realtek "Shutdown Wake-On-Lan") / EnablePME (Intel) ON — wake from full shutdown
+#  • Energy-Efficient / "green" Ethernet OFF — these drop the link when the PC is off, so the
+#    card never sees the packet
+_WOL_KEYWORDS = {
+    "*WakeOnMagicPacket": "1", "*WakeOnPattern": "0", "S5WakeOnLan": "1", "EnablePME": "1",
+    "*EEE": "0", "EEELinkAdvertisement": "0", "AdvancedEEE": "0", "EnableGreenEthernet": "0",
+    "GigaLite": "0", "PowerSavingMode": "0",
+}
 
-    Windows: for every physical NIC that's up, turn on 'wake on magic packet' + 'allow this
-    device to wake the computer', and prefer magic-packet-only (no spurious pattern wakes).
-    macOS: enable wake-on-magic-packet (pmset womp). Idempotent, best-effort, never raises;
-    only takes effect as admin/root (the elevated agent) and is re-applied on every start so a
-    driver update can't silently turn it back off.
 
-    NOTE: this is the OS half only. Waking from a FULL shutdown (S5) ALSO requires the machine's
-    BIOS/UEFI 'Wake on LAN from S5' enabled and ErP/EuP power-saving disabled — that's firmware
-    and cannot be set from software; it must be done once per machine in the BIOS.
+def _run_powershell(script, timeout=90):
+    import base64
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                           "-EncodedCommand", enc], capture_output=True, text=True, timeout=timeout)
+
+
+def ensure_wol_enabled(fix=True):
+    """Check (and, with fix=True, correct) Wake-on-LAN on this machine; return a status
+    dict for the server: {"ready": bool, "note": str, "nics": [...]}.
+
+    Windows: every wired physical NIC gets the settings in _WOL_KEYWORDS plus "allow this
+    device to wake the computer". Changes are saved with -NoRestart, so the adapter is NOT
+    reset — no network drop, no interrupted render — and they take effect at the machine's
+    next restart. Only values that differ are written, so re-running every start is free.
+    macOS: wake-on-magic-packet (pmset womp). Macs can only be woken from SLEEP, over
+    wired Ethernet — never from a full shutdown.
+
+    What software can't reach: the BIOS/UEFI "Wake on LAN" / "Power On by PCIe" option and
+    ErP/EuP deep power-saving. "ready" means the OS side is right; the BIOS still has to allow it.
+    Best-effort; never raises (returns None if the check itself fails).
     """
     try:
         if IS_WINDOWS:
-            ps = (
-                "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | "
-                "Where-Object {$_.Status -eq 'Up'} | ForEach-Object { $n=$_.Name;"
-                "try{Set-NetAdapterPowerManagement -Name $n -WakeOnMagicPacket Enabled "
-                "-WakeOnPattern Disabled -ErrorAction SilentlyContinue}catch{};"
-                "try{Set-NetAdapterAdvancedProperty -Name $n -RegistryKeyword '*WakeOnMagicPacket' "
-                "-RegistryValue 1 -ErrorAction SilentlyContinue}catch{};"
-                "try{powercfg /deviceenablewake \"$($_.InterfaceDescription)\" | Out-Null}catch{} }"
-            )
-            import base64
-            enc = base64.b64encode(ps.encode("utf-16-le")).decode()
-            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                            "-EncodedCommand", enc], capture_output=True, timeout=60)
-        elif IS_MACOS:
-            subprocess.run(["pmset", "-a", "womp", "1"], capture_output=True, timeout=30)
+            kw = ";".join("'%s'='%s'" % kv for kv in _WOL_KEYWORDS.items())
+            ps = r"""
+$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'SilentlyContinue'
+$kw = @{%s}; $fix = %s; $out = @()
+foreach ($a in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq '802.3' })) {
+  $changed = @(); $bad = @()
+  $pm = Get-NetAdapterPowerManagement -Name $a.Name -ErrorAction SilentlyContinue
+  $wom = "$($pm.WakeOnMagicPacket)"
+  if ($pm -and $wom -and $wom -ne 'Enabled' -and $wom -ne 'Unsupported') {
+    if ($fix) { try { Set-NetAdapterPowerManagement -Name $a.Name -WakeOnMagicPacket Enabled -NoRestart -ErrorAction Stop; $changed += 'WakeOnMagicPacket' } catch { $bad += 'WakeOnMagicPacket' } }
+    else { $bad += 'WakeOnMagicPacket' }
+  }
+  foreach ($k in $kw.Keys) {
+    $p = Get-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword $k -ErrorAction SilentlyContinue
+    if (-not $p -or "$($p.RegistryValue)" -eq $kw[$k]) { continue }
+    if ($fix) { try { Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword $k -RegistryValue $kw[$k] -NoRestart -ErrorAction Stop; $changed += $k } catch { $bad += $k } }
+    else { $bad += $k }
+  }
+  if ($fix) { try { powercfg /deviceenablewake "$($a.InterfaceDescription)" 2>&1 | Out-Null } catch {} }
+  $armed = @(powercfg /devicequery wake_armed 2>$null) -contains $a.InterfaceDescription
+  $out += [pscustomobject]@{ name = $a.Name; desc = $a.InterfaceDescription; mac = ($a.MacAddress -replace '-', ':').ToLower();
+    up = ($a.Status -eq 'Up'); speed = "$($a.LinkSpeed)"; magic = ($wom -ne 'Unsupported');
+    armed = $armed; changed = $changed; bad = $bad }
+}
+ConvertTo-Json -Compress -Depth 4 @($out)
+""" % (kw, "$true" if fix else "$false")
+            p = _run_powershell(ps)
+            txt = (p.stdout or "").strip()
+            nics = json.loads(txt) if txt else []
+            if isinstance(nics, dict):
+                nics = [nics]
+            wired_up = [n for n in nics if n.get("up")]
+            usable = [n for n in wired_up if n.get("magic") and not n.get("bad")]
+            ready = bool(usable)
+            if not nics:
+                note = "No wired Ethernet adapter — Wi-Fi can't wake a powered-off PC."
+            elif not wired_up:
+                note = "No wired Ethernet link — the machine must be on a cable to be woken."
+            elif not any(n.get("magic") for n in wired_up):
+                note = "The connected network card doesn't support wake-on-magic-packet."
+            elif not ready:
+                note = "Couldn't set: %s" % ", ".join(sorted({b for n in wired_up for b in (n.get("bad") or [])}))
+            elif any(n.get("changed") for n in usable):
+                note = "Wake settings just enabled — they take effect after the next restart."
+            else:
+                note = "Network card ready. The BIOS must also allow Wake on LAN."
+            return {"ready": ready, "note": note, "nics": nics}
+        if IS_MACOS:
+            if fix:
+                subprocess.run(["pmset", "-a", "womp", "1"], capture_output=True, timeout=30)
+            womp = re.search(r"\bwomp\s+(\d)", subprocess.run(["pmset", "-g"], capture_output=True,
+                                                             text=True, timeout=30).stdout or "")
+            on = bool(womp and womp.group(1) == "1")
+            return {"ready": on,
+                    "note": ("Wakes from SLEEP over wired Ethernet only — a shut-down Mac can't be woken."
+                             if on else "'Wake for network access' is off (pmset womp)."),
+                    "nics": []}
     except Exception:
-        pass
+        return None
+    return None
+
+
+def send_magic_packets(macs, ip=None, rounds=3):
+    """Broadcast Wake-on-LAN magic packets from THIS machine — used when the server asks an
+    online node to help wake a neighbour. Sending from inside the target's own network
+    segment reaches it even when the server's packets don't (multi-homed server, switches
+    that drop routed broadcasts). Sent to the limited broadcast and the target's /24
+    broadcast, on UDP 9 and 7, a few rounds (UDP is lossy)."""
+    pkts = []
+    for m in macs or []:
+        h = re.sub(r"[^0-9a-f]", "", str(m).lower())
+        if len(h) == 12:
+            pkts.append(b"\xff" * 6 + bytes.fromhex(h) * 16)
+    if not pkts:
+        return 0
+    targets = ["255.255.255.255"]
+    ip4 = str(ip or "").replace("::ffff:", "")
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", ip4):
+        targets.append(ip4.rsplit(".", 1)[0] + ".255")
+    for r in range(rounds):
+        for t in targets:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                for pkt in pkts:
+                    for port in (9, 7):
+                        try:
+                            s.sendto(pkt, (t, port))
+                        except OSError:
+                            pass
+                s.close()
+            except OSError:
+                pass
+        if r < rounds - 1:
+            time.sleep(2)
+    return len(pkts)
 
 # --------------------------------------------------------------------------
 # Software detection
@@ -1092,7 +1193,11 @@ def _shutdown_machine():
         if IS_WINDOWS:
             subprocess.Popen('shutdown /s /t 5 /f /c "Shut down requested from the Render Farm tracker"', shell=True)
         else:
-            subprocess.Popen(["/sbin/shutdown", "-h", "now"])
+            # A shut-down Mac can NOT be woken by Wake-on-LAN (Apple only wakes from sleep),
+            # so "power off" a Mac means sleep — the Wake button can then bring it back.
+            subprocess.Popen(["/usr/bin/pmset", "sleepnow"])
+            print("  ⏻ shutdown requested by server — Mac: sleeping instead (wakeable)")
+            return
         print("  ⏻ shutdown requested by server — powering off now")
     except Exception as e:
         print("  ! shutdown command failed: %s" % e)
@@ -1600,7 +1705,7 @@ def main():
     # Fast Startup so reboots cold-boot the agent before login (and Wake-on-LAN works).
     ensure_task_watchdog()
     ensure_fast_startup_disabled()
-    ensure_wol_enabled()
+    wol_state = {"status": ensure_wol_enabled(), "at": time.time()}
 
     # Wedge watchdog: force a restart if the loop stalls or a job hangs (see above).
     watch_state = {"tick": time.time(), "busy_since": None}
@@ -1634,6 +1739,11 @@ def main():
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
                 continue
+            # Server asked us to help WAKE machines on our network segment (Wake-on-LAN relay).
+            for w in resp.get("wake") or []:
+                threading.Thread(target=send_magic_packets, args=(w.get("macs"), w.get("ip")),
+                                 daemon=True).start()
+                print("  ⏻ sending Wake-on-LAN for %s" % w.get("hostname"))
             # Server asked us to SHUT DOWN — full power-off (recover via Wake-on-LAN).
             if resp.get("shutdown"):
                 _shutdown_machine()
@@ -1673,6 +1783,11 @@ def main():
                 if time.time() - last_health > 300:
                     health = detect_health()
                     last_health = time.time()
+                    if time.time() - wol_state["at"] > 1800:
+                        wol_state["status"] = ensure_wol_enabled()
+                        wol_state["at"] = time.time()
+                    if wol_state["status"]:
+                        health["wol"] = wol_state["status"]
                 # Always report software so the dashboard shows us online, even mid-install.
                 resp = server.checkin(detect_software(), latest=latest, health=health)
                 if not busy:

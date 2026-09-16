@@ -372,6 +372,9 @@ code {
 .node-reboot:hover { color: var(--bad); background: rgba(255,99,99,.12); }
 /* Wake (power-on, offline machines) is benign — hover turns it green, not red. */
 .node-reboot.wake:hover { color: var(--ok); background: rgba(54,211,153,.12); }
+/* Waking: spinner, not clickable. Failed last time / card not set up: amber, so it reads as "may not work". */
+.node-reboot.wake.waking { color: var(--ok); cursor: default; }
+.node-reboot.wake.wake-failed, .node-reboot.wake.wake-unready { color: var(--warn); }
 .node-table .node-actions { text-align: right; width: 1%; white-space: nowrap; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(54,211,153,.18); }

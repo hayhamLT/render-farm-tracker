@@ -1038,6 +1038,96 @@ function wakeOnLan(macs, nodeIp) {
   return list.length;
 }
 
+// ---- Wake-on-LAN with follow-through ---------------------------------------------------
+// A wake is a process, not a packet: send it from several places, repeat it (UDP is
+// lossy), then WATCH for the machine to check in — and say so either way.
+//  • The server fires bursts at 0 / 5 / 15 / 30 / 60 s.
+//  • Up to WAKE_RELAYS online agents (2.29.0+) on the target's /24 also broadcast it from
+//    inside that network segment, on their next check-in (≤ ~20 s).
+//  • The node is "waking" until it checks in ("woke", with how long it took) or until
+//    WAKE_TIMEOUT_MS passes ("failed", with the most likely reason).
+const WAKE_TIMEOUT_MS = 5 * 60 * 1000;   // cold boot + BIOS + agent start can take ~3 min
+const WAKE_RESULT_KEEP_MS = 15 * 60 * 1000;
+const WAKE_RELAYS = 3;
+const wakeState = new Map();        // node id -> { state, requestedAt, doneAt, secs, relays, reason }
+const pendingRelayWake = new Map(); // relay node id -> [{ hostname, macs, ip }]
+
+// MACs worth waking: the wired adapters the agent reported (2.29.0+), else everything known.
+function wakeMacsFor(node) {
+  try {
+    const info = node.wol_info ? JSON.parse(node.wol_info) : null;
+    const wired = (info && Array.isArray(info.nics) ? info.nics : []).map((n) => n.mac).filter(Boolean);
+    if (wired.length) return [...new Set(wired)];
+  } catch { /* fall through */ }
+  return String(node.macs || '').split(',').filter(Boolean);
+}
+
+function wakeFailReason(node) {
+  if (node.os === 'macos') {
+    return 'Macs only wake from SLEEP over wired Ethernet — if it was shut down, it has to be powered on at the machine.';
+  }
+  let note = '';
+  try { note = node.wol_info ? JSON.parse(node.wol_info).note || '' : ''; } catch { /* ignore */ }
+  if (node.wol_ready === 0) return `Its network card isn't set up to wake: ${note || 'wake settings are off'}.`;
+  if (node.wol_ready == null) {
+    return 'Most likely Wake-on-LAN is off in its BIOS (Wake on LAN / Power On by PCIe), or ErP/deep power-saving is on. '
+      + 'Its agent is older than 2.29.0, so its network-card wake settings are unverified.';
+  }
+  return 'Its network card is set up, so most likely Wake-on-LAN is off in the BIOS (Wake on LAN / Power On by PCIe), '
+    + 'ErP/deep power-saving is on, or the machine lost power / its cable has no link while off. See Help → the Wake button.';
+}
+
+function startWake(node) {
+  const macs = wakeMacsFor(node);
+  if (!macs.length) throw new Error(`No Wake-on-LAN address for ${node.hostname} yet — it must check in once on agent 2.18.0+ first.`);
+  const ip4 = String(node.ip || '').replace(/^::ffff:/, '');
+  const net = /^\d+\.\d+\.\d+\.\d+$/.test(ip4) ? ip4.replace(/\.\d+$/, '.') : null;
+  const now = Date.now();
+  const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
+  // Relays: online, not hidden, new enough to understand the directive, same /24, Windows first
+  // (render nodes stay up; Macs may be the ones asleep).
+  const relays = db.prepare('SELECT * FROM nodes WHERE id != ? AND last_seen > ?').all(node.id, now - offlineMs)
+    .filter((r) => !isHiddenHost(r.hostname) && r.agent_version && cmpVersionServer(r.agent_version, '2.29.0') >= 0)
+    .filter((r) => net && String(r.ip || '').replace(/^::ffff:/, '').startsWith(net))
+    .sort((a, b) => (a.os === 'windows' ? 0 : 1) - (b.os === 'windows' ? 0 : 1) || b.last_seen - a.last_seen)
+    .slice(0, WAKE_RELAYS);
+  for (const r of relays) {
+    const q = pendingRelayWake.get(r.id) || [];
+    q.push({ hostname: node.hostname, macs, ip: node.ip });
+    pendingRelayWake.set(r.id, q);
+  }
+  for (const delay of [0, 5000, 15000, 30000, 60000]) setTimeout(() => wakeOnLan(macs, node.ip), delay);
+  wakeState.set(node.id, { state: 'waking', requestedAt: now, relays: relays.map((r) => r.hostname) });
+  logEvent('node', `Waking ${node.hostname} — Wake-on-LAN to ${macs.length} MAC${macs.length === 1 ? '' : 's'} from the server`
+    + (relays.length ? ` and via ${relays.map((r) => r.hostname).join(', ')}` : ''));
+  return { macs: macs.length, relays: relays.map((r) => r.hostname) };
+}
+
+// Called on every check-in: a waking node that checks in has woken up.
+function noteWakeCheckin(node, now) {
+  const w = wakeState.get(node.id);
+  if (!w || w.state !== 'waking') return;
+  const secs = Math.round((now - w.requestedAt) / 1000);
+  wakeState.set(node.id, { ...w, state: 'woke', doneAt: now, secs });
+  logEvent('node', `${node.hostname} woke up — online ${secs}s after Wake-on-LAN`);
+}
+
+// Time out wakes that never produced a check-in; expire old results.
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, w] of wakeState) {
+    if (w.state === 'waking' && now - w.requestedAt > WAKE_TIMEOUT_MS) {
+      const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
+      if (!node) { wakeState.delete(id); continue; }
+      const reason = wakeFailReason(node);
+      wakeState.set(id, { ...w, state: 'failed', doneAt: now, reason });
+      logEvent('node', `${node.hostname} did not wake within ${Math.round(WAKE_TIMEOUT_MS / 60000)} min. ${reason}`);
+    } else if (w.state !== 'waking' && now - w.doneAt > WAKE_RESULT_KEEP_MS) {
+      wakeState.delete(id);
+    }
+  }
+}, 10000);
+
 // One-time ELEVATED setup (Windows): re-install the agent as a Scheduled Task
 // running as the logged-on user with HIGHEST privileges — elevated (no UAC on
 // installers) but still in the user's session (so mx1's Maxon login stays valid).
@@ -1304,6 +1394,7 @@ function fullState() {
     .map((n) => ({
     ...n,
     online: n.last_seen != null && now - n.last_seen < offlineMs,
+    wake: wakeState.get(n.id) || null,
     software: db
       .prepare('SELECT product_key, version, install_path, detected_at FROM software WHERE node_id = ?')
       .all(n.id),
@@ -1436,6 +1527,7 @@ function handleCheckin(body) {
   } else {
     db.prepare('UPDATE nodes SET os = ?, ip = ?, agent_version = ?, last_seen = ? WHERE id = ?')
       .run(os, body.ip || node.ip, body.agentVersion || node.agent_version, now, node.id);
+    noteWakeCheckin(node, now);
   }
   // Elevation status (only sent by full check-ins / newer agents).
   if (typeof body.elevated === 'boolean') {
@@ -1466,6 +1558,12 @@ function handleCheckin(body) {
       macsCsv,
       typeof hh.gpuUtil === 'number' ? hh.gpuUtil : null,
       node.id);
+    if (hh.wol && typeof hh.wol === 'object') {
+      db.prepare('UPDATE nodes SET wol_ready = ?, wol_info = ? WHERE id = ?').run(
+        hh.wol.ready ? 1 : 0,
+        JSON.stringify({ note: String(hh.wol.note || ''), nics: Array.isArray(hh.wol.nics) ? hh.wol.nics.slice(0, 8) : [] }).slice(0, 8000),
+        node.id);
+    }
   }
 
   if (Array.isArray(body.software)) {
@@ -1580,6 +1678,8 @@ function handleCheckin(body) {
     jobs,
     // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
     reboot: pendingAgentReboot.delete(node.id) ? true : undefined,
+    // Wake-on-LAN relay: broadcast magic packets for these neighbours from this node.
+    wake: (() => { const q = pendingRelayWake.get(node.id); pendingRelayWake.delete(node.id); return q; })(),
     // Agent-side full power-off (requested from the Fleet ⏻ menu → Shut down).
     shutdown: pendingAgentShutdown.delete(node.id) ? true : undefined,
     // One-time fleet migration to a new tracker server (gated by config.rehome).
@@ -2252,16 +2352,21 @@ const server = http.createServer(async (req, res) => {
       if (isHiddenHost(node.hostname))
         return sendJson(res, 403, { error: `${node.hostname} is a hidden infrastructure host and can't be shut down from here.` });
       const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
-      const agentCapable = online && node.agent_version && cmpVersionServer(node.agent_version, '2.28.0') >= 0;
+      // Macs need 2.29.0+, which SLEEPS instead of shutting down — a shut-down Mac can't be
+      // woken by Wake-on-LAN, so an older Mac agent must not be told to power off.
+      const minAgent = node.os === 'macos' ? '2.29.0' : '2.28.0';
+      const agentCapable = online && node.agent_version && cmpVersionServer(node.agent_version, minAgent) >= 0;
       if (!agentCapable) {
         const why = !online
           ? `${node.hostname} is offline — it's already not running. Use Wake to power it on.`
-          : `${node.hostname}'s agent (${node.agent_version || 'unknown'}) is too old to shut down. Agents self-update to 2.28.0+ within a few minutes — try again shortly.`;
+          : `${node.hostname}'s agent (${node.agent_version || 'unknown'}) is too old to shut down. Agents self-update to ${minAgent}+ within a few minutes — try again shortly.`;
         return sendJson(res, 400, { error: why });
       }
       pendingAgentShutdown.add(node.id);
-      logEvent('node', `Shut down requested for ${node.hostname} via the tracker agent`);
-      return sendJson(res, 200, { ok: true, hostname: node.hostname, via: 'agent' });
+      const macNote = node.os === 'macos' ? ' (Mac: put to sleep, so Wake can bring it back)' : '';
+      logEvent('node', `Shut down requested for ${node.hostname} via the tracker agent${macNote}`);
+      return sendJson(res, 200, { ok: true, hostname: node.hostname, via: 'agent',
+        note: node.os === 'macos' ? 'Macs are put to sleep instead of shut down — a shut-down Mac can\'t be woken over the network.' : undefined });
     }
 
     // Wake-on-LAN — power on a machine that's off/asleep (Deadline-free). Uses the MAC(s)
@@ -2270,10 +2375,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && nodeWake) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeWake[1]));
       if (!node) return sendJson(res, 404, { error: 'no such node' });
-      if (!node.macs) return sendJson(res, 400, { error: `No Wake-on-LAN address for ${node.hostname} yet — it must check in once on agent 2.18.0+ first.` });
-      const n = wakeOnLan(node.macs, node.ip);
-      logEvent('node', `Wake-on-LAN sent to ${node.hostname} (${n} MAC${n === 1 ? '' : 's'})`);
-      return sendJson(res, 200, { ok: true, hostname: node.hostname, sent: n });
+      const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
+      if (node.last_seen != null && Date.now() - node.last_seen < offlineMs) {
+        return sendJson(res, 409, { error: `${node.hostname} is already online.` });
+      }
+      try {
+        const r = startWake(node);
+        return sendJson(res, 200, { ok: true, hostname: node.hostname, sent: r.macs, relays: r.relays,
+          timeoutSec: WAKE_TIMEOUT_MS / 1000 });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
     }
 
     const nodeDel = p.match(/^\/api\/nodes\/(\d+)$/);

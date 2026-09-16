@@ -747,7 +747,32 @@ function nodeActionBtn(n) {
   if (n.online) {
     return `<button class="node-reboot" title="Restart ${esc(n.hostname)} (reboots the machine; interrupts any active render)" onclick="rebootNode(${n.id})">${icon('power')}</button>`;
   }
-  return `<button class="node-reboot wake" title="Wake ${esc(n.hostname)} — power it on via Wake-on-LAN" onclick="wakeNode(${n.id})">${icon('power')}</button>`;
+  const w = n.wake;
+  if (w && w.state === 'waking') {
+    const secs = Math.round((Date.now() - w.requestedAt) / 1000);
+    return `<button class="node-reboot wake waking" disabled title="Waking ${esc(n.hostname)} — Wake-on-LAN sent ${secs}s ago${w.relays && w.relays.length ? ` (also via ${esc(w.relays.join(', '))})` : ''}. Waiting for it to check in.">${icon('spinner', 'spin')}</button>`;
+  }
+  // Tell the truth up front about whether this machine can be woken.
+  let ready = '';
+  try { const info = n.wol_info ? JSON.parse(n.wol_info) : null; if (info && info.note) ready = ` — ${info.note}`; } catch { /* ignore */ }
+  if (n.os === 'macos' && !ready) ready = ' — Macs wake from sleep only (wired Ethernet).';
+  const failed = w && w.state === 'failed';
+  const title = failed ? `Last wake didn't work: ${w.reason} Click to try again.` : `Wake ${n.hostname} — power it on via Wake-on-LAN${ready}`;
+  return `<button class="node-reboot wake${failed ? ' wake-failed' : ''}${n.wol_ready === 0 ? ' wake-unready' : ''}" title="${esc(title)}" onclick="wakeNode(${n.id})">${icon('power')}</button>`;
+}
+
+// Announce wake outcomes once, when a node's wake state changes between refreshes.
+const _wakeSeen = new Map();
+function announceWakeChanges() {
+  for (const n of state.nodes) {
+    const w = n.wake;
+    const key = w ? `${w.state}:${w.requestedAt}` : '';
+    const prev = _wakeSeen.get(n.id);
+    _wakeSeen.set(n.id, key);
+    if (prev === undefined || prev === key || !w) continue;   // first sight or no change
+    if (w.state === 'woke') toast(`${n.hostname} is awake — back online ${w.secs}s after the wake signal.`, 'success');
+    if (w.state === 'failed') toast(`${n.hostname} didn't wake. ${w.reason}`, 'error');
+  }
 }
 
 // Reboot a machine — via the agent if it's online, else Deadline. Recovers a stuck node
@@ -772,12 +797,14 @@ async function rebootNode(id) {
 async function wakeNode(id) {
   const n = state.nodes.find((x) => x.id === id);
   const name = n ? n.hostname : `#${id}`;
-  if (!await uiConfirm(`Send a Wake-on-LAN signal to ${esc(name)} to power it on? (Requires Wake-on-LAN enabled in its BIOS/network card.)`,
+  if (!await uiConfirm(`Send a Wake-on-LAN signal to ${esc(name)} to power it on? The tracker keeps watching and tells you when it's back online — or why it didn't wake.`,
     { title: 'Wake machine', confirmLabel: 'Wake' })) return;
   try {
     const r = await api('POST', `/api/nodes/${id}/wake`);
-    toast(`Wake signal sent to ${name} — it should power on shortly and check in within a minute.`, 'success');
-  } catch (e) { toast(`Wake failed for ${name}: ${e.message}`, 'error'); }
+    const via = r.relays && r.relays.length ? ` and via ${r.relays.join(', ')}` : '';
+    toast(`Waking ${name} — signal sent from the server${via}. Watching for it to come online (up to ${Math.round(r.timeoutSec / 60)} min)…`, 'success');
+    refresh();
+  } catch (e) { toast(`Couldn't wake ${name}: ${e.message}`, 'error'); }
 }
 
 // wire toolbar (re-render locally without a network round-trip for snappy typing)
@@ -2307,6 +2334,7 @@ async function refresh() {
       }
       p.latest_version = max || p.latest_version;
     }
+    announceWakeChanges();
     renderDashboard();
     renderFleet();
     if (!editingWizard()) renderWizard();
