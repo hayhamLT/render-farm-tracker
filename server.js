@@ -41,6 +41,10 @@ let LATEST_AGENT_VERSION = readAgentVersion();
 // tracker agent is still checking in. The flag is handed to the agent on its next
 // check-in (which then reboots itself) and cleared.
 const pendingAgentReboot = new Set();
+// Node IDs with a pending agent-side SHUTDOWN (full power-off). Agent-only — Deadline
+// can't power a box off cleanly — so this requires the agent to be online + new enough
+// to understand the directive (>= 2.28.0). Handed to the agent on its next check-in.
+const pendingAgentShutdown = new Set();
 // Re-read periodically so dropping in a new render_agent.py rolls out with no restart.
 setInterval(() => { LATEST_AGENT_VERSION = readAgentVersion() || LATEST_AGENT_VERSION; }, 60 * 1000);
 
@@ -233,6 +237,15 @@ function saveConfig() {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
 }
 if (configDirty) saveConfig();
+
+// Hosts hidden from the dashboard (config.hiddenNodes) are ALSO excluded from
+// deploy targeting — so an infra box (e.g. this server, which runs an elevated
+// RUM-only reporter agent) can never be sent a job that installs as root. Hiding
+// must mean "not a render node", not just "not shown".
+function isHiddenHost(hostname) {
+  const k = String(hostname || '').split('.')[0].toUpperCase();
+  return (config.hiddenNodes || []).some((h) => String(h).split('.')[0].toUpperCase() === k);
+}
 
 // Web-based Maxon "latest version" auto-detect: read Maxon's public release notes
 // (Zendesk Help Center API) and bump the catalog upward. Maxon has no headless mx1
@@ -513,7 +526,7 @@ const SERVER_PRESETS = {
   ffmpeg: {
     windows: 'rd /s /q "%TEMP%\\ffx" 2>nul & mkdir "%TEMP%\\ffx" & tar -xf "{file}" -C "%TEMP%\\ffx" & '
       + 'mkdir "C:\\ProgramData\\TrackerAgent\\ffmpeg" 2>nul & '
-      + 'for /r "%TEMP%\\ffx" %i in (ffmpeg.exe ffprobe.exe) do copy /y "%i" "C:\\ProgramData\\TrackerAgent\\ffmpeg\\" >nul & ver >nul',
+      + 'for /r "%TEMP%\\ffx" %i in (ffmpeg.exe ffprobe.exe) do @if exist "%i" copy /y "%i" "C:\\ProgramData\\TrackerAgent\\ffmpeg\\" >nul & ver >nul',
     macos: 'F="{file}"; D=$(mktemp -d); unzip -o "$F" -d "$D" >/dev/null 2>&1; '
       + 'B=$(find "$D" -maxdepth 2 -name ffmpeg -type f | head -1); '
       + 'if [ -n "$B" ]; then mkdir -p /usr/local/bin; cp "$B" /usr/local/bin/ffmpeg; chmod +x /usr/local/bin/ffmpeg; R=$?; else R=1; fi; '
@@ -786,9 +799,16 @@ function findStagedInstaller(productKey, os, version, files) {
   if (!kws.length) return null;
   // Scripts (.jsx/.jsxbin/.zip) are OS-agnostic — they match on either platform. Otherwise
   // require an OS-appropriate installer extension.
-  const osOk = (name) => /\.(jsx|jsxbin|zip)$/i.test(name) || (os === 'windows'
-    ? /win|x64|\.exe$|\.msi$/i.test(name)
-    : /mac|osx|darwin|\.dmg$|\.pkg$/i.test(name));
+  const osOk = (name) => {
+    const winHint = /win|x64|\.exe$|\.msi$/i.test(name);
+    const macHint = /mac|osx|darwin|\.dmg$|\.pkg$/i.test(name);
+    // A name that explicitly says one OS is NOT valid for the other — even a .zip
+    // (e.g. ffmpeg-8.1.2-macos.zip must never be picked for a windows package).
+    if (os === 'windows') { if (winHint) return true; if (macHint) return false; }
+    else { if (macHint) return true; if (winHint) return false; }
+    // No OS hint in the name → OS-agnostic (scripts: .jsx/.jsxbin/.zip).
+    return /\.(jsx|jsxbin|zip)$/i.test(name);
+  };
   // Match keywords against the filename WITHOUT its extension, so a name-keyword like "zip"
   // (from "7-Zip") never matches an unrelated file's ".zip" extension.
   const stem = (n) => n.replace(/\.[a-z0-9]{1,6}$/i, '');
@@ -1258,7 +1278,12 @@ function fullState() {
   const now = Date.now();
   const offlineMs = config.offlineAfterSeconds * 1000;
 
-  const nodes = db.prepare('SELECT * FROM nodes ORDER BY hostname').all().map((n) => ({
+  // Hide infra hosts (e.g. the box running an agent ONLY to report Adobe RUM
+  // latest) from the dashboard — config.hiddenNodes (short hostname, any case).
+  const _hidden = (config.hiddenNodes || []).map((h) => String(h).split('.')[0].toUpperCase());
+  const nodes = db.prepare('SELECT * FROM nodes ORDER BY hostname').all()
+    .filter((n) => !_hidden.includes(String(n.hostname || '').split('.')[0].toUpperCase()))
+    .map((n) => ({
     ...n,
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     software: db
@@ -1510,6 +1535,8 @@ function handleCheckin(body) {
     jobs,
     // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
     reboot: pendingAgentReboot.delete(node.id) ? true : undefined,
+    // Agent-side full power-off (requested from the Fleet ⏻ menu → Shut down).
+    shutdown: pendingAgentShutdown.delete(node.id) ? true : undefined,
     // One-time fleet migration to a new tracker server (gated by config.rehome).
     rehome: rehomeFor(hostname),
     // User-added (custom) products + their detection patterns, so the agent can detect them
@@ -1548,7 +1575,19 @@ const server = http.createServer(async (req, res) => {
     }
 
     // -------- static UI --------
-    if (req.method === 'GET' && (p === '/' || p === '/index.html')) return serveStatic(res, 'index.html');
+    // The human dashboard lives at the styled, authenticated appTracker. Only the
+    // LOCAL reverse proxy (127.0.0.1) gets the raw SPA; a LAN browser hitting
+    // :4400 directly is redirected there. Agent endpoints (/api/agent/*, /agent,
+    // /setup.* …) are above/below this and are NEVER redirected.
+    if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+      const ra = String(req.socket.remoteAddress || '');
+      const local = ra.includes('127.0.0.1') || ra === '::1' || ra.includes('::ffff:127.0.0.1');
+      if (!local && config.publicUrl) {
+        res.writeHead(302, { Location: config.publicUrl });
+        return res.end();
+      }
+      return serveStatic(res, 'index.html');
+    }
     if (req.method === 'GET' && !p.startsWith('/api/')) return serveStatic(res, p.slice(1));
 
     // -------- agent endpoints (X-Agent-Key) --------
@@ -1664,6 +1703,25 @@ const server = http.createServer(async (req, res) => {
 
     // -------- dashboard endpoints --------
     if (req.method === 'GET' && p === '/api/state') return sendJson(res, 200, fullState());
+
+    // Dashboard visibility — toggle a node's hidden state (persisted globally in
+    // config.hiddenNodes, which fullState() filters out). GET lists the hidden
+    // hostnames so the UI can offer "unhide".
+    if (req.method === 'GET' && p === '/api/hidden-nodes') {
+      return sendJson(res, 200, { hidden: config.hiddenNodes || [] });
+    }
+    if (req.method === 'POST' && p === '/api/hidden-nodes') {
+      const body = await readBody(req);
+      const host = String(body.hostname || '').split('.')[0];
+      if (!host) return sendJson(res, 400, { error: 'hostname required' });
+      const key = host.toUpperCase();
+      let cur = (config.hiddenNodes || []).filter((h) => String(h).split('.')[0].toUpperCase() !== key);
+      if (body.hidden) cur.push(host);
+      config.hiddenNodes = cur;
+      saveConfig();
+      logEvent('node', `${body.hidden ? 'Hid' : 'Unhid'} ${host} on the dashboard`);
+      return sendJson(res, 200, { ok: true, hidden: cur });
+    }
 
     // Master monitoring switch.
     if (req.method === 'POST' && p === '/api/monitoring') {
@@ -1967,6 +2025,8 @@ const server = http.createServer(async (req, res) => {
       if (!pkg) return sendJson(res, 400, { error: 'no such package' });
       const dmism = installerVersionMismatch(pkg);
       if (dmism) return sendJson(res, 400, { error: dmism });
+      if (pkg.kind === 'installer' && !resolveInstaller(pkg.filename))
+        return sendJson(res, 400, { error: `installer not found on the server: ${pkg.filename} (is the INSTALLERS mount available?)` });
       if (!Array.isArray(b.node_ids) || !b.node_ids.length) {
         return sendJson(res, 400, { error: 'node_ids required' });
       }
@@ -1974,6 +2034,7 @@ const server = http.createServer(async (req, res) => {
       for (const nid of b.node_ids) {
         const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nid));
         if (!node || node.os !== pkg.os) continue; // never send a package to the wrong OS
+        if (isHiddenHost(node.hostname)) continue;  // never deploy to a hidden infra host
         // NVIDIA: deploy the driver track this GPU supports (Pascal → 581.x, not 610.x).
         const usePkg = packageForNode(node, pkg);
         if (!usePkg || node.os !== usePkg.os) { skippedNoDriver.push(node.hostname); continue; }
@@ -1994,11 +2055,14 @@ const server = http.createServer(async (req, res) => {
       const pkg = db.prepare('SELECT * FROM packages WHERE id = ?').get(Number(b.package_id));
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(b.node_id));
       if (!pkg || !node) return sendJson(res, 400, { error: 'bad node or package' });
+      if (isHiddenHost(node.hostname)) return sendJson(res, 400, { error: 'node is hidden from the dashboard and cannot be deployed to' });
       const usePkg = packageForNode(node, pkg);   // NVIDIA: swap to this GPU's driver track
       if (!usePkg) return sendJson(res, 400, { error: `no supported NVIDIA driver is staged for ${node.hostname}'s GPU` });
       if (node.os !== usePkg.os) return sendJson(res, 400, { error: 'package OS does not match node OS' });
       const qmism = installerVersionMismatch(usePkg);
       if (qmism) return sendJson(res, 400, { error: qmism });
+      if (usePkg.kind === 'installer' && !resolveInstaller(usePkg.filename))
+        return sendJson(res, 400, { error: `installer not found on the server: ${usePkg.filename} (is the INSTALLERS mount available?)` });
       if (activeJobForProduct(node.id, usePkg.product_key)) {
         return sendJson(res, 200, { ok: true, queued: [], note: `an update for ${usePkg.product_key} is already in progress on ${node.hostname}` });
       }
@@ -2016,6 +2080,8 @@ const server = http.createServer(async (req, res) => {
       if (!pkg) return sendJson(res, 400, { error: 'no such package' });
       const bmism = installerVersionMismatch(pkg);
       if (bmism) return sendJson(res, 400, { error: bmism });
+      if (pkg.kind === 'installer' && !resolveInstaller(pkg.filename))
+        return sendJson(res, 400, { error: `installer not found on the server: ${pkg.filename} (is the INSTALLERS mount available?)` });
       const onlyOnline = b.onlyOnline !== false;
       // Default = safe in-place patches only (same major). Major-behind or
       // not-installed nodes are opt-in side-by-side installs (includeMajor).
@@ -2025,6 +2091,7 @@ const server = http.createServer(async (req, res) => {
       const nodes = db.prepare('SELECT * FROM nodes WHERE os = ?').all(pkg.os);
       const queued = [];
       for (const node of nodes) {
+        if (isHiddenHost(node.hostname)) continue;  // never auto-deploy to a hidden infra host
         if (onlyOnline && !(node.last_seen != null && now - node.last_seen < offlineMs)) continue;
         const usePkg = packageForNode(node, pkg);   // NVIDIA: this GPU's driver track
         if (!usePkg) continue;
@@ -2125,6 +2192,31 @@ const server = http.createServer(async (req, res) => {
           : ` It's offline and we have no Wake-on-LAN address for it yet.`;
         return sendJson(res, 502, { error: `Can't reach ${node.hostname} to reboot.${hint} (${e.message})` });
       }
+    }
+
+    // Shut DOWN a machine — full power-off (NOT a reboot). Agent-only: Deadline can't
+    // power a box off cleanly, and an off node is brought back with Wake-on-LAN. Needs the
+    // agent online + new enough to understand the `shutdown` directive (>= 2.28.0); older
+    // agents self-update within a few minutes, so the error tells the user to retry.
+    const nodeShutdown = p.match(/^\/api\/nodes\/(\d+)\/shutdown$/);
+    if (req.method === 'POST' && nodeShutdown) {
+      const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeShutdown[1]));
+      if (!node) return sendJson(res, 404, { error: 'no such node' });
+      // Never power off a hidden infrastructure host (e.g. the elevated box that
+      // runs the server + RUM reporter) — same guard the deploy endpoints use.
+      if (isHiddenHost(node.hostname))
+        return sendJson(res, 403, { error: `${node.hostname} is a hidden infrastructure host and can't be shut down from here.` });
+      const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
+      const agentCapable = online && node.agent_version && cmpVersionServer(node.agent_version, '2.28.0') >= 0;
+      if (!agentCapable) {
+        const why = !online
+          ? `${node.hostname} is offline — it's already not running. Use Wake to power it on.`
+          : `${node.hostname}'s agent (${node.agent_version || 'unknown'}) is too old to shut down. Agents self-update to 2.28.0+ within a few minutes — try again shortly.`;
+        return sendJson(res, 400, { error: why });
+      }
+      pendingAgentShutdown.add(node.id);
+      logEvent('node', `Shut down requested for ${node.hostname} via the tracker agent`);
+      return sendJson(res, 200, { ok: true, hostname: node.hostname, via: 'agent' });
     }
 
     // Wake-on-LAN — power on a machine that's off/asleep (Deadline-free). Uses the MAC(s)

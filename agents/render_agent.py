@@ -40,7 +40,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.27.1"
+AGENT_VERSION = "2.28.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1076,6 +1076,21 @@ def _reboot_machine():
         print("  ! reboot command failed: %s" % e)
 
 
+def _shutdown_machine():
+    """Power this machine fully OFF on the server's request (a true shutdown, not a
+    reboot). The agent runs elevated (Windows) / as root (mac), so the OS shutdown
+    command works without a prompt. A shut-down node is recovered with Wake-on-LAN
+    (the Fleet 'Wake' button)."""
+    try:
+        if IS_WINDOWS:
+            subprocess.Popen('shutdown /s /t 5 /f /c "Shut down requested from the Render Farm tracker"', shell=True)
+        else:
+            subprocess.Popen(["/sbin/shutdown", "-h", "now"])
+        print("  ⏻ shutdown requested by server — powering off now")
+    except Exception as e:
+        print("  ! shutdown command failed: %s" % e)
+
+
 def run_job(server, job):
     job_id = job["id"]
     kind = job.get("kind", "installer")
@@ -1585,6 +1600,11 @@ def main():
             if resp.get("reboot"):
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
+                continue
+            # Server asked us to SHUT DOWN — full power-off (recover via Wake-on-LAN).
+            if resp.get("shutdown"):
+                _shutdown_machine()
+                time.sleep(30)   # let the OS begin powering off; the process dies with it
                 continue
             # Server asked us to MOVE to a different tracker server (fleet migration). One-time:
             # rewrite our launch config to the new URL+key and relaunch there. Never mid-install
