@@ -18,6 +18,8 @@ import { CatalogView } from './views/catalog.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
 import { Palette } from './components/palette.js';
+import { AskPanel, askOpen, askShortcut } from './components/ask.js';
+import { startAlerts } from './lib/alerts.js';
 
 const ACTIVE = ['pending', 'downloading', 'installing'];
 
@@ -68,6 +70,8 @@ function Sidebar() {
       </button>`)}
     </nav>
     <div class="sidebar-foot">
+      <button class=${'search-btn ask-btn' + (askOpen.value ? ' on' : '')} onClick=${() => { askOpen.value = !askOpen.value; }} title="Ask questions about the farm, answered by the local AI">
+        <${Icon} name="sparkle" /><span class="label">Ask the farm</span><span class="kbd">${askShortcut()}</span></button>
       <button class="search-btn" onClick=${() => window.dispatchEvent(new CustomEvent('palette:open'))} title="Search machines, apps and actions (⌘K)">
         <${Icon} name="search" /><span class="label">Search</span><span class="kbd">⌘K</span></button>
       <div class="row" style="justify-content:space-between;flex-wrap:nowrap">
@@ -99,12 +103,14 @@ function App() {
   const name = route.value.name;
   useEffect(() => { window.scrollTo({ top: 0 }); }, [name]);
   const current = ROUTES.find((t) => t.name === name) || ROUTES[0];
-  return html`<div class=${'shell' + (collapsed.value ? ' collapsed' : '')}>
+  return html`<div class=${'shell' + (collapsed.value ? ' collapsed' : '') + (askOpen.value ? ' ask-open' : '')}>
     <${Sidebar} />
     <main class="content">${farm.value ? current.view() : html`<${PageSkeleton} />`}</main>
+    <${AskPanel} />
     <${ToastHost} /><${DialogHost} /><${MenuHost} /><${Palette} />
   </div>`;
 }
 
 start();
+startAlerts();
 render(html`<${App} />`, document.getElementById('root'));

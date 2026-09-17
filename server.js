@@ -18,6 +18,7 @@ const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
 const { createRollouts } = require('./lib/rollouts');
+const { createAsk } = require('./lib/ask');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -271,6 +272,11 @@ const rollouts = createRollouts({
   productName: (key) => { const r = db.prepare('SELECT name FROM products WHERE key = ?').get(key); return r ? r.name : key; },
 });
 setInterval(() => { try { rollouts.tick(); } catch (e) { console.error('rollouts tick failed:', e.message); } }, 30 * 1000);
+// "Ask the farm" — local Ollama on this server (config.ask = {url, model} to override).
+const ask = createAsk({
+  url: (config.ask && config.ask.url) || process.env.OLLAMA_URL || 'http://127.0.0.1:11434',
+  model: (config.ask && config.ask.model) || 'granite4.1:8b',   // the model the DeadlineWatcher analysts already keep loaded
+});
 // A valid rollout id from a request body, or null.
 const rolloutIdFrom = (b) => {
   const r = b && b.rollout_id != null ? rollouts.get(b.rollout_id) : null;
@@ -2011,6 +2017,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/live') return live.handle(req, res);
     // Trend history for charts (sampled every minute): farm totals + per-machine GPU load.
     if (req.method === 'GET' && p === '/api/metrics') return sendJson(res, 200, metrics.query(url.searchParams.get('hours')));
+    if (req.method === 'GET' && p === '/api/ask/status') return sendJson(res, 200, await ask.status());
+    if (req.method === 'POST' && p === '/api/ask') {
+      const b = await readBody(req);
+      return ask.handle(req, res, b, { state: fullState(), timeline: timeline.query(168) });
+    }
     if (req.method === 'GET' && p === '/api/timeline') return sendJson(res, 200, timeline.query(url.searchParams.get('hours'), url.searchParams.get('node')));
 
     // Dashboard visibility — toggle a node's hidden state (persisted globally in

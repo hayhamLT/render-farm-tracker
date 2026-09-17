@@ -766,3 +766,53 @@ button.stat { cursor: pointer; }
   .rcard header { flex-wrap: wrap !important; }
 }
 .when .deploy-field { align-items: flex-start; }
+
+/* ---------------------------------------------------------------- ask the farm */
+.ask-btn .icon { color: var(--violet); }
+.ask-btn.on { border-color: var(--violet); color: var(--text); }
+.shell.ask-open > main.content { margin-right: 440px; }
+.shell.ask-open .drawer, .shell.ask-open .drawer-back { right: 440px; }
+.shell.ask-open .toasts { right: 458px; }
+.ask { position: fixed; top: 0; right: 0; bottom: 0; width: 440px; z-index: 72; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border-strong); box-shadow: -18px 0 40px rgba(0, 0, 0, 0.35); animation: askIn 0.22s var(--ease); }
+@keyframes askIn { from { transform: translateX(24px); opacity: 0; } }
+.ask-head { display: flex; align-items: center; gap: 10px; padding: 14px 14px 12px 16px; border-bottom: 1px solid var(--border); }
+.ask-head b { display: block; font-size: 1rem; }
+.ask-mark { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: linear-gradient(135deg, rgba(167, 139, 250, 0.25), rgba(34, 211, 238, 0.2)); color: var(--violet); flex: none; }
+.ask-mark .icon { width: 18px; height: 18px; }
+.ask-status { display: flex; align-items: center; gap: 6px; font-size: 0.74rem; color: var(--text-3); }
+.ask-status i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
+.ask-status.ok i { background: var(--ok); } .ask-status.bad { color: var(--bad-text); } .ask-status.bad i { background: var(--bad); }
+.ask-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.ask-empty p { margin: 0 0 12px; font-size: 0.88rem; }
+.ask-sugs { display: flex; flex-direction: column; gap: 8px; }
+.ask-sug { display: flex; align-items: center; gap: 9px; text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer; font: inherit; font-size: 0.86rem; transition: border-color 0.12s, background 0.12s; }
+.ask-sug:hover { border-color: var(--violet); background: var(--surface-3); }
+.ask-sug .icon { width: 14px; height: 14px; color: var(--violet); flex: none; }
+.ask-msg.user { align-self: flex-end; max-width: 85%; padding: 9px 12px; border-radius: 14px 14px 4px 14px; background: var(--accent-soft); border: 1px solid rgba(34, 211, 238, 0.3); font-size: 0.88rem; white-space: pre-wrap; }
+.ask-msg.bot { font-size: 0.88rem; line-height: 1.55; }
+.ask-md p { margin: 0 0 8px; }
+.ask-md ul, .ask-md ol { margin: 0 0 8px; padding-left: 20px; }
+.ask-md li { margin: 2px 0; }
+.ask-md code { font-family: var(--mono); font-size: 0.8rem; background: var(--surface-3); padding: 1px 5px; border-radius: 5px; }
+.ask-md .host { font-weight: 600; }
+.ask-caret { display: inline-block; width: 7px; height: 14px; margin-left: 2px; vertical-align: -2px; background: var(--violet); animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.ask-thinking { display: flex; align-items: center; gap: 9px; color: var(--text-2); font-size: 0.84rem; flex-wrap: wrap; }
+.ask-dots { display: inline-flex; gap: 4px; }
+.ask-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--violet); animation: askDot 1.2s ease-in-out infinite; }
+.ask-dots i:nth-child(2) { animation-delay: 0.15s; } .ask-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes askDot { 0%, 80%, 100% { opacity: 0.25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+.ask-meta { margin-top: 4px; font-size: 0.72rem; color: var(--text-3); }
+.ask-foot { display: flex; gap: 8px; align-items: flex-end; padding: 12px 14px 14px; border-top: 1px solid var(--border); }
+.ask-foot textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; font: inherit; line-height: 1.4; padding: 10px 12px; }
+.alert-types { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 20px; }
+.alert-type { align-items: flex-start !important; }
+.alert-type input { margin-top: 3px; }
+.alert-type > span { display: flex; flex-direction: column; gap: 1px; font-weight: 400; }
+.alert-type b { color: var(--text); font-weight: 600; }
+@media (max-width: 1100px) {
+  .shell.ask-open > main.content { margin-right: 0; }
+  .shell.ask-open .drawer, .shell.ask-open .drawer-back { right: 0; }
+  .shell.ask-open .toasts { right: 18px; }
+  .ask { width: min(440px, 100vw); }
+}

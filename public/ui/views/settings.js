@@ -9,6 +9,30 @@ import { ago } from '../lib/format.js';
 import * as act from '../lib/actions.js';
 import { Icon, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
+import { alertsOn, alertTypes, ALERT_TYPES, enableAlerts, permission, supported, testAlert } from '../lib/alerts.js';
+
+// ---------------------------------------------------------------- desktop alerts (per browser)
+function DesktopAlerts() {
+  const perm = permission();
+  const on = alertsOn.value && perm === 'granted';
+  const types = alertTypes.value;
+  return html`<section id="set-desktop" class="card card-pad stack">
+    <h2 class="card-title"><${Icon} name="bell" />Desktop alerts</h2>
+    <p class="dim" style="margin:0">Pop-up notifications on this computer while the dashboard is open in a tab — even when you're in another app. When you're looking at the dashboard they show as a message in the corner instead. This setting is for this browser only.</p>
+    ${!supported() ? html`<div class="banner warn"><${Icon} name="alert" />This browser can't show desktop notifications.</div>`
+      : perm === 'denied' ? html`<div class="banner warn"><${Icon} name="alert" />Notifications are blocked for this site. Allow them in the browser's site settings (the icon left of the address), then reload.</div>`
+      : html`<div class="row">
+          <button class=${'switch' + (on ? ' on' : '')} role="switch" aria-checked=${on} aria-label="Desktop alerts" onClick=${async () => { if (on) alertsOn.value = false; else await enableAlerts(); }}><i></i></button>
+          <b>${on ? 'Alerts are on' : 'Desktop alerts are off'}</b>
+          <span class="grow"></span>
+          <button class="btn" disabled=${!on} onClick=${testAlert}><${Icon} name="bell" />Send a test</button>
+        </div>`}
+    <div class="alert-types" style=${on ? '' : 'opacity:.5;pointer-events:none'}>
+      ${ALERT_TYPES.map(([k, label, hint]) => html`<label key=${k} class="check alert-type"><input type="checkbox" checked=${types[k] !== false} onChange=${(e) => { alertTypes.value = { ...types, [k]: e.currentTarget.checked }; }} />
+        <span><b>${label}</b><span class="dim">${hint}</span></span></label>`)}
+    </div>
+  </section>`;
+}
 
 // ---------------------------------------------------------------- folder picker
 function FolderPicker({ start, close }) {
@@ -105,7 +129,7 @@ export function SettingsView() {
     try { await post('/api/settings', body); toast(msg, 'success'); } catch (e) { toast(e.message, 'error'); }
     refresh();
   };
-  const NAV = [['downloads', 'Installer downloads', 'folder'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Enroll a machine', 'beacon']];
+  const NAV = [['downloads', 'Installer downloads', 'folder'], ['desktop', 'Desktop alerts', 'bell'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Enroll a machine', 'beacon']];
   return html`<div class="page settings-page">
     <${PageHeader} title="Settings" subtitle="How the tracker downloads, alerts, schedules and backs up." />
     <div class="settings-layout">
@@ -118,6 +142,8 @@ export function SettingsView() {
       <${FolderSetting} field="downloadDirPlugins" label="Plug-ins folder" hint="Leave empty to use the apps folder." value=${s.downloadDirPlugins} fallback=${s.downloadDir} />
       <${FolderSetting} field="downloadDirScripts" label="Scripts folder" hint="Leave empty to use the apps folder." value=${s.downloadDirScripts} fallback=${s.downloadDir} />
     </section>
+
+    <${DesktopAlerts} />
 
     <section id="set-slack" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="alert" />Slack alerts</h2>

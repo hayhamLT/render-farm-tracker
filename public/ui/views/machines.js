@@ -17,6 +17,7 @@ import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/co
 import { PageHeader } from '../components/page.js';
 import { MachineTimeline } from './timeline.js';
 import { waitingRollout, whenLabel } from '../components/rollouts.js';
+import { askAbout } from '../components/ask.js';
 import { Sparkline, AreaChart, StackBar, Num, useMetrics, metrics, STATE_COLOR } from '../components/viz.js';
 
 const view = pref('machines.view', 'grid');
@@ -315,6 +316,7 @@ function MachineDrawer({ hostname, model }) {
       <h2>${n.hostname}</h2>
       <${ActivityBadge} a=${a} />
       <span class="grow"></span>
+      <button class="btn sm" onClick=${() => askAbout(`What's going on with ${n.hostname}? Anything wrong, and what should I do?`)} title="Ask the local AI about this machine"><${Icon} name="sparkle" />Ask</button>
       <button class="btn sm" onClick=${(e) => openMenu(e.currentTarget, machineMenuItems(n, dl))}><${Icon} name="more" />Actions</button>
       <button class="btn ghost icon" aria-label="Close" onClick=${close}><${Icon} name="close" /></button>
     </header>

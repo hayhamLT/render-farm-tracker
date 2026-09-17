@@ -7,6 +7,7 @@ import { go } from '../lib/router.js';
 import { normalizeProducts, deadlineStatus, canShutdown, ACTIVE } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo } from './common.js';
+import { askOpen } from './ask.js';
 
 export const paletteOpen = signal(false);
 
@@ -22,6 +23,7 @@ function buildItems(s) {
   const offline = s.nodes.filter((n) => !n.online);
   const fixable = s.nodes.filter((n) => { const d = deadlineStatus(n); return d && d.canFix && d.state !== 'ok'; });
   const active = s.jobs.filter((j) => ACTIVE.includes(j.status)).length;
+  items.push({ group: 'Actions', label: 'Ask the farm (local AI)', icon: 'sparkle', keywords: 'ai question chat assistant why', run: () => { askOpen.value = true; } });
   items.push({ group: 'Actions', label: 'Check for new versions', icon: 'refresh', run: act.checkVersions });
   items.push({ group: 'Actions', label: 'Back up the database', icon: 'server', run: act.backupNow });
   if (offline.length) items.push({ group: 'Actions', label: `Wake all offline machines (${offline.length})`, icon: 'power', run: () => act.wake(offline) });
