@@ -116,7 +116,9 @@ function updateMachines(model, nodes) {
 function StatusCell({ m }) {
   const { node: n, activity: a, dl } = m;
   const tags = [];
-  if (!n.online) tags.push(html`<span class="tag bad">Offline</span>`);
+  if (!n.online && n.reach && n.reach.ok) {
+    tags.push(html`<span class="tag warn" title=${`${n.hostname} answers on the network at ${n.reach.addr} (${n.reach.how}), but its agent hasn't checked in since ${ago(n.last_seen)}. Run the one-click installer on it, or restart it.`}>On, agent silent</span>`);
+  } else if (!n.online) tags.push(html`<span class="tag bad">Offline</span>`);
   else if (['installing', 'downloading'].includes(a.key)) tags.push(html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${a.label} ${a.detail}</span>`);
   else if (a.key === 'queued') tags.push(html`<span class="tag info"><${Icon} name="clock" />${a.label} · ${a.detail}</span>`);
   else if (a.key === 'rendering') tags.push(html`<span class="tag violet" title="Installs wait until it's idle">Rendering</span>`);
@@ -323,7 +325,10 @@ function MachineDrawer({ hostname, model }) {
       <button class="btn ghost icon" aria-label="Close" onClick=${close}><${Icon} name="close" /></button>
     </header>
     <div class="content">
-      ${!n.online ? html`<div class="banner warn"><${Icon} name="power" /><span class="grow">Offline — last seen ${ago(n.last_seen, s.now)}. Updates wait until it's back.${wol && wol.note ? ` ${wol.note}` : ''}</span>
+      ${!n.online && n.reach && n.reach.ok ? html`<div class="banner warn"><${Icon} name="alert" /><span class="grow">
+        <b>On the network, but its agent isn't reporting.</b> It answers at <span class="mono">${n.reach.addr}</span> (${n.reach.how}), yet nothing has checked in since ${ago(n.last_seen, s.now)}.
+        Run <span class="mono">Install Tracker Agent - Windows.cmd</span> (or the Mac one) on it from the installer share — that reinstalls and starts the agent.</span></div>` : null}
+      ${!n.online && !(n.reach && n.reach.ok) ? html`<div class="banner warn"><${Icon} name="power" /><span class="grow">Offline — last seen ${ago(n.last_seen, s.now)}. Updates wait until it's back.${wol && wol.note ? ` ${wol.note}` : ''}</span>
         <button class="btn sm" disabled=${n.wake && n.wake.state === 'waking'} onClick=${() => act.wake([n])}>${n.wake && n.wake.state === 'waking' ? 'Waking…' : 'Wake'}</button></div>` : null}
       ${n.elevated === 0 ? html`<div class="banner warn"><${Icon} name="shieldOff" /><span class="grow">Not set up for silent installs — run the elevate command once on this machine (Settings → Enroll a machine).</span></div>` : null}
       ${dl && dl.state === 'down' ? html`<div class="banner bad"><${Icon} name="alert" /><span class="grow">${dl.detail}</span>${dl.canFix ? html`<button class="btn sm" onClick=${() => act.fixDeadline([n])}>Fix startup</button>` : null}</div>` : null}

@@ -17,6 +17,7 @@ const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
+const reachability = require('./lib/reachability');
 const { createRollouts } = require('./lib/rollouts');
 const { createAsk } = require('./lib/ask');
 const installerFiles = require('./lib/installer_files');
@@ -1596,6 +1597,8 @@ function fullState() {
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     wake: wakesNow.get(n.id) || null,
     last_install: lastInstall.get(n.id) || null,
+    // Only set while a machine looks offline: whether the network still answers for it.
+    reach: reachability.get(n.id),
     software: db
       // detected_at is left out: every check-in rewrites it, which would make each node's
       // software list look "changed" to the live-update diff. Nothing displays it.
@@ -1982,6 +1985,8 @@ function handleCheckin(body) {
 const live = createLive({ buildState: () => fullState() });
 metrics.startSampling({ offlineAfterMs: (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
 timeline.start({ offlineAfterMs: (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
+// Machines that stopped checking in: are they off, or just not running their agent?
+reachability.start({ db, offlineAfterMs: () => (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
