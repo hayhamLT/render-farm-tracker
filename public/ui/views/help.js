@@ -10,10 +10,11 @@ const topic = pref('help.topic', 'start');
 
 const TOPICS = [
   ['start', 'Getting started', 'beacon'],
-  ['updates', 'How updates work', 'download'],
-  ['deadline', 'Deadline health', 'film'],
-  ['power', 'Restart, shut down, wake', 'power'],
-  ['custom', 'Your own apps & scripts', 'package'],
+  ['updates', 'Updating machines', 'download'],
+  ['schedule', 'Scheduling & rollouts', 'clock'],
+  ['apps', 'Apps & installers', 'package'],
+  ['machines', 'Machines, power & Deadline', 'server'],
+  ['alerts', 'Alerts & Ask the farm', 'bell'],
   ['keys', 'Keyboard shortcuts', 'command'],
   ['trouble', 'Troubleshooting', 'alert'],
 ];
@@ -22,63 +23,103 @@ const QA = ({ q, children }) => html`<details class="qa"><summary>${q}</summary>
 
 const CONTENT = {
   start: () => html`
-    <p>Every render machine runs the <b>${AGENT_NAME}</b> agent. It reports installed software, GPU, disk and Deadline status, installs updates you queue, and updates itself.</p>
+    <p>The tracker's job is keeping every machine's software up to date. Each machine runs the <b>${AGENT_NAME}</b> agent, which reports what's installed, installs the updates you queue, and updates itself.</p>
     <ol>
-      <li><b>Enroll</b> the machine with the command from <button class="linkish" onClick=${() => go('settings')}>Settings → Enroll a machine</button>. It appears under Machines within a minute.</li>
-      <li><b>Elevate</b> it once (the admin command). Without this, installs stop at a Windows UAC or macOS password prompt — the machine shows <${Badge} tone="warn" icon="shieldOff">not ready<//>.</li>
-      <li><b>Update</b> from the Updates page: everything at once, a few apps together, or one app on the machines you pick — now or tonight.</li>
-    </ol>`,
+      <li><b>Add a machine:</b> on the machine, double-click <span class="mono">Install Tracker Agent - Windows.cmd</span> or <span class="mono">Install Tracker Agent - Mac.command</span> from the installer share's <span class="mono">Tracker Agent</span> folder. Windows asks for administrator rights, a Mac asks for its admin password. That's the whole setup — the machine appears under <b>Machines</b> within a minute.</li>
+      <li><b>Or paste a command</b> from <button class="linkish" onClick=${() => go('settings')}>Settings → Enroll a machine</button>: enroll first, then the elevate command once as administrator. Without elevation, installs stop at a permission prompt and the machine shows <span class="tag warn">Not set up</span>.</li>
+      <li><b>Update</b> from the <button class="linkish" onClick=${() => go('updates')}>Updates</button> page: everything at once, a few apps together, or one app on machines you pick — now or scheduled.</li>
+    </ol>
+    <p class="dim">The same files can be regenerated any time (Settings → Enroll a machine → Save installers to the share); they carry the tracker's address and key.</p>`,
   updates: () => html`
-    <p>New versions are detected automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and any app you add with a version check) and listed on the <b>Updates</b> page with how many machines are behind.</p>
+    <p>New versions are found automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and anything you add with a version check). <b>Updates</b> lists every app that's behind, its version jump, how many machines are current, and whether its installer is ready.</p>
     <ul>
-      <li><b>Update all</b> updates every app on every machine that's behind. Tick several apps to update just those together, or open an app to pick exactly which machines get it.</li>
-      <li>Every update opens one review step: what installs where, anything that will make it wait (offline, rendering, restart needed), and <b>when</b> — now, tonight, or a time you pick, with optional wake-up and Slack report.</li>
-      <li>On <b>Machines</b>, select machines and <b>Update everything</b> on them; a machine's details list each app with its own Update button.</li>
+      <li><b>Update all</b> — every app on every machine that's behind.</li>
+      <li><b>A few apps</b> — tick their checkboxes and press <b>Update selected</b>.</li>
+      <li><b>Chosen machines</b> — click an app to open its machine list and pick exactly which get it (shortcuts: all, online &amp; idle only, none).</li>
+      <li><b>One machine</b> — on <b>Machines</b>, select machines and press <b>Update everything</b>, or open a machine and use the Update button next to a single app.</li>
     </ul>
+    <p>Every one of those opens the same review step: what installs where, anything that will make it wait, and when it runs.</p>
     <ul>
-      <li><b>Every idle machine installs at once.</b> Installers stream from the tracker over the LAN, one job per machine.</li>
-      <li><b>New versions test first:</b> until one machine installs a version successfully, at most 3 try it. If those fail, the rollout pauses — a broken update never reaches the whole farm.</li>
+      <li><b>Every idle machine installs at once.</b> Installers stream from the tracker over the LAN, one install at a time per machine.</li>
+      <li><b>New versions test first:</b> until one machine installs a version successfully, at most 3 try it. If those fail the rollout pauses, so a broken update never reaches the whole farm.</li>
       <li><b>Never under a render.</b> An install waits while Cinema 4D, Redshift, After Effects or Blender is rendering, or while the GPU is busy, and starts by itself afterwards.</li>
-      <li><b>Status is verified.</b> A job succeeds when the machine reports the new version — not just because the installer exited cleanly. A failed job says why, e.g. <${Badge} tone="bad">failed · reboot needed<//>.</li>
+      <li><b>Status is verified.</b> A job succeeds when the machine reports the new version, not because the installer exited cleanly. A failure says why, e.g. <${Badge} tone="bad">failed · reboot needed<//>.</li>
       <li><b>Stop really stops.</b> Stopping a running job kills the installer and everything it started on the machine.</li>
     </ul>
-    <${QA} q="Patch vs. new major">A patch (e.g. 2026.3.0 → 2026.3.4) replaces the installed version. A new major (2026 → 2027) installs side-by-side and is opt-in, so existing scenes keep working.<//>
-    <${QA} q="“Installer needed”">A newer version exists but its installer isn't on the tracker yet. With a saved download link, Automatic fetches it once; otherwise paste a link or drop the installer on the share (Apps → Installers).<//>
+    <${QA} q="Patch vs. new major">A patch (2026.3.0 → 2026.3.4) replaces the installed version and is what "Update" does. A new major (2026 → 2027) installs side by side and is opt-in, under "New major versions", so existing scenes keep working.<//>
+    <${QA} q="“No installer yet”">The new version's installer isn't on the share. With a saved download link the tracker fetches it once (the app shows "Downloads first"); otherwise add the installer or a link in <b>Apps</b>.<//>
     <${QA} q="NVIDIA drivers">Driver updates are always in-place. GTX 9xx/10xx cards stay on NVIDIA's legacy driver track, so they're never flagged behind the current driver. A pending Windows restart blocks the driver installer — restart first.<//>
-    <${QA} q="After Effects">After Effects updates through Adobe Remote Update Manager (together with Media Encoder). RUM only patches within a major; a new major needs a full install from the Adobe Admin Console.<//>`,
-  deadline: () => html`
-    <p>A machine can be online in the tracker but out of the Deadline farm. The agent checks every 5 minutes:</p>
+    <${QA} q="After Effects">After Effects updates through Adobe Remote Update Manager (together with Media Encoder). RUM only patches within a major; a new major needs a full install from the Adobe Admin Console.<//>
+    <${QA} q="Installing a specific version">Updates → <b>Install a specific version…</b> picks the installer yourself: a file on the share, a saved or pasted download link, and the exact machines.<//>`,
+  schedule: () => html`
+    <p>In the review step, <b>When</b> decides if the update runs now or later:</p>
     <ul>
-      <li><${Badge} tone="bad">Deadline down<//> — the Worker isn't running, so the machine takes no renders.</li>
-      <li><${Badge} tone="warn">No auto-start<//> — Deadline runs now, but nothing starts it after a restart (it was started by hand). The next reboot drops the machine out of the farm.</li>
+      <li><b>Now</b> — every machine starts as soon as it's free.</li>
+      <li><b>Tonight</b> — defaults to 2:00 AM, with a <b>finish by</b> time (default 6:00 AM).</li>
+      <li><b>Pick a time</b> — any date and time.</li>
     </ul>
-    <p><b>Fix Deadline startup</b> (Windows) registers the Deadline Launcher to start whenever the machine's desktop user logs in — in that user's own session, like starting it by hand, so shares and licences work normally, with no password — turns on "start the Worker with the Launcher", and starts it now. The machine needs automatic login (or someone logged in) for Deadline to come back after a restart.</p>
-    <p>Macs are kept running by their Deadline Watchdog; the fix button is Windows-only.</p>`,
-  power: () => html`
     <ul>
-      <li><b>Restart</b> goes through the agent (or Deadline if the agent is unreachable). It interrupts any render.</li>
-      <li><b>Shut down</b> powers a Windows machine fully off. Macs are put to sleep instead — a shut-down Mac can't be woken over the network.</li>
-      <li><b>Wake</b> sends Wake-on-LAN from the tracker and from up to 3 online machines on the same network, repeats it, and tells you when the machine is back — or after 5 minutes, why not.</li>
+      <li><b>Only on idle machines</b> (on by default) — a machine starts its install when its GPU isn't busy.</li>
+      <li><b>Wake sleeping machines first</b> — machines that are off or asleep get a Wake-on-LAN at the start. A scheduled rollout also includes machines that are offline when you schedule it.</li>
+      <li><b>Unfinished machines continue next night</b> — at the finish-by time, installs already running finish; machines that didn't get their turn wait for the next night, up to a week. What never ran is listed in the report.</li>
+      <li><b>Slack report when done</b> — a summary of what installed and what failed (needs a webhook in Settings).</li>
     </ul>
-    <${QA} q="Wake doesn't turn a machine on">The agent sets up each wired network card (wake on magic packet, wake from shutdown, Energy-Efficient Ethernet off). What it can't change is the BIOS: enable <b>Wake on LAN</b> / <b>Power On by PCIe</b> and disable <b>ErP/EuP</b> deep power-saving. Add-in 10G cards often can't wake a PC from full shutdown — cable the onboard port. Hover a machine's Wake action to see whether its card is ready.<//>`,
-  custom: () => html`
-    <p>Apps → <b>Add</b> tracks any app, After Effects plug-in or script. A name and a link are usually enough: Auto-fill finds the icon, version and installer.</p>
+    <p>Scheduled and running rollouts appear at the top of Updates with a countdown, <b>Start now</b> and <b>Cancel</b>. Finished ones, with their results, are under <button class="linkish" onClick=${() => go('history')}>History → Rollouts</button>; every install with its log, plus Retry and Stop, is under History → Installs.</p>
+    <p class="dim">Apps can also update themselves without you: turn on <b>Auto-deploy</b> for an app in Apps. Those rollouts respect the auto-deploy window in Settings.</p>`,
+  apps: () => html`
+    <p><b>Apps</b> is the catalog: what the tracker watches, where new versions come from, and the installers on the share.</p>
     <ul>
-      <li>Apps are detected by installed name or by a file path (globs allowed).</li>
-      <li>Plug-ins and scripts are found in After Effects' folders automatically from their name.</li>
+      <li><b>Add</b> tracks any app, After Effects plug-in or script. A name and a link are usually enough — Auto-fill finds the icon, version and installer.</li>
+      <li>Apps are detected by installed name or by a file path (globs allowed); plug-ins and scripts are found in After Effects' folders from their name.</li>
       <li>Add a silent install command (<code>{file}</code> = the installer) to deploy it; add an uninstall command to remove it from machines.</li>
-      <li>Turn on <b>Auto-deploy</b> to install new versions everywhere automatically, testing on 3 machines first.</li>
+      <li><b>Track</b> hides an app from the dashboard without forgetting it. <b>Auto-deploy</b> installs new versions everywhere by itself, testing on 3 machines first.</li>
+    </ul>
+    <p><b>Apps → Installers</b> is the installer library on the share:</p>
+    <ul>
+      <li><b>Organize into app folders</b> moves each installer into a folder named after its app. You see every move first, and files the tracker doesn't recognise are never touched.</li>
+      <li><b>Clean up</b> lists installers older than what each app installs now and unused by any queued or running install. You pick what goes and confirm; nothing is deleted automatically.</li>
+      <li>Downloads always land on the share, never on the tracker's own disk. If the share isn't mounted, downloads stop with a message instead.</li>
     </ul>`,
+  machines: () => html`
+    <p><b>Machines</b> shows each machine from the update point of view: what it's behind on, when it last updated, and a status — but only what matters for updating.</p>
+    <ul>
+      <li><span class="tag bad">Offline</span> — no check-in for ~3 minutes; its updates wait until it's back.</li>
+      <li><span class="tag violet">Rendering</span> — installs wait until it's idle.</li>
+      <li><span class="tag warn">Restart pending</span> — Windows is waiting for a restart; driver installs won't run until then.</li>
+      <li><span class="tag warn">Not set up</span> — the elevate step hasn't been run, so installs would stop at a prompt.</li>
+    </ul>
+    <p><b>Power</b> — from a machine's menu or the selection bar:</p>
+    <ul>
+      <li><b>Restart</b> goes through the agent (or Deadline if the agent is unreachable) and interrupts any render.</li>
+      <li><b>Shut down</b> powers a Windows machine fully off. Macs are put to sleep instead — a shut-down Mac can't be woken over the network.</li>
+      <li><b>Wake</b> sends Wake-on-LAN from the tracker and from up to 3 online machines on the same network, and reports when the machine is back, or why not.</li>
+    </ul>
+    <p><b>Deadline</b> — the tracker isn't a render manager, so it only flags <span class="tag bad">Deadline down</span>: the machine is on, but its Deadline Worker isn't running, so it takes no renders. On Windows, <b>Fix Deadline startup</b> registers the Launcher to start at the desktop user's logon, turns on "start the Worker with the Launcher" — in the machine-wide <i>and</i> that user's own settings — and starts it now. The machine needs automatic login for Deadline to come back after a restart. Macs are handled by their own Deadline Watchdog.</p>
+    <${QA} q="Wake doesn't turn a machine on">The agent sets up each wired network card (wake on magic packet, wake from shutdown, Energy-Efficient Ethernet off). What it can't change is the BIOS: enable <b>Wake on LAN</b> / <b>Power On by PCIe</b> and disable <b>ErP/EuP</b> deep power-saving. Add-in 10G cards often can't wake a PC from full shutdown — cable the onboard port.<//>`,
+  alerts: () => html`
+    <p><b>Desktop alerts</b> (Settings → Desktop alerts) pop up on your computer while the dashboard is open in a tab, even when you're in another app. When you're looking at the dashboard they appear as a message in the corner instead. It's a per-browser setting, and you can switch off any of the four kinds:</p>
+    <ul>
+      <li>a rollout starts, pauses for the night or finishes,</li>
+      <li>a machine drops out of Deadline,</li>
+      <li>a machine goes offline,</li>
+      <li>an install fails.</li>
+    </ul>
+    <p><b>Ask the farm</b> (the sidebar button, or ⌘J) answers questions about the farm in plain English — "what needs attention?", "why did the install on MARS-02 fail?", "which machines are behind?". It uses the local AI model on the tracker server, so nothing leaves the building, and it only sees the tracker's own data: machine states, timelines, rollouts, jobs and logs. Answers take 20–50 seconds, and machine names in them are clickable. It's a small model — check anything important on the machine itself.</p>
+    <p><b>Slack</b> (Settings → Slack alerts) posts failed installs, paused rollouts and rollout reports to a webhook.</p>`,
   keys: () => html`
     <table class="table" style="max-width:520px"><tbody>
-      ${[['⌘K / Ctrl K', 'Search machines, apps and actions'], ['/', 'Search machines'], ['g then u', 'Updates'], ['g then m', 'Machines'], ['g then h', 'History'], ['g then a', 'Apps'], ['g then s', 'Settings'], ['⌘J / Ctrl J', 'Ask the farm'], ['Esc', 'Close panel · clear selection']]
+      ${[['⌘K / Ctrl K', 'Search machines, apps and actions'], ['⌘J / Ctrl J', 'Ask the farm'], ['/', 'Search machines'],
+        ['g then u', 'Updates'], ['g then m', 'Machines'], ['g then h', 'History'], ['g then a', 'Apps'], ['g then s', 'Settings'],
+        ['Esc', 'Close panel · clear selection']]
         .map(([k, d]) => html`<tr key=${k}><td class="nowrap"><span class="kbd">${k}</span></td><td>${d}</td></tr>`)}
     </tbody></table>`,
   trouble: () => html`
     <${QA} q="A machine shows offline">It's offline after ~3 minutes without a check-in. If it's actually on, its agent restarts itself within minutes (the scheduled task relaunches it). If it's powered off, use Wake.<//>
-    <${QA} q="A job failed with “reboot needed”">Windows has updates waiting on a restart and the installer refuses to run. Restart the machine (check the Deadline badge first), then Retry.<//>
+    <${QA} q="A job failed with “reboot needed”">Windows has updates waiting on a restart and the installer refuses to run. Restart the machine, then Retry (History → Installs, or the machine's details).<//>
     <${QA} q="A job says the machine stopped running it">The download or install ended without its result reaching the tracker (e.g. the agent restarted). Retry — if the software did install, the job corrects itself to success on the next check-in. Each agent keeps a log at C:\\ProgramData\\TrackerAgent\\agent.log.<//>
-    <${QA} q="An update never runs on a machine">Check the job's status: waiting for a render to finish, machine offline, not elevated, or waiting for its current job. Queued jobs say which.<//>
+    <${QA} q="An update never runs on a machine">Open History → Installs: the job says what it's waiting for — a render to finish, the machine to come back online, elevation, its own current install, or a scheduled start time.<//>
+    <${QA} q="An app says “No installer yet”">Its installer isn't on the share for that OS. Add it in Apps (a link the tracker downloads once, or the file itself), then update again.<//>
+    <${QA} q="Downloads fail / installers can't be found">The installer share isn't mounted on the tracker server. Settings → Installer downloads shows a warning when that's the case; installers are never written to the server's own disk.<//>
     <${QA} q="Restoring the database">Backups are in ~/tracker-backups (startup and nightly). Stop the tracker and run <code>./restore-db.sh</code> (newest) or <code>./restore-db.sh path/to/backup.db</code>.<//>`,
 };
 
