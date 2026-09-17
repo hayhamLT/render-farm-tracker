@@ -375,6 +375,14 @@ code {
 /* Waking: spinner, not clickable. Failed last time / card not set up: amber, so it reads as "may not work". */
 .node-reboot.wake.waking { color: var(--ok); cursor: default; }
 .node-reboot.wake.wake-failed, .node-reboot.wake.wake-unready { color: var(--warn); }
+/* Deadline health badge on a machine card: red = down (no renders), amber = no auto-start. */
+.dl-badge { display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: .68rem; font-weight: 600;
+  padding: 2px 7px; border-radius: 999px; border: 1px solid transparent; background: none; white-space: nowrap; line-height: 1.4; }
+.dl-badge .ic { width: 12px; height: 12px; }
+.dl-badge.down { color: var(--bad); background: rgba(255,99,99,.12); border-color: rgba(255,99,99,.3); }
+.dl-badge.fragile { color: var(--warn); background: rgba(251,191,69,.10); border-color: rgba(251,191,69,.28); }
+button.dl-badge { cursor: pointer; }
+button.dl-badge:hover { filter: brightness(1.2); }
 .node-table .node-actions { text-align: right; width: 1%; white-space: nowrap; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(54,211,153,.18); }

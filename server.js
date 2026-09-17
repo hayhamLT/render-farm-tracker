@@ -1621,6 +1621,10 @@ function handleCheckin(body) {
     // it. Disk + pending-reboot reflect current state, so they update every time.
     const macsCsv = Array.isArray(hh.macs) && hh.macs.length
       ? hh.macs.map(String).join(',') : null;   // for Wake-on-LAN; COALESCE so a miss keeps it
+    // A partial health report (e.g. just a Deadline status after a fix) must not blank out
+    // disk / pending-reboot / GPU load, which the full report always carries.
+    const fullHealth = 'macs' in hh || 'diskFreeGB' in hh || 'gpu' in hh;
+    if (fullHealth) {
     // gpu_util is a LIVE metric (current render load), so it's written every time, not
     // COALESCEd — a node that stops rendering must drop back to idle, not keep a stale %.
     db.prepare(`UPDATE nodes SET gpu = COALESCE(?, gpu), gpu_driver = COALESCE(?, gpu_driver),
@@ -1636,6 +1640,21 @@ function handleCheckin(body) {
       macsCsv,
       typeof hh.gpuUtil === 'number' ? hh.gpuUtil : null,
       node.id);
+    }
+    if (hh.deadline && typeof hh.deadline === 'object' && Object.keys(hh.deadline).length) {
+      const dl = hh.deadline;
+      db.prepare('UPDATE nodes SET deadline_info = ? WHERE id = ?').run(JSON.stringify({
+        installed: !!dl.installed, launcher: !!dl.launcher, worker: !!dl.worker, autostart: !!dl.autostart,
+        how: Array.isArray(dl.how) ? dl.how.map(String).slice(0, 6) : [],
+        autologon: dl.autologon == null ? null : !!dl.autologon, user: dl.user ? String(dl.user).slice(0, 120) : null,
+        at: now,
+      }), node.id);
+    }
+    if (hh.deadlineFix && typeof hh.deadlineFix === 'object') {
+      const fx = { ok: !!hh.deadlineFix.ok, message: String(hh.deadlineFix.message || '').slice(0, 500), at: now };
+      db.prepare('UPDATE nodes SET deadline_fix = ? WHERE id = ?').run(JSON.stringify(fx), node.id);
+      logEvent('node', `Deadline startup fix on ${node.hostname}: ${fx.ok ? 'done' : 'failed'} — ${fx.message}`);
+    }
     if (hh.wol && typeof hh.wol === 'object') {
       db.prepare('UPDATE nodes SET wol_ready = ?, wol_info = ? WHERE id = ?').run(
         hh.wol.ready ? 1 : 0,
@@ -1766,6 +1785,8 @@ function handleCheckin(body) {
     cancel: stopIds.length ? stopIds : undefined,
     // Agent-side full power-off (requested from the Fleet ⏻ menu → Shut down).
     shutdown: cmds.some((c) => c.kind === 'shutdown') || undefined,
+    // Make Deadline start by itself (dashboard "Fix Deadline startup"), agents 2.31.0+.
+    deadlineFix: cmds.some((c) => c.kind === 'deadline_fix') || undefined,
     // One-time fleet migration to a new tracker server (gated by config.rehome).
     rehome: rehomeFor(hostname),
     // User-added (custom) products + their detection patterns, so the agent can detect them
@@ -2473,6 +2494,23 @@ const server = http.createServer(async (req, res) => {
 
     // Wake-on-LAN — power on a machine that's off/asleep (Deadline-free). Uses the MAC(s)
     // the agent reported on its last check-in.
+    // Fix Deadline startup: have the machine's agent register Deadline to start at logon of
+    // its desktop user and start it now. Windows, agent 2.31.0+, machine online.
+    const nodeDlFix = p.match(/^\/api\/nodes\/(\d+)\/deadline-fix$/);
+    if (req.method === 'POST' && nodeDlFix) {
+      const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeDlFix[1]));
+      if (!node) return sendJson(res, 404, { error: 'no such node' });
+      const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
+      if (!online) return sendJson(res, 400, { error: `${node.hostname} is offline.` });
+      if (node.os !== 'windows') return sendJson(res, 400, { error: 'The automatic Deadline startup fix is Windows-only.' });
+      if (!node.agent_version || cmpVersionServer(node.agent_version, '2.31.0') < 0) {
+        return sendJson(res, 400, { error: `${node.hostname}'s agent (${node.agent_version || 'unknown'}) is too old — it updates itself within a few minutes; try again then.` });
+      }
+      commands.queue(node.id, 'deadline_fix');
+      logEvent('node', `Deadline startup fix requested for ${node.hostname}`);
+      return sendJson(res, 200, { ok: true, hostname: node.hostname });
+    }
+
     const nodeWake = p.match(/^\/api\/nodes\/(\d+)\/wake$/);
     if (req.method === 'POST' && nodeWake) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeWake[1]));

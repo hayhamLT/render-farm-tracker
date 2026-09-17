@@ -534,6 +534,7 @@ function renderDashboard() {
         ${osStatus(n)}
         <span class="name">${esc(n.hostname)}</span>
         ${elevBadge(n)}
+        ${deadlineBadge(n)}
         ${nodeActionBtn(n)}
       </div>
       <div class="meta">${esc(n.ip || '')} · last seen ${ago(n.last_seen)}</div>
@@ -688,6 +689,11 @@ function renderFleet() {
   const items = [];
   nodes.filter((n) => !n.online).forEach((n) => items.push({ ic: 'power', cls: 'bad', t: `${n.hostname} offline`, s: 'last seen ' + ago(n.last_seen) }));
   nodes.filter((n) => n.pending_reboot).forEach((n) => items.push({ ic: 'refresh', cls: 'warn', t: `${n.hostname} needs a reboot`, s: 'Windows update pending' }));
+  nodes.forEach((n) => {
+    const d = deadlineStatus(n);
+    if (d && d.state === 'down') items.push({ ic: 'alert', cls: 'bad', t: `${n.hostname}: Deadline down`, s: 'online but taking no renders' });
+    if (d && d.state === 'fragile') items.push({ ic: 'alert', cls: 'warn', t: `${n.hostname}: Deadline won't auto-start`, s: 'next restart drops it from the farm' });
+  });
   nodes.filter((n) => n.disk_free_gb != null && n.disk_free_gb < 20).forEach((n) => items.push({ ic: 'server', cls: 'warn', t: `${n.hostname} low disk`, s: `${n.disk_free_gb} GB free` }));
   // GPU driver "behind" = installed driver older than the newest version THIS node's GPU
   // supports (per-GPU target). A legacy Maxwell/Pascal card on 581.57 is at its MAX, not
@@ -740,6 +746,59 @@ async function removeNode(id, name) {
   if (!await uiConfirm(`Remove node "${name}" from the tracker? It will reappear if its agent is still running.`, { title: 'Remove node', confirmLabel: 'Remove', danger: true })) return;
   await api('DELETE', `/api/nodes/${id}`);
   refresh();
+}
+
+// Deadline health (agents 2.31.0+). "down": the machine is on but Deadline's Launcher/Worker
+// isn't running, so it takes no renders. "fragile": running now, but nothing starts it after a
+// restart. Only reported for machines that have Deadline installed.
+function deadlineStatus(n) {
+  let d = null;
+  try { d = n.deadline_info ? JSON.parse(n.deadline_info) : null; } catch { /* ignore */ }
+  if (!d || !d.installed || !n.online) return null;
+  const canFix = n.os === 'windows' && n.agent_version && cmpVersion(n.agent_version, '2.31.0') >= 0;
+  if (!d.launcher || !d.worker) {
+    return { state: 'down', canFix, label: 'Deadline down',
+      title: `Deadline ${!d.launcher ? 'Launcher' : 'Worker'} isn't running — ${n.hostname} takes no renders.${d.autostart ? '' : ' Nothing starts Deadline on this machine.'}${canFix ? ' Click to fix startup and start it now.' : ''}` };
+  }
+  if (!d.autostart) {
+    return { state: 'fragile', canFix, label: 'Deadline: no auto-start',
+      title: `Deadline is running, but nothing starts it after a restart — the next reboot takes ${n.hostname} out of the farm.${d.autologon === false ? ' Automatic login is also off.' : ''}${canFix ? ' Click to fix.' : ''}` };
+  }
+  return { state: 'ok', canFix, label: 'Deadline OK', title: `Deadline running · starts via ${(d.how || []).join(', ')}${d.user ? ' as ' + d.user : ''}` };
+}
+
+function deadlineBadge(n) {
+  const s = deadlineStatus(n);
+  if (!s || s.state === 'ok') return '';
+  const cls = s.state === 'down' ? 'dl-badge down' : 'dl-badge fragile';
+  return s.canFix
+    ? `<button class="${cls}" title="${esc(s.title)}" onclick="fixDeadline(${n.id})">${icon('alert')} ${esc(s.label)}</button>`
+    : `<span class="${cls}" title="${esc(s.title)}">${icon('alert')} ${esc(s.label)}</span>`;
+}
+
+async function fixDeadline(id) {
+  const n = state.nodes.find((x) => x.id === id);
+  if (!n) return;
+  if (!await uiConfirm(`Make Deadline start by itself on ${esc(n.hostname)}? The agent registers the Deadline Launcher to start whenever the desktop user logs in (no password needed), turns on "start Worker with Launcher", and starts Deadline now if it isn't running.`,
+    { title: 'Fix Deadline startup', confirmLabel: 'Fix it' })) return;
+  try {
+    await api('POST', `/api/nodes/${id}/deadline-fix`);
+    toast(`Fixing Deadline startup on ${n.hostname} — the result appears here in about a minute.`, 'success');
+  } catch (e) { toast(`Couldn't fix Deadline on ${n.hostname}: ${e.message}`, 'error'); }
+}
+
+// Announce Deadline fix results once, as they arrive.
+const _dlFixSeen = new Map();
+function announceDeadlineFixes() {
+  for (const n of state.nodes) {
+    let fx = null;
+    try { fx = n.deadline_fix ? JSON.parse(n.deadline_fix) : null; } catch { /* ignore */ }
+    const key = fx ? String(fx.at) : '';
+    const prev = _dlFixSeen.get(n.id);
+    _dlFixSeen.set(n.id, key);
+    if (prev === undefined || prev === key || !fx) continue;
+    toast(`${n.hostname}: ${fx.message}`, fx.ok ? 'success' : 'error');
+  }
 }
 
 // Online machines get a Restart (reboot) button; offline ones get a Wake (power-on) button.
@@ -2403,6 +2462,7 @@ function renderAll() {
   if (!state) return;
   normalizeState();
   announceWakeChanges();
+  announceDeadlineFixes();
   renderDashboard();
   renderFleet();
   if (!editingWizard()) renderWizard();

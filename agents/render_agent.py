@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.30.1"
+AGENT_VERSION = "2.31.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -322,6 +322,100 @@ ConvertTo-Json -Compress -Depth 4 @($out)
     except Exception:
         return None
     return None
+
+
+# ---- Deadline health -------------------------------------------------------------------
+# A render node is only useful if Deadline's Launcher + Worker are running. On many farm
+# machines nothing starts them after a restart (someone started them by hand once), so a
+# reboot silently takes the machine out of the farm while the tracker still shows it online.
+_DEADLINE_TASK = "Deadline Launcher (auto-start)"
+_DEADLINE_BIN_WIN = r"C:\Program Files\Thinkbox\Deadline10\bin"
+
+# The user whose desktop Deadline should run in: whoever owns the logged-in desktop
+# (explorer.exe), else the automatic-login account. Works whether the agent runs as that
+# user or as SYSTEM.
+_PS_DESKTOP_USER = r"""
+$du = $null
+$ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($ex) { $o = Invoke-CimMethod -InputObject $ex -MethodName GetOwner -ErrorAction SilentlyContinue; if ($o -and $o.User) { $du = "$($o.Domain)\$($o.User)" } }
+$wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+$autologon = ("$($wl.AutoAdminLogon)" -eq '1')
+if (-not $du -and $autologon -and $wl.DefaultUserName) { $d = if ($wl.DefaultDomainName) { $wl.DefaultDomainName } else { $env:COMPUTERNAME }; $du = "$d\$($wl.DefaultUserName)" }
+"""
+
+
+def detect_deadline():
+    """{installed, launcher, worker, autostart, autologon, user, how} — read-only, best-effort."""
+    try:
+        if IS_WINDOWS:
+            ps = r"""$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='SilentlyContinue'
+%s
+$bin = '%s'
+$installed = Test-Path "$bin\deadlinelauncher.exe"
+$how = @()
+if (Get-ScheduledTask -TaskName '%s') { $how += 'task' }
+if (Get-Service | Where-Object { $_.Name -match 'deadline' -and $_.StartType -eq 'Automatic' }) { $how += 'service' }
+$startup = @('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp') + (Get-ChildItem C:\Users -Directory | ForEach-Object { "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup" })
+if ($startup | Where-Object { Get-ChildItem $_ -Filter '*deadline*' }) { $how += 'startup-folder' }
+foreach ($rk in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') { $v = Get-ItemProperty $rk; if ($v -and ($v.PSObject.Properties | Where-Object { "$($_.Value)" -match 'deadlinelauncher' })) { $how += 'run-key' } }
+$ini = "$env:ProgramData\Thinkbox\Deadline10\deadline.ini"
+$lsas = if (Test-Path $ini) { (Select-String -Path $ini -Pattern '^LaunchSlaveAtStartup=(.*)$' | Select-Object -First 1).Matches.Groups[1].Value } else { '' }
+[pscustomobject]@{ installed = $installed; launcher = [bool](Get-Process deadlinelauncher); worker = [bool](Get-Process deadlineworker);
+  starts_worker = ($lsas -match '^(1|true)$'); how = $how; autologon = $autologon; user = $du } | ConvertTo-Json -Compress
+""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK)
+            out = (_run_powershell(ps, timeout=60).stdout or "").strip()
+            d = json.loads(out) if out else None
+            if not d:
+                return None
+            d["how"] = d.get("how") or []
+            if isinstance(d["how"], str):
+                d["how"] = [d["how"]]
+            d["autostart"] = bool(d["how"]) and bool(d.get("starts_worker"))
+            return d
+        if IS_MACOS:
+            installed = os.path.isdir("/Applications/Thinkbox/Deadline10")
+            launcher = _proc_running(["deadlinelauncher"])
+            worker = _proc_running(["deadlineworker"])
+            plists = glob.glob("/Library/LaunchDaemons/*deadline*") + glob.glob("/Library/LaunchAgents/*deadline*")
+            return {"installed": installed, "launcher": launcher, "worker": worker,
+                    "autostart": bool(plists), "how": ["launchd"] if plists else [],
+                    "autologon": None, "user": None}
+    except Exception:
+        return None
+    return None
+
+
+def fix_deadline_startup():
+    """Make Deadline start by itself and start it now (Windows). Registers a scheduled task that
+    runs the Deadline Launcher at logon of the desktop user — in that user's own session, like
+    starting it by hand, so shares and licenses behave normally; no password involved — and
+    turns on LaunchSlaveAtStartup so the Launcher brings up the Worker. Returns (ok, message)."""
+    if not IS_WINDOWS:
+        return False, "Automatic Deadline startup fix is Windows-only."
+    ps = r"""$ProgressPreference='SilentlyContinue'
+%s
+$bin = '%s'; $task = '%s'
+if (-not (Test-Path "$bin\deadlinelauncher.exe")) { 'ERROR: Deadline is not installed in ' + $bin; exit 2 }
+if (-not $du) { 'ERROR: nobody is logged in and automatic login is off, so there is no desktop session for Deadline to run in. Log in once (or enable automatic login), then try again.'; exit 3 }
+& "$bin\deadlinecommand.exe" -SetIniFileSetting LaunchSlaveAtStartup True 2>&1 | Out-Null
+$act = New-ScheduledTaskAction -Execute "$bin\deadlinelauncher.exe"
+$trg = New-ScheduledTaskTrigger -AtLogOn -User $du
+$pri = New-ScheduledTaskPrincipal -UserId $du -LogonType Interactive -RunLevel Highest
+$set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $task -Action $act -Trigger $trg -Principal $pri -Settings $set -Force | Out-Null
+$started = $false
+if (-not (Get-Process deadlinelauncher -ErrorAction SilentlyContinue)) { if ($ex) { Start-ScheduledTask -TaskName $task; $started = $true } }
+for ($i = 0; $i -lt 24 -and -not (Get-Process deadlineworker -ErrorAction SilentlyContinue); $i++) { Start-Sleep 5 }
+$w = [bool](Get-Process deadlineworker -ErrorAction SilentlyContinue)
+"OK: Deadline now starts at logon of $du (auto-login: $autologon)." + $(if ($started) { " Started it now." } else { "" }) + $(if ($w) { " Worker is running." } elseif ($ex) { " Worker hasn't appeared yet — check Deadline Monitor." } else { " Nobody is logged in right now, so it starts at the next logon." })
+""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK)
+    try:
+        p = _run_powershell(ps, timeout=240)
+        msg = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
+        msg = msg[-1] if msg else "no output"
+        return p.returncode == 0 and msg.startswith("OK"), msg
+    except Exception as e:
+        return False, "fix failed: %s" % e
 
 
 def send_magic_packets(macs, ip=None, rounds=3):
@@ -1166,7 +1260,7 @@ INSTALL_TIMEOUT = 3600  # seconds
 # check-in; a "cancel" directive for that id sets the event and kills the process tree.
 _JOB = {"id": None, "proc": None, "cancel": threading.Event()}
 _JOB_LOCK = threading.Lock()
-_PENDING = {"reboot": False, "shutdown": False}
+_PENDING = {"reboot": False, "shutdown": False, "deadline_fix": False}
 _UNSENT = {}   # job id -> (status, log): final results the tracker hasn't received yet
 
 
@@ -1212,6 +1306,8 @@ def handle_directives(resp):
         threading.Thread(target=send_magic_packets, args=(w.get("macs"), w.get("ip")),
                          daemon=True).start()
         print("  ⏻ sending Wake-on-LAN for %s" % w.get("hostname"))
+    if resp.get("deadlineFix"):
+        _PENDING["deadline_fix"] = True
     if resp.get("reboot"):
         _PENDING["reboot"] = True
     if resp.get("shutdown"):
@@ -1971,6 +2067,20 @@ def main():
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
                 continue
+            # Server asked us to make Deadline start by itself (the dashboard's "Fix Deadline
+            # startup" button). Runs in the background; the result goes out with a fresh health
+            # report so the dashboard updates right away.
+            if _PENDING["deadline_fix"]:
+                _PENDING["deadline_fix"] = False
+                def _do_fix():
+                    ok, msg = fix_deadline_startup()
+                    print("  Deadline startup fix: %s" % msg)
+                    try:
+                        server.checkin(None, health={"deadline": detect_deadline() or {},
+                                                     "deadlineFix": {"ok": ok, "message": msg, "at": int(time.time() * 1000)}})
+                    except Exception as e:
+                        print("  ! could not report Deadline fix result: %s" % e)
+                threading.Thread(target=_do_fix, daemon=True).start()
             # Server asked us to SHUT DOWN — full power-off (recover via Wake-on-LAN).
             if _PENDING["shutdown"]:
                 _PENDING["shutdown"] = False
@@ -2016,6 +2126,9 @@ def main():
                         wol_state["at"] = time.time()
                     if wol_state["status"]:
                         health["wol"] = wol_state["status"]
+                    dl = detect_deadline()
+                    if dl:
+                        health["deadline"] = dl
                 # Always report software so the dashboard shows us online, even mid-install.
                 resp = server.checkin(detect_software(), latest=latest, health=health)
                 if not busy:
