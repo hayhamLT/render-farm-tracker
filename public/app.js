@@ -756,9 +756,10 @@ function deadlineStatus(n) {
   try { d = n.deadline_info ? JSON.parse(n.deadline_info) : null; } catch { /* ignore */ }
   if (!d || !d.installed || !n.online) return null;
   const canFix = n.os === 'windows' && n.agent_version && cmpVersion(n.agent_version, '2.31.0') >= 0;
-  if (!d.launcher || !d.worker) {
+  // The Worker is what renders; without it the machine is out of the farm.
+  if (!d.worker) {
     return { state: 'down', canFix, label: 'Deadline down',
-      title: `Deadline ${!d.launcher ? 'Launcher' : 'Worker'} isn't running — ${n.hostname} takes no renders.${d.autostart ? '' : ' Nothing starts Deadline on this machine.'}${canFix ? ' Click to fix startup and start it now.' : ''}` };
+      title: `The Deadline Worker isn't running — ${n.hostname} takes no renders.${d.autostart ? '' : ' Nothing starts Deadline on this machine.'}${canFix ? ' Click to fix startup and start it now.' : ''}` };
   }
   if (!d.autostart) {
     return { state: 'fragile', canFix, label: 'Deadline: no auto-start',

@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.31.0"
+AGENT_VERSION = "2.31.1"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -373,9 +373,17 @@ $lsas = if (Test-Path $ini) { (Select-String -Path $ini -Pattern '^LaunchSlaveAt
             d["autostart"] = bool(d["how"]) and bool(d.get("starts_worker"))
             return d
         if IS_MACOS:
+            # On the Macs the Worker process is "DeadlineWorker10" and it's kept alive by a
+            # launchd-started "Deadline Watchdog" app rather than Deadline's Launcher — match by
+            # pattern, case-insensitively, instead of exact process names.
+            def running(pattern):
+                try:
+                    return subprocess.run(["pgrep", "-if", pattern], capture_output=True, timeout=15).returncode == 0
+                except Exception:
+                    return False
             installed = os.path.isdir("/Applications/Thinkbox/Deadline10")
-            launcher = _proc_running(["deadlinelauncher"])
-            worker = _proc_running(["deadlineworker"])
+            worker = running("deadlineworker")
+            launcher = running("deadlinelauncher|deadlinewatchdog")
             plists = glob.glob("/Library/LaunchDaemons/*deadline*") + glob.glob("/Library/LaunchAgents/*deadline*")
             return {"installed": installed, "launcher": launcher, "worker": worker,
                     "autostart": bool(plists), "how": ["launchd"] if plists else [],
