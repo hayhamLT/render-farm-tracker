@@ -193,10 +193,39 @@ function Hero({ s, models, updateCount, updateAll, appsBehind }) {
         <div class="hero-kpi"><span class="l">Last version check</span><b class="small">${checked ? ago(checked, s.now) : '—'}</b><span class="s">${plural(s.products.filter((p) => isTracked(p)).length, 'app')} watched</span></div>
       </div>
       <div class="row" style="gap:8px">
-        <button class="btn primary" disabled=${!updateCount} onClick=${updateAll}><${Icon} name="download" />${updateCount ? `Update all (${updateCount})` : 'Everything is up to date'}</button>
-        <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
+        ${updateCount
+          ? html`<button class="btn primary" onClick=${updateAll}><${Icon} name="download" />Update all (${updateCount})</button>
+                 <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>`
+          : html`<button class="btn primary" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for new versions</button>
+                 <button class="btn" onClick=${() => go('history')}><${Icon} name="activity" />See what was installed</button>`}
       </div>
     </div>
+  </section>`;
+}
+
+// Nothing to install: show what the farm actually looks like instead of a row of zeros.
+function AllClear({ s, models }) {
+  const DAY = 24 * 3600 * 1000;
+  const recent = s.jobs.filter((j) => j.status === 'success').sort((a, b) => b.updated_at - a.updated_at);
+  const week = recent.filter((j) => j.updated_at > Date.now() - 7 * DAY).length;
+  const names = new Map(s.products.map((p) => [p.key, p]));
+  const scheduled = (s.rollouts || []).filter((r) => r.status === 'scheduled').sort((a, b) => a.run_at - b.run_at)[0];
+  const installed = models.filter((m) => m.installed.length);
+  return html`<section class="card card-pad allclear">
+    <div class="ac-head"><span class="ac-mark"><${Icon} name="check" /></span>
+      <div><b>Every machine is running the newest version of everything</b>
+        <p class="muted" style="margin:2px 0 0">${plural(installed.length, 'app')} watched across ${plural(s.nodes.length, 'machine')}. New versions are picked up automatically every few hours; an update only starts when you say so${scheduled ? `, or at the time you scheduled` : ''}.</p></div>
+    </div>
+    ${scheduled ? html`<div class="banner info"><${Icon} name="clock" /><span class="grow">Next scheduled: <b>${scheduled.name}</b> on ${plural(scheduled.counts.machines, 'machine')}</span><button class="btn sm" onClick=${() => go('history')}>Details</button></div>` : null}
+    ${recent.length ? html`<div>
+      <p class="section-title" style="margin-bottom:6px">Installed recently${week ? ` · ${week} in the last 7 days` : ''}</p>
+      <ul class="ac-recent">${recent.slice(0, 5).map((j) => html`<li key=${j.id}>
+        <${ProductLogo} product=${names.get(j.product_key) || { key: j.product_key, name: j.product_key }} size=${18} />
+        <b>${(names.get(j.product_key) || {}).name || j.product_key}</b><span class="mono dim">${j.package_version}</span>
+        <span class="grow"></span><button class="linkish" onClick=${() => go('machines', j.hostname)}>${j.hostname}</button><span class="dim nowrap">${ago(j.updated_at, s.now)}</span>
+      </li>`)}</ul>
+      <button class="linkish" style="margin-top:8px" onClick=${() => go('history')}>Full history →</button>
+    </div>` : null}
   </section>`;
 }
 
@@ -241,6 +270,7 @@ export function UpdatesView() {
         <${RolloutList} s=${s} limitDone=${0} />
       </section>` : null}
 
+      ${!available.length ? html`<${AllClear} s=${s} models=${models} />` : null}
       ${available.length ? groups.map((g) => html`<section key=${g.kind} class="card ulist">
         <div class="ulist-head">
           <label class="ur-check"><input type="checkbox" aria-label=${`Select all ${g.label.toLowerCase()} with updates`}
@@ -258,7 +288,7 @@ export function UpdatesView() {
           ${g.hint ? html`<span class="grow"></span><span class="dim" style="font-size:.8rem">${g.hint}</span>` : null}
         </div>
         ${g.rows.map((m) => html`<${AppRow} key=${m.p.key} m=${m} s=${s} />`)}
-      </section>`) : html`<section class="card"><div class="empty-inline"><${Icon} name="check" /><div><b>Everything is up to date</b><p class="muted">New versions are checked automatically every few hours — or check now.</p></div></div></section>`}
+      </section>`) : null}
 
       ${majors.length ? html`<section class="card ulist">
         <div class="ulist-head"><h2>New major versions</h2><span class="dim">install next to the current version — opt in per app</span></div>

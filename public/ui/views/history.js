@@ -133,9 +133,10 @@ export function Jobs({ s, products, compact = false }) {
 // Installs per day for the last two weeks, from the timeline the server records.
 function InstallChart() {
   const [rows, setRows] = useState(null);
+  const [since, setSince] = useState(null);
   useEffect(() => {
     get('/api/timeline?hours=336')
-      .then((d) => setRows(Object.values(d.nodes || {}).flat().filter((r) => r[0] === 'install')))
+      .then((d) => { setSince(d.since || null); setRows(Object.values(d.nodes || {}).flat().filter((r) => r[0] === 'install')); })
       .catch(() => setRows([]));
   }, []);
   if (!rows) return html`<span class="skeleton" style="height:150px;border-radius:12px"></span>`;
@@ -168,6 +169,7 @@ function InstallChart() {
     <div class="grow" style="min-width:280px">
       <div class="row" style="justify-content:space-between;margin-bottom:6px"><b>Installs per day</b><span class="dim" style="font-size:.8rem">last 14 days</span></div>
       <${DayBars} days=${days} height=${96} />
+      ${since && since > Date.now() - 13 * DAY ? html`<p class="dim" style="margin:6px 0 0;font-size:.76rem">Installs have been recorded since ${new Date(since).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} — earlier days are empty.</p>` : null}
     </div>
   </section>`;
 }
