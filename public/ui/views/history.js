@@ -12,8 +12,6 @@ import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { RolloutList, waitingRollout, whenLabel } from '../components/rollouts.js';
-import { Donut, DayBars } from '../components/viz.js';
-import { get } from '../lib/api.js';
 import { ActivityLog } from './activity.js';
 
 const tab = pref('history.tab', 'installs');
@@ -130,50 +128,6 @@ export function Jobs({ s, products, compact = false }) {
 }
 
 
-// Installs per day for the last two weeks, from the timeline the server records.
-function InstallChart() {
-  const [rows, setRows] = useState(null);
-  const [since, setSince] = useState(null);
-  useEffect(() => {
-    get('/api/timeline?hours=336')
-      .then((d) => { setSince(d.since || null); setRows(Object.values(d.nodes || {}).flat().filter((r) => r[0] === 'install')); })
-      .catch(() => setRows([]));
-  }, []);
-  if (!rows) return html`<span class="skeleton" style="height:150px;border-radius:12px"></span>`;
-  const DAY = 24 * 3600 * 1000;
-  const start = new Date(); start.setHours(0, 0, 0, 0);
-  const days = [];
-  for (let i = 13; i >= 0; i--) {
-    const from = start.getTime() - i * DAY;
-    const mine = rows.filter((r) => (r[2] || r[1]) >= from && (r[2] || r[1]) < from + DAY);
-    const ok = mine.filter((r) => r[3] === 'success').length;
-    const bad = mine.filter((r) => r[3] === 'failed').length;
-    const stopped = mine.filter((r) => r[3] === 'cancelled').length;
-    const d = new Date(from);
-    days.push({
-      label: i === 0 ? 'today' : d.toLocaleDateString([], { weekday: 'narrow' }),
-      title: `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}: ${ok} installed${bad ? `, ${bad} failed` : ''}${stopped ? `, ${stopped} stopped` : ''}`,
-      parts: [{ value: ok, color: 'var(--ok)' }, { value: bad, color: 'var(--bad)' }, { value: stopped, color: 'var(--text-3)' }],
-    });
-  }
-  const tot = days.reduce((a, d) => { a.ok += d.parts[0].value; a.bad += d.parts[1].value; a.stopped += d.parts[2].value; return a; }, { ok: 0, bad: 0, stopped: 0 });
-  const done = tot.ok + tot.bad;
-  if (!done && !tot.stopped) return null;
-  return html`<section class="card card-pad hist-chart">
-    <${Donut} size=${112} stroke=${12} center=${`${done ? Math.round((tot.ok / done) * 100) : 100}%`} sub="succeeded" label="install outcomes, last 14 days"
-      segments=${[
-        { key: 'ok', label: 'Installed', value: tot.ok, color: 'var(--ok)' },
-        { key: 'bad', label: 'Failed', value: tot.bad, color: 'var(--bad)' },
-        { key: 'stopped', label: 'Stopped', value: tot.stopped, color: 'var(--text-3)' },
-      ]} />
-    <div class="grow" style="min-width:280px">
-      <div class="row" style="justify-content:space-between;margin-bottom:6px"><b>Installs per day</b><span class="dim" style="font-size:.8rem">last 14 days</span></div>
-      <${DayBars} days=${days} height=${96} />
-      ${since && since > Date.now() - 13 * DAY ? html`<p class="dim" style="margin:6px 0 0;font-size:.76rem">Installs have been recorded since ${new Date(since).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} — earlier days are empty.</p>` : null}
-    </div>
-  </section>`;
-}
-
 export function HistoryView() {
   const s = farm.value;
   if (!s) return null;
@@ -182,7 +136,6 @@ export function HistoryView() {
   const TABS = [['installs', 'Installs', s.jobs.length], ['rollouts', 'Rollouts', (s.rollouts || []).length], ['log', 'Activity log', s.events.length]];
   return html`<div class="page stack">
     <${PageHeader} title="History" subtitle=${`Every install and rollout${failed ? ` · ${failed} failed` : ''}`} />
-    ${tab.value === 'installs' ? html`<${InstallChart} />` : null}
     <div class="pills">${TABS.map(([k, l, n]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}<span class="n">${n}</span></button>`)}</div>
     ${tab.value === 'installs' ? html`<${Jobs} s=${s} products=${products} />`
       : tab.value === 'rollouts' ? html`<section class="card card-pad">${(s.rollouts || []).length ? html`<${RolloutList} s=${s} limitDone=${30} />` : html`<${Empty}>No rollouts yet.<//>`}</section>`

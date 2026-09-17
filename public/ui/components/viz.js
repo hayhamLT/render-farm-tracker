@@ -185,24 +185,3 @@ export function Donut({ segments, size = 132, stroke = 14, center, sub, label })
       </button></li>`)}</ul>
   </div>`;
 }
-
-// ---- day bars (installs per day, hover for the detail) ----
-// days: [{ label, title, parts: [{ value, color }] }]
-export function DayBars({ days, height = 92, unit = '' }) {
-  const [hover, setHover] = useState(null);
-  const max = Math.max(1, ...days.map((d) => d.parts.reduce((s, p) => s + p.value, 0)));
-  return html`<div class="daybars" style=${`--h:${height}px`}>
-    ${days.map((d, i) => {
-      const total = d.parts.reduce((s, p) => s + p.value, 0);
-      return html`<div key=${i} class=${'db-col' + (hover === i ? ' on' : '')} onMouseEnter=${() => setHover(i)} onMouseLeave=${() => setHover(null)}>
-        <div class="db-stack" style=${`height:${(total / max) * 100}%`} aria-label=${d.title}>
-          ${d.parts.filter((p) => p.value > 0).map((p, k) => html`<i key=${k} style=${`flex:${p.value};background:${p.color}`}></i>`)}
-        </div>
-        <span class="db-x">${d.label}</span>
-        ${hover === i && total > 0 ? html`<span class="db-tip">${d.title}</span>` : null}
-        ${total === 0 ? html`<span class="db-zero"></span>` : null}
-      </div>`;
-    })}
-    ${unit ? html`<span class="db-unit">${max} ${unit}</span>` : null}
-  </div>`;
-}
