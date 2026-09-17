@@ -14,6 +14,7 @@ const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const commands = require('./lib/commands');
+const { createLive } = require('./lib/live');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -766,6 +767,15 @@ function installerSha256(fullPath) {
 }
 
 // List installer files across all sources (deduped by name, cache wins).
+// The dashboard state is rebuilt up to once a second for live updates; listing the installer
+// folders (one of them an SMB share) that often is wasteful and, if the share stalls, risky.
+// State uses a 30 s cached listing; deploys and downloads still check the disk directly.
+let _installerListCache = { at: 0, files: [] };
+function cachedInstallerFiles() {
+  if (Date.now() - _installerListCache.at > 30000) _installerListCache = { at: Date.now(), files: listInstallerFiles() };
+  return _installerListCache.files;
+}
+
 function listInstallerFiles() {
   const seen = new Map();
   for (const dir of installerDirs()) {
@@ -1428,13 +1438,15 @@ function fullState() {
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     wake: wakesNow.get(n.id) || null,
     software: db
-      .prepare('SELECT product_key, version, install_path, detected_at FROM software WHERE node_id = ?')
+      // detected_at is left out: every check-in rewrites it, which would make each node's
+      // software list look "changed" to the live-update diff. Nothing displays it.
+      .prepare('SELECT product_key, version, install_path FROM software WHERE node_id = ?')
       .all(n.id),
   }));
 
   // Which products already have a staged installer in the repo (per OS) — drives
   // the wizard's "download once, reuse" default.
-  const files = listInstallerFiles();
+  const files = cachedInstallerFiles();
   const products = db.prepare('SELECT * FROM products ORDER BY name').all().map((p) => {
     const win = findStagedInstaller(p.key, 'windows', p.latest_version, files);
     const mac = findStagedInstaller(p.key, 'macos', p.latest_version, files);
@@ -1769,9 +1781,13 @@ function handleCheckin(body) {
 }
 
 // ----------------------------------------------------------------- router --
+const live = createLive({ buildState: () => fullState() });
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname;
+  // Anything that isn't a read can change what the dashboard shows — push it right away.
+  if (req.method !== 'GET') res.on('finish', () => live.poke());
 
   try {
     // -------- node enrolment --------
@@ -1924,6 +1940,8 @@ const server = http.createServer(async (req, res) => {
 
     // -------- dashboard endpoints --------
     if (req.method === 'GET' && p === '/api/state') return sendJson(res, 200, fullState());
+    // Live updates stream (Server-Sent Events): a snapshot, then only what changes.
+    if (req.method === 'GET' && p === '/api/live') return live.handle(req, res);
 
     // Dashboard visibility — toggle a node's hidden state (persisted globally in
     // config.hiddenNodes, which fullState() filters out). GET lists the hidden

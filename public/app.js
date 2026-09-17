@@ -2322,37 +2322,130 @@ function editingWizard() {
   return a && a.closest && a.closest('#wizard-panel');
 }
 
+// ------------------------------------------------------------ live state ---
+// The dashboard is driven by a Server-Sent Events stream (api/live): a full snapshot on
+// connect, then patches with only what changed. Rendering is coalesced (at most ~3/s) so a
+// burst of check-ins doesn't thrash the page. If the stream is down, the page falls back to
+// fetching /api/state every 8 s until it reconnects — it never goes stale silently.
+
+// Server-side ordering, re-applied after every patch.
+// SQLite's ORDER BY compares bytes (uppercase before lowercase) — match it exactly, or live
+// patches and a full refresh would show items in a different order.
+const byteCmp = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+const SECTION_ORDER = {
+  nodes: (a, b) => byteCmp(a.hostname, b.hostname),
+  jobs: (a, b) => b.id - a.id,
+  events: (a, b) => b.id - a.id,
+  packages: (a, b) => b.created_at - a.created_at,
+  products: (a, b) => byteCmp(a.name, b.name),
+};
+const SECTION_KEY = { nodes: 'id', jobs: 'id', events: 'id', packages: 'id', products: 'key' };
+
+function normalizeState() {
+  // Display order across the whole app (CC first, then After Effects, then the rest).
+  const ORDER = ['creativecloud', 'aftereffects', 'maxonapp', 'cinema4d', 'redgiant', 'redshift'];
+  const oi = (k) => { const i = ORDER.indexOf(k); return i < 0 ? 99 : i; };
+  state.products.sort((a, b) => oi(a.key) - oi(b.key));
+  for (const p of state.products) PRODUCT_NAMES[p.key] = p.name;
+  // Creative Cloud has no external "latest" feed (Adobe self-manages it), so treat
+  // the newest version seen on any node as current. Nodes that reach it show ✓;
+  // ones still behind keep the self-updating ↻ until they catch up.
+  for (const p of state.products.filter((x) => SELF_UPDATING.has(x.key))) {
+    let max = p.latest_version || '';
+    for (const n of state.nodes) {
+      const sw = (n.software || []).find((s) => s.product_key === p.key);
+      if (sw && sw.version && (!max || cmpVersion(sw.version, max) > 0)) max = sw.version;
+    }
+    p.latest_version = max || p.latest_version;
+  }
+}
+
+function applyPatch(patch) {
+  if (patch.settings) Object.assign(state, patch.settings);
+  if (patch.now) state.now = patch.now;
+  for (const name of Object.keys(SECTION_KEY)) {
+    const d = patch[name];
+    if (!d) continue;
+    const key = SECTION_KEY[name];
+    const byKey = new Map(state[name].map((x) => [x[key], x]));
+    for (const k of d.remove || []) byKey.delete(k);
+    for (const item of d.upsert || []) {
+      // Nodes arrive without their software list (it's patched separately) — keep the old one.
+      const prev = byKey.get(item[key]);
+      byKey.set(item[key], name === 'nodes' && prev ? { ...item, software: prev.software } : item);
+    }
+    state[name] = [...byKey.values()].sort(SECTION_ORDER[name]);
+  }
+  if (patch.software) {
+    const byId = new Map(state.nodes.map((n) => [n.id, n]));
+    for (const { id, software } of patch.software.upsert || []) {
+      const n = byId.get(id);
+      if (n) n.software = software;
+    }
+  }
+}
+
+let _renderQueued = false;
+let _lastRender = 0;
+let _lastInstallerFiles = 0;
+function scheduleRender() {
+  if (_renderQueued) return;
+  _renderQueued = true;
+  const wait = Math.max(0, 300 - (Date.now() - _lastRender));
+  setTimeout(() => requestAnimationFrame(() => {
+    _renderQueued = false;
+    _lastRender = Date.now();
+    renderAll();
+  }), wait);
+}
+
+function renderAll() {
+  if (!state) return;
+  normalizeState();
+  announceWakeChanges();
+  renderDashboard();
+  renderFleet();
+  if (!editingWizard()) renderWizard();
+  renderDeploy();
+  if (!editingCatalog) renderCatalog();
+  renderActivity();
+  // The installer list reads the file shares — refresh it occasionally, not on every patch.
+  if (Date.now() - _lastInstallerFiles > 60000) { _lastInstallerFiles = Date.now(); refreshInstallerFiles(); }
+}
+
+const live = { es: null, connected: false, lastMsg: 0 };
+function setLiveIndicator() {
+  const el = document.getElementById('refresh-indicator');
+  if (!el) return;
+  const fresh = live.connected && Date.now() - live.lastMsg < 45000;
+  el.classList.toggle('stale', !fresh && !live.polledOk);
+  el.title = fresh ? 'Live — updates appear the moment they happen'
+    : live.polledOk ? 'Reconnecting live updates — refreshing every 8 s meanwhile' : 'Connection lost — retrying';
+}
+
+function startLive() {
+  if (!window.EventSource) return;
+  // Relative URL: resolves under <base href="/tracker/"> when embedded behind the proxy.
+  const es = new EventSource('api/live');
+  live.es = es;
+  const touch = () => { live.connected = true; live.lastMsg = Date.now(); setLiveIndicator(); };
+  es.addEventListener('snapshot', (e) => { state = JSON.parse(e.data); touch(); _lastInstallerFiles = 0; scheduleRender(); });
+  es.addEventListener('patch', (e) => { if (!state) return; applyPatch(JSON.parse(e.data)); touch(); scheduleRender(); });
+  es.addEventListener('ping', touch);
+  es.onerror = () => { live.connected = false; setLiveIndicator(); };   // EventSource reconnects by itself
+}
+
+// Full fetch: used on load, after the user's own actions, and as the fallback while the
+// live stream is down.
 async function refresh() {
   try {
     state = await api('GET', '/api/state');
-    // Display order across the whole app (CC first, then After Effects, then the rest).
-    const ORDER = ['creativecloud', 'aftereffects', 'maxonapp', 'cinema4d', 'redgiant', 'redshift'];
-    const oi = (k) => { const i = ORDER.indexOf(k); return i < 0 ? 99 : i; };
-    state.products.sort((a, b) => oi(a.key) - oi(b.key));
-    for (const p of state.products) PRODUCT_NAMES[p.key] = p.name;
-    // Creative Cloud has no external "latest" feed (Adobe self-manages it), so treat
-    // the newest version seen on any node as current. Nodes that reach it show ✓;
-    // ones still behind keep the self-updating ↻ until they catch up.
-    for (const p of state.products.filter((x) => SELF_UPDATING.has(x.key))) {
-      let max = p.latest_version || '';
-      for (const n of state.nodes) {
-        const sw = (n.software || []).find((s) => s.product_key === p.key);
-        if (sw && sw.version && (!max || cmpVersion(sw.version, max) > 0)) max = sw.version;
-      }
-      p.latest_version = max || p.latest_version;
-    }
-    announceWakeChanges();
-    renderDashboard();
-    renderFleet();
-    if (!editingWizard()) renderWizard();
-    renderDeploy();
-    if (!editingCatalog) renderCatalog();
-    renderActivity();
-    refreshInstallerFiles();
-    document.getElementById('refresh-indicator').classList.remove('stale');
+    live.polledOk = true;
+    renderAll();
   } catch {
-    document.getElementById('refresh-indicator').classList.add('stale');
+    live.polledOk = false;
   }
+  setLiveIndicator();
 }
 
 async function copyCmd(id) {
@@ -2388,4 +2481,6 @@ new MutationObserver(() => {
 
 loadEnrolCommands();
 refresh();
-setInterval(refresh, 8000);
+startLive();
+// Fallback only: poll while the live stream is disconnected or silent.
+setInterval(() => { if (!live.connected || Date.now() - live.lastMsg > 45000) refresh(); else setLiveIndicator(); }, 8000);
