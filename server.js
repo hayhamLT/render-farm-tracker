@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
+const { execFile, execFileSync } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
@@ -1342,6 +1342,28 @@ Generated ${new Date().toLocaleString()}.
     { name: 'Install Tracker Agent - Mac.command', content: mac, mode: 0o755 },
     { name: 'README.txt', content: readme, mode: 0o644 },
   ];
+}
+
+// An smb:// address for a path on a mounted share, so the dashboard can offer "open the folder"
+// on the viewer's own machine (Finder/Explorer handle smb://). null when the path isn't on a share.
+function shareSmbUrl(target) {
+  try {
+    const out = execFileSync('/sbin/mount', [], { encoding: 'utf8', timeout: 4000 });
+    let best = null;
+    for (const line of out.split('\n')) {
+      const m = line.match(/^\/\/([^/]+)\/([^ ]+) on (.+?) \((smbfs|nfs|afpfs)[,)]/);
+      if (!m) continue;
+      const [, userHost, share, mountPoint] = m;
+      const host = userHost.includes('@') ? userHost.split('@').pop() : userHost;
+      const clean = host.replace(/\._smb\._tcp\.local$/, '');
+      if (target === mountPoint || target.startsWith(mountPoint + path.sep)) {
+        if (!best || mountPoint.length > best.mountPoint.length) best = { host: clean, share, mountPoint };
+      }
+    }
+    if (!best) return null;
+    const rel = target.slice(best.mountPoint.length).split(path.sep).filter(Boolean).map(encodeURIComponent).join('/');
+    return `smb://${best.host}/${best.share}${rel ? `/${rel}` : ''}`;
+  } catch { return null; }
 }
 
 // Staging batch (Windows): a node runs `mx1 package download <ident>` then
@@ -2754,6 +2776,24 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // Are the one-click installer files already on the share?
+    if (req.method === 'GET' && p === '/api/enroll-files') {
+      const share = downloadDir();
+      const dir = share ? path.join(share, 'Tracker Agent') : null;
+      const names = enrollFiles('http://x').map((f) => f.name);
+      let files = [];
+      let at = null;
+      try {
+        files = names.filter((n) => fs.existsSync(path.join(dir, n)));
+        const stats = files.map((n) => fs.statSync(path.join(dir, n)).mtimeMs);
+        at = stats.length ? Math.max(...stats) : null;
+      } catch { /* no share */ }
+      const current = files.length === names.length && (() => {
+        try { return fs.readFileSync(path.join(dir, names[0]), 'utf8').includes(agentBaseUrl()); } catch { return false; }
+      })();
+      return sendJson(res, 200, { dir, mounted: !!share, files, at, exists: files.length === names.length, current, base: agentBaseUrl(), smb: dir ? shareSmbUrl(dir) : null });
+    }
+
     // Write the one-click installer files into "<installer share>/Tracker Agent/".
     if (req.method === 'POST' && p === '/api/enroll-files') {
       const share = downloadDir();
@@ -2770,7 +2810,7 @@ const server = http.createServer(async (req, res) => {
           written.push(f.name);
         }
         logEvent('monitoring', `Agent installer files saved to ${dir} (tracker ${base})`);
-        return sendJson(res, 200, { ok: true, dir, base, files: written });
+        return sendJson(res, 200, { ok: true, dir, base, files: written, exists: true, current: true, at: Date.now(), smb: shareSmbUrl(dir) });
       } catch (e) {
         return sendJson(res, 500, { error: `couldn't write to ${dir}: ${e.message}` });
       }

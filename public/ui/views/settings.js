@@ -119,21 +119,41 @@ function Commands() {
 }
 
 // Double-click installers on the share: enroll + elevate in one go, tracker address baked in.
+// Once they're there, this is just a line with a way to open the folder.
 function EnrollFiles({ url }) {
+  const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(null);
+  const load = () => get('/api/enroll-files').then(setState).catch(() => setState({ mounted: false }));
+  useEffect(() => { load(); }, []);
   const save = async () => {
     setBusy(true);
-    try { const r = await post('/api/enroll-files'); setSaved(r); toast('Installer files saved to the share.', 'success'); } catch (e) { toast(e.message, 'error', 8000); }
+    try { const r = await post('/api/enroll-files'); setState(r); toast('Installer files saved to the share.', 'success'); } catch (e) { toast(e.message, 'error', 8000); }
     setBusy(false);
   };
+  const copyPath = async () => {
+    try { await navigator.clipboard.writeText(state.dir); toast('Folder path copied.', 'success', 2000); } catch { toast('Copy failed.', 'error'); }
+  };
+  if (!state) return null;
+  if (!state.mounted) return html`<div class="banner warn"><${Icon} name="alert" />The installer share isn't mounted on the tracker server, so the one-click installer files can't be saved.</div>`;
+
+  if (state.exists) {
+    return html`<div class="enroll-files done">
+      <${Icon} name="check" />
+      <div class="grow">
+        <b>One-click installers are on the share</b>
+        <p class="dim" style="margin:2px 0 0;font-size:.84rem"><span class="mono">${state.dir}</span>${state.current ? '' : html` · <span style="color:var(--warn)">they point at a different address — save them again</span>`}</p>
+      </div>
+      ${state.smb ? html`<a class="btn" href=${state.smb}><${Icon} name="folder" />Open folder</a>` : null}
+      <button class="btn ghost sm" onClick=${copyPath}><${Icon} name="copy" />Copy path</button>
+      <button class=${'btn ghost sm' + (state.current ? '' : ' primary')} disabled=${busy} onClick=${save}><${Icon} name=${busy ? 'spinner' : 'refresh'} cls=${busy ? 'spin' : ''} />Save again</button>
+    </div>`;
+  }
   return html`<div class="enroll-files">
     <div class="grow">
       <b>One-click installers</b>
       <p class="dim" style="margin:2px 0 0;font-size:.84rem">Double-click on a machine to install the agent and set up silent installs in one go — <span class="mono">Install Tracker Agent - Windows.cmd</span> and <span class="mono">Install Tracker Agent - Mac.command</span>, pointing at <span class="mono">${url}</span>.</p>
-      ${saved && html`<p style="margin:6px 0 0;font-size:.84rem"><${Icon} name="check" /> Saved to <span class="mono">${saved.dir}</span></p>`}
     </div>
-    <button class="btn primary" disabled=${busy} onClick=${save}><${Icon} name=${busy ? 'spinner' : 'folder'} cls=${busy ? 'spin' : ''} />${saved ? 'Save again' : 'Save installers to the share'}</button>
+    <button class="btn primary" disabled=${busy} onClick=${save}><${Icon} name=${busy ? 'spinner' : 'folder'} cls=${busy ? 'spin' : ''} />Save installers to the share</button>
   </div>`;
 }
 

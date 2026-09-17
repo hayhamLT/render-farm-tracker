@@ -45,10 +45,18 @@ export function GettingStarted() {
   const [files, setFiles] = useState(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(null);
-  useEffect(() => { get('/api/agent-setup').then(setSetup).catch(() => setSetup({})); }, []);
+  useEffect(() => {
+    get('/api/agent-setup').then(setSetup).catch(() => setSetup({}));
+    get('/api/enroll-files').then(setFiles).catch(() => {});
+  }, []);
   if (!s) return null;
 
   const url = (setup && setup.lanUrl) || '';
+  const saveFiles = async () => {
+    setBusy(true);
+    try { const r = await post('/api/enroll-files'); setFiles(r); toast('Installer files saved to the share.', 'success'); } catch (e) { toast(e.message, 'error', 8000); }
+    setBusy(false);
+  };
   const machines = s.nodes.length;
   const notReady = s.nodes.filter((n) => n.elevated === 0);
   const products = normalizeProducts(s).filter(isTracked);
@@ -69,12 +77,12 @@ export function GettingStarted() {
           <div><b>Mac</b><span class="dim">double-click, then type the Mac's admin password</span><code>Install Tracker Agent - Mac.command</code></div>
         </div>
         <div class="row" style="gap:8px">
-          <button class="btn primary" disabled=${busy} onClick=${async () => {
-            setBusy(true);
-            try { const r = await post('/api/enroll-files'); setFiles(r); toast('Installer files saved to the share.', 'success'); } catch (e) { toast(e.message, 'error', 8000); }
-            setBusy(false);
-          }}><${Icon} name=${busy ? 'spinner' : 'folder'} cls=${busy ? 'spin' : ''} />${files ? 'Save again' : 'Save both files to the share'}</button>
-          <span class="dim">${files ? html`Saved to <span class="mono">${files.dir}</span>` : 'They go in the installer share, in a “Tracker Agent” folder.'}</span>
+          ${files && files.exists
+            ? html`<span class="gs-saved"><${Icon} name="check" />On the share: <span class="mono">${files.dir}</span></span>
+                   ${files.smb ? html`<a class="btn sm" href=${files.smb}><${Icon} name="folder" />Open folder</a>` : null}
+                   <button class="btn ghost sm" disabled=${busy} onClick=${saveFiles}><${Icon} name=${busy ? 'spinner' : 'refresh'} cls=${busy ? 'spin' : ''} />Save again</button>`
+            : html`<button class="btn primary" disabled=${busy} onClick=${saveFiles}><${Icon} name=${busy ? 'spinner' : 'folder'} cls=${busy ? 'spin' : ''} />Save both files to the share</button>
+                   <span class="dim">They go in the installer share, in a “Tracker Agent” folder.</span>`}
         </div>
         <details class="gs-more"><summary>No share on that machine? Paste a command instead</summary>
           <div class="stack" style="gap:8px;margin-top:8px">

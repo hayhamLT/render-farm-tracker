@@ -1039,3 +1039,8 @@ label.lib-row { grid-template-columns: auto minmax(0, 1fr) auto 80px; padding-le
 .gs-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .gs-more summary { cursor: pointer; color: var(--text-2); font-size: 0.86rem; }
 @media (max-width: 760px) { .gs-body { padding-left: 16px; } .gs-cmd { grid-template-columns: 1fr; } }
+.enroll-files.done { background: none; border-color: var(--border); gap: 10px; }
+.enroll-files.done > .icon { color: var(--ok); width: 18px; height: 18px; flex: none; }
+.enroll-files a.btn { text-decoration: none; }
+.gs-saved { display: inline-flex; align-items: center; gap: 7px; font-size: 0.84rem; color: var(--text-2); }
+.gs-saved .icon { width: 14px; height: 14px; color: var(--ok); }
