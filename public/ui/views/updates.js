@@ -194,7 +194,8 @@ export function UpdatesView() {
       <section class="card ulist">
         <div class="ulist-head">
           <label class="ur-check"><input type="checkbox" aria-label="Select all apps with updates"
-            checked=${available.length && available.filter((m) => m.behind.length).every((m) => selectedApps.value.has(m.p.key))}
+            disabled=${!available.some((m) => m.behind.length)}
+            checked=${available.some((m) => m.behind.length) && available.filter((m) => m.behind.length).every((m) => selectedApps.value.has(m.p.key))}
             onChange=${(e) => { selectedApps.value = e.currentTarget.checked ? new Set(available.filter((m) => m.behind.length).map((m) => m.p.key)) : new Set(); }} /></label>
           <h2>Available updates</h2>
           <span class="dim">${plural(available.length, 'app')}</span>
