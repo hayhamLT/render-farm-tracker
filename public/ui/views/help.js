@@ -5,6 +5,7 @@ import { go } from '../lib/router.js';
 import { AGENT_NAME } from '../lib/domain.js';
 import { Icon, Badge } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
+import { GettingStarted } from '../components/getting-started.js';
 
 const topic = pref('help.topic', 'start');
 
@@ -22,14 +23,7 @@ const TOPICS = [
 const QA = ({ q, children }) => html`<details class="qa"><summary>${q}</summary><div>${children}</div></details>`;
 
 const CONTENT = {
-  start: () => html`
-    <p>The tracker's job is keeping every machine's software up to date. Each machine runs the <b>${AGENT_NAME}</b> agent, which reports what's installed, installs the updates you queue, and updates itself.</p>
-    <ol>
-      <li><b>Add a machine:</b> on the machine, double-click <span class="mono">Install Tracker Agent - Windows.cmd</span> or <span class="mono">Install Tracker Agent - Mac.command</span> from the installer share's <span class="mono">Tracker Agent</span> folder. Windows asks for administrator rights, a Mac asks for its admin password. That's the whole setup — the machine appears under <b>Machines</b> within a minute.</li>
-      <li><b>Or paste a command</b> from <button class="linkish" onClick=${() => go('settings')}>Settings → Enroll a machine</button>: enroll first, then the elevate command once as administrator. Without elevation, installs stop at a permission prompt and the machine shows <span class="tag warn">Not set up</span>.</li>
-      <li><b>Update</b> from the <button class="linkish" onClick=${() => go('updates')}>Updates</button> page: everything at once, a few apps together, or one app on machines you pick — now or scheduled.</li>
-    </ol>
-    <p class="dim">The same files can be regenerated any time (Settings → Enroll a machine → Save installers to the share); they carry the tracker's address and key.</p>`,
+  start: () => html`<${GettingStarted} />`,
   updates: () => html`
     <p>New versions are found automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and anything you add with a version check). <b>Updates</b> lists every app that's behind, its version jump, how many machines are current, and whether its installer is ready.</p>
     <ul>
