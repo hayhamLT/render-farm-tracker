@@ -1222,6 +1222,7 @@ if (-not ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal
 $dir = "$env:ProgramData\\TrackerAgent"
 $py = "C:\\Program Files\\Thinkbox\\Deadline10\\bin\\python3\\python.exe"
 if (-not (Test-Path $py)) { $py = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+if (-not $py) { throw "No Python found: install Deadline (it brings its own Python) or Python 3, then run this again." }
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Invoke-WebRequest "${base}/agent" -OutFile "$dir\\render_agent.py" -UseBasicParsing
 # Run elevated as SYSTEM so the agent works fully HEADLESS — no interactive login
@@ -1255,6 +1256,83 @@ Register-ScheduledTask -TaskName "TrackerAgentElevated" -Action $act -Trigger @(
 Start-ScheduledTask -TaskName "TrackerAgentElevated"
 Write-Host "Elevated tracker agent installed as SYSTEM (headless, highest privileges) on $env:COMPUTERNAME — runs with no login required; installs run without UAC."
 `;
+}
+
+// One-click installer files for the share (Settings → Enroll a machine → Save to the share):
+// double-click on a machine and it's enrolled AND elevated in one go. The tracker's address and
+// agent key are baked in, so regenerate them if either changes.
+function enrollFiles(base) {
+  const crlf = (t) => t.replace(/\r?\n/g, '\r\n');
+  const win = crlf(`@echo off
+REM ==== Render Farm Tracker: install the agent on this Windows machine ====
+REM Double-click, then click "Yes" when Windows asks for administrator rights. That's all.
+REM Tracker: ${base}   (re-running is safe: it updates the agent in place)
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+  echo Asking for administrator rights...
+  REM Run a local copy, so the elevated relaunch works even when started from the network share.
+  copy /y "%~f0" "%TEMP%\\Install-Tracker-Agent.cmd" >nul
+  powershell -NoProfile -Command "Start-Process -FilePath '%TEMP%\\Install-Tracker-Agent.cmd' -Verb RunAs"
+  exit /b
+)
+title Render Farm Tracker - agent setup
+echo Installing the Render Farm Tracker agent on %COMPUTERNAME% ...
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { irm ${base}/elevate.ps1 | iex; exit 0 } catch { Write-Host ''; Write-Host ('FAILED: ' + $_.Exception.Message) -ForegroundColor Red; exit 1 }"
+if %errorlevel% neq 0 (
+  echo.
+  echo Setup did not finish. Check that this machine can reach ${base}
+  echo and run this file again.
+  pause
+  exit /b 1
+)
+echo.
+echo Done. %COMPUTERNAME% appears in the tracker within a minute and installs updates with no prompts.
+timeout /t 15
+`);
+  const mac = `#!/bin/bash
+# ==== Render Farm Tracker: install the agent on this Mac ====
+# Double-click. Terminal opens and asks for this Mac's admin password once. That's all.
+# Tracker: ${base}   (re-running is safe: it updates the agent in place)
+clear
+echo "Installing the Render Farm Tracker agent on $(scutil --get ComputerName 2>/dev/null || hostname) ..."
+echo
+if ! curl -fsS --max-time 10 -o /dev/null "${base}/agent"; then
+  echo "Can't reach the tracker at ${base} — check the network, then run this again."
+  read -r -p "Press Return to close." _; exit 1
+fi
+if curl -fsSL "${base}/setup.sh" | sudo bash; then
+  echo
+  echo "Done. This Mac appears in the tracker within a minute and installs updates with no prompts."
+else
+  echo
+  echo "Setup did not finish — see the message above, then run this again."
+fi
+read -r -p "Press Return to close." _
+`;
+  const readme = crlf(`Render Farm Tracker — agent installers
+=====================================
+
+Double-click the file for the machine's OS. It installs the tracker agent and sets it up so
+updates install silently (no permission prompts) — enroll and elevate in one go.
+
+  Install Tracker Agent - Windows.cmd   click "Yes" on the administrator prompt
+  Install Tracker Agent - Mac.command   enter the Mac's admin password in Terminal
+
+The machine shows up on the tracker's Machines page within a minute. Running a file again on a
+machine that's already set up is safe — it just refreshes the agent.
+
+Tracker address baked into these files: ${base}
+If the tracker moves to another address, regenerate them: Settings → Enroll a machine →
+Save installers to the share.
+
+Generated ${new Date().toLocaleString()}.
+`);
+  return [
+    { name: 'Install Tracker Agent - Windows.cmd', content: win, mode: 0o755 },
+    { name: 'Install Tracker Agent - Mac.command', content: mac, mode: 0o755 },
+    { name: 'README.txt', content: readme, mode: 0o644 },
+  ];
 }
 
 // Staging batch (Windows): a node runs `mx1 package download <ident>` then
@@ -2665,6 +2743,28 @@ const server = http.createServer(async (req, res) => {
       db.prepare('DELETE FROM nodes WHERE id = ?').run(node.id);
       logEvent('node', `Node removed: ${node.hostname}`);
       return sendJson(res, 200, { ok: true });
+    }
+
+    // Write the one-click installer files into "<installer share>/Tracker Agent/".
+    if (req.method === 'POST' && p === '/api/enroll-files') {
+      const share = downloadDir();
+      if (!share) return sendJson(res, 503, { error: `the installer share (${config.downloadDir || SHARED_INSTALLERS}) isn't mounted on the tracker server` });
+      const base = `http://${lanAddress()}:${config.port}`;
+      const dir = path.join(share, 'Tracker Agent');
+      try {
+        await fs.promises.mkdir(dir, { recursive: true });
+        const written = [];
+        for (const f of enrollFiles(base)) {
+          const full = path.join(dir, f.name);
+          await fs.promises.writeFile(full, f.content);
+          try { await fs.promises.chmod(full, f.mode); } catch { /* SMB may ignore modes */ }
+          written.push(f.name);
+        }
+        logEvent('monitoring', `Agent installer files saved to ${dir} (tracker ${base})`);
+        return sendJson(res, 200, { ok: true, dir, base, files: written });
+      } catch (e) {
+        return sendJson(res, 500, { error: `couldn't write to ${dir}: ${e.message}` });
+      }
     }
 
     if (req.method === 'GET' && p === '/api/agent-setup') {

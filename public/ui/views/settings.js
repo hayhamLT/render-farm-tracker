@@ -111,7 +111,30 @@ function Commands() {
   const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast('Copied.', 'success', 2000); } catch { toast('Copy failed — select the text instead.', 'error'); } };
   if (!setup) return html`<p class="dim">Loading…</p>`;
   if (!u) return html`<p class="dim">Couldn't load the enrollment commands.</p>`;
-  return html`<div class="stack" style="gap:8px">${rows.map(([l, c]) => html`<div key=${l} class="cmd"><span class="dim">${l}</span><code>${c}</code><button class="btn sm ghost icon" aria-label=${`Copy ${l}`} onClick=${() => copy(c)}><${Icon} name="copy" /></button></div>`)}</div>`;
+  return html`<div class="stack" style="gap:12px">
+    <${EnrollFiles} url=${u} />
+    <p class="dim" style="margin:4px 0 0;font-size:.84rem">Or paste a command on the machine:</p>
+    <div class="stack" style="gap:8px">${rows.map(([l, c]) => html`<div key=${l} class="cmd"><span class="dim">${l}</span><code>${c}</code><button class="btn sm ghost icon" aria-label=${`Copy ${l}`} onClick=${() => copy(c)}><${Icon} name="copy" /></button></div>`)}</div>
+  </div>`;
+}
+
+// Double-click installers on the share: enroll + elevate in one go, tracker address baked in.
+function EnrollFiles({ url }) {
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(null);
+  const save = async () => {
+    setBusy(true);
+    try { const r = await post('/api/enroll-files'); setSaved(r); toast('Installer files saved to the share.', 'success'); } catch (e) { toast(e.message, 'error', 8000); }
+    setBusy(false);
+  };
+  return html`<div class="enroll-files">
+    <div class="grow">
+      <b>One-click installers</b>
+      <p class="dim" style="margin:2px 0 0;font-size:.84rem">Double-click on a machine to install the agent and set up silent installs in one go — <span class="mono">Install Tracker Agent - Windows.cmd</span> and <span class="mono">Install Tracker Agent - Mac.command</span>, pointing at <span class="mono">${url}</span>.</p>
+      ${saved && html`<p style="margin:6px 0 0;font-size:.84rem"><${Icon} name="check" /> Saved to <span class="mono">${saved.dir}</span></p>`}
+    </div>
+    <button class="btn primary" disabled=${busy} onClick=${save}><${Icon} name=${busy ? 'spinner' : 'folder'} cls=${busy ? 'spin' : ''} />${saved ? 'Save again' : 'Save installers to the share'}</button>
+  </div>`;
 }
 
 export function SettingsView() {
@@ -189,7 +212,7 @@ export function SettingsView() {
 
     <section id="set-enroll" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="beacon" />Enroll a machine</h2>
-      <p class="dim" style="margin:0">Run the enroll command on the machine, then the elevate command once as an administrator so installs never stop at a permission prompt.</p>
+      <p class="dim" style="margin:0">Add a machine to the tracker: run the one-click installer from the share, or the enroll command and then the elevate command once as an administrator, so installs never stop at a permission prompt.</p>
       <${Commands} />
     </section>
     </div>

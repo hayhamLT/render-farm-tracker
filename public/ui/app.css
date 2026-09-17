@@ -916,3 +916,7 @@ label.lib-row { grid-template-columns: auto minmax(0, 1fr) auto 80px; padding-le
 /* A button with the "icon" class must keep button height (the .icon rule sizes SVGs). */
 .btn.icon { height: 34px; flex: none; }
 .btn.sm.icon { height: 28px; }
+.enroll-files { display: flex; align-items: center; gap: 16px; padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid rgba(34, 211, 238, 0.3); background: var(--accent-soft); }
+.enroll-files b { font-weight: 650; }
+.enroll-files .icon { width: 14px; height: 14px; vertical-align: -2px; color: var(--ok); }
+.enroll-files .btn .icon { color: inherit; }
