@@ -19,6 +19,7 @@ const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
 const { createRollouts } = require('./lib/rollouts');
 const { createAsk } = require('./lib/ask');
+const installerFiles = require('./lib/installer_files');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -198,6 +199,7 @@ function fetchToInstallers(dlId, fileUrl, filename, destDir) {
       out.on('finish', () => out.close(() => {
         fs.renameSync(tmp, dest);
         rec.status = 'done';
+        installerLister.refresh();
         logEvent('package', `Downloaded installer from URL: ${filename} (${(rec.received / 1048576).toFixed(1)} MB)`);
       }));
       out.on('error', (e) => fail(e.message));
@@ -774,52 +776,27 @@ function resolveInstaller(filename) {
 // SHA256 of an installer, cached by path+mtime+size so we hash a big file once.
 const hashCache = new Map();
 function installerSha256(fullPath) {
+  // Known checksum, or null while it's computed in the background (lib/installer_files.js) —
+  // never a synchronous read of a multi-GB file on the request path.
+  return installerFiles.sha256(fullPath);
+}
+
+// Installer files across all source folders (deduped by name, first folder wins). The listing
+// is refreshed in the background (the share can stall under load) and returned immediately.
+const installerLister = installerFiles.createLister({ dirs: () => installerDirs(), localDir: INSTALLERS_DIR });
+installerLister.refresh();
+function cachedInstallerFiles() { return installerLister.list(30000); }
+// Start checksums for installers that queued jobs will need, so they're ready when a machine asks.
+setInterval(() => {
   try {
-    const st = fs.statSync(fullPath);
-    const key = `${fullPath}:${st.size}:${st.mtimeMs}`;
-    const cached = hashCache.get(fullPath);
-    if (cached && cached.key === key) return cached.sha;
-    // Stream the file in chunks — installers exceed Node's 2GB Buffer limit.
-    const h = crypto.createHash('sha256');
-    const fd = fs.openSync(fullPath, 'r');
-    try {
-      const buf = Buffer.allocUnsafe(8 * 1024 * 1024);
-      let n;
-      while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
-        h.update(n === buf.length ? buf : buf.subarray(0, n));
-      }
-    } finally { fs.closeSync(fd); }
-    const sha = h.digest('hex');
-    hashCache.set(fullPath, { key, sha });
-    return sha;
-  } catch { return null; }
-}
-
-// List installer files across all sources (deduped by name, cache wins).
-// The dashboard state is rebuilt up to once a second for live updates; listing the installer
-// folders (one of them an SMB share) that often is wasteful and, if the share stalls, risky.
-// State uses a 30 s cached listing; deploys and downloads still check the disk directly.
-let _installerListCache = { at: 0, files: [] };
-function cachedInstallerFiles() {
-  if (Date.now() - _installerListCache.at > 30000) _installerListCache = { at: Date.now(), files: listInstallerFiles() };
-  return _installerListCache.files;
-}
-
-function listInstallerFiles() {
-  const seen = new Map();
-  for (const dir of installerDirs()) {
-    let entries = [];
-    try { entries = fs.readdirSync(dir); } catch { continue; }
-    for (const f of entries) {
-      if (f.startsWith('.') || f.endsWith('.part') || seen.has(f)) continue;
-      const full = path.join(dir, f);
-      let st; try { st = fs.statSync(full); } catch { continue; }
-      if (!st.isFile()) continue;
-      seen.set(f, { name: f, size: st.size, source: dir === INSTALLERS_DIR ? 'cache' : dir });
+    for (const r of db.prepare(`SELECT DISTINCT p.filename FROM jobs j JOIN packages p ON p.id = j.package_id
+                                 WHERE j.status = 'pending' AND p.kind != 'command' AND p.filename != ''`).all()) {
+      const full = resolveInstaller(r.filename);
+      if (full) installerSha256(full);
     }
-  }
-  return [...seen.values()];
-}
+  } catch (e) { console.error('checksum prewarm failed:', e.message); }
+}, 60 * 1000).unref();
+function listInstallerFiles() { return installerLister.list(15000); }
 
 // Find an installer already staged in the repo (cache/share) matching a product
 // + OS (+ optional version). Industry-standard "is it in the repo already?" check.
@@ -1790,16 +1767,24 @@ function handleCheckin(body) {
       // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
       // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
       if (rolloutHalted(next.product_key, next.version)) { flagRolloutHalt(next.product_key, next.version); break; }
-      if (dispatchSlotFree(next)) jobs.push(next);
+      if (!dispatchSlotFree(next)) break;
+      // Hand out an installer job only once its checksum is known (computed in the background
+      // the first time — a big installer can take a minute); until then it stays queued.
+      if (next.kind !== 'command' && next.filename) {
+        const full = resolveInstaller(next.filename);
+        if (full && !installerSha256(full)) break;
+      }
+      jobs.push(next);
       break;
     }
   }
 
-  // Attach the installer's SHA256 so the agent can verify integrity before running.
+  // Attach the installer's SHA256 (when known) so the agent verifies integrity before running.
   for (const j of jobs) {
     if (j.kind !== 'command' && j.filename) {
       const full = resolveInstaller(j.filename);
-      if (full) j.sha256 = installerSha256(full);
+      const sha = full && installerSha256(full);
+      if (sha) j.sha256 = sha;
     }
   }
 
@@ -1925,6 +1910,7 @@ const server = http.createServer(async (req, res) => {
         req.pipe(out);
         out.on('finish', () => out.close(() => {
           fs.renameSync(tmp, dest);
+          installerLister.refresh();
           const mb = (fs.statSync(dest).size / 1048576).toFixed(0);
           logEvent('package', `Installer staged to server by a node: ${filename} (${mb} MB)`);
           sendJson(res, 200, { ok: true, filename });
@@ -2135,6 +2121,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && p === '/api/installer-files') {
+      await installerLister.refresh();
       return sendJson(res, 200, { files: listInstallerFiles(), sources: config.installerSources });
     }
 
