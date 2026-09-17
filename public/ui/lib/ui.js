@@ -32,6 +32,13 @@ export function openDialog(render, { title, wide = false } = {}) {
   });
 }
 
+// Side sheet: a panel that slides in from the right (for flows with more room than a dialog).
+export function openSheet(render, { title, subtitle, width = 560 } = {}) {
+  return new Promise((resolve) => {
+    dialog.value = { kind: 'sheet', title, subtitle, width, render, resolve: (v) => { dialog.value = null; resolve(v); } };
+  });
+}
+
 // ---- menus ----
 // A popover anchored to an element: menu.value = { x, y, items:[{label, icon, danger, disabled, onSelect}|'-'] }
 export const menu = signal(null);

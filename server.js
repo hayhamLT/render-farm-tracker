@@ -15,6 +15,7 @@ const { execFile } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
+const metrics = require('./lib/metrics');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -1807,6 +1808,7 @@ function handleCheckin(body) {
 
 // ----------------------------------------------------------------- router --
 const live = createLive({ buildState: () => fullState() });
+metrics.startSampling({ offlineAfterMs: (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -1844,6 +1846,14 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(302, { Location: config.publicUrl });
         return res.end();
       }
+      // The dashboard lives at ui/. A RELATIVE redirect, so it resolves under the watcher's
+      // /tracker/ prefix as well as directly on :4400.
+      res.writeHead(302, { Location: 'ui/', 'Cache-Control': 'no-store' });
+      return res.end();
+    }
+    // The previous dashboard, kept as a fallback while the new one settles in.
+    if (req.method === 'GET' && (p === '/classic' || p === '/classic/')) {
+      if (p === '/classic/') { res.writeHead(301, { Location: '../classic' }); return res.end(); }
       return serveStatic(res, 'index.html');
     }
     // A directory URL serves its index.html (the dashboard lives at /ui/).
@@ -1968,6 +1978,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/state') return sendJson(res, 200, fullState());
     // Live updates stream (Server-Sent Events): a snapshot, then only what changes.
     if (req.method === 'GET' && p === '/api/live') return live.handle(req, res);
+    // Trend history for charts (sampled every minute): farm totals + per-machine GPU load.
+    if (req.method === 'GET' && p === '/api/metrics') return sendJson(res, 200, metrics.query(url.searchParams.get('hours')));
 
     // Dashboard visibility — toggle a node's hidden state (persisted globally in
     // config.hiddenNodes, which fullState() filters out). GET lists the hidden

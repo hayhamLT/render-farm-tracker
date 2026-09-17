@@ -8,6 +8,7 @@ import { toast, openDialog } from '../lib/ui.js';
 import { ago } from '../lib/format.js';
 import * as act from '../lib/actions.js';
 import { Icon, Empty } from '../components/common.js';
+import { PageHeader } from '../components/page.js';
 
 // ---------------------------------------------------------------- folder picker
 function FolderPicker({ start, close }) {
@@ -104,17 +105,21 @@ export function SettingsView() {
     try { await post('/api/settings', body); toast(msg, 'success'); } catch (e) { toast(e.message, 'error'); }
     refresh();
   };
-  return html`<div class="page stack settings">
-    <div class="page-head"><h1>Settings</h1></div>
+  const NAV = [['downloads', 'Installer downloads', 'folder'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Enroll a machine', 'beacon']];
+  return html`<div class="page settings-page">
+    <${PageHeader} title="Settings" subtitle="How the tracker downloads, alerts, schedules and backs up." />
+    <div class="settings-layout">
+    <nav class="settings-nav">${NAV.map(([id, label, icon]) => html`<a key=${id} href="#/settings" onClick=${(e) => { e.preventDefault(); document.getElementById('set-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}><${Icon} name=${icon} />${label}</a>`)}</nav>
+    <div class="stack settings">
 
-    <section class="card card-pad stack">
+    <section id="set-downloads" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="folder" />Installer downloads</h2>
       <${FolderSetting} field="downloadDir" label="Apps folder" hint="Where the tracker saves app installers it downloads." value=${s.downloadDir} />
       <${FolderSetting} field="downloadDirPlugins" label="Plug-ins folder" hint="Leave empty to use the apps folder." value=${s.downloadDirPlugins} fallback=${s.downloadDir} />
       <${FolderSetting} field="downloadDirScripts" label="Scripts folder" hint="Leave empty to use the apps folder." value=${s.downloadDirScripts} fallback=${s.downloadDir} />
     </section>
 
-    <section class="card card-pad stack">
+    <section id="set-slack" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="alert" />Slack alerts</h2>
       <p class="dim" style="margin:0">Failed installs and paused rollouts are posted to this incoming webhook. Leave empty to turn alerts off.</p>
       <div class="row" style="flex-wrap:nowrap">
@@ -128,7 +133,7 @@ export function SettingsView() {
       </div>
     </section>
 
-    <section class="card card-pad stack">
+    <section id="set-window" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="clock" />Auto-deploy window</h2>
       <p class="dim" style="margin:0">Limits automatic rollouts (Catalog → Auto-deploy) to these hours. Updates you start yourself run right away, and installs never run under a render either way.</p>
       <div class="row">
@@ -140,7 +145,7 @@ export function SettingsView() {
       </div>
     </section>
 
-    <section class="card card-pad stack">
+    <section id="set-vendor" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="download" />Vendor downloads</h2>
       <p class="dim" style="margin:0">Every idle machine installs from the tracker at once. Updates that download straight from Adobe or Maxon (RUM, Maxon App) are limited to this many machines at a time so the vendor doesn't throttle the farm.</p>
       <div class="row"><input class="field" type="number" min="1" max="50" style="width:90px" value=${concVal} onInput=${(e) => setConc(Number(e.currentTarget.value))} />
@@ -148,17 +153,19 @@ export function SettingsView() {
         <button class="btn" disabled=${conc == null || conc === s.maxConcurrentInstalls} onClick=${() => { saveSettings({ maxConcurrentInstalls: concVal }, 'Saved.'); setConc(null); }}>Save</button></div>
     </section>
 
-    <section class="card card-pad stack">
+    <section id="set-backups" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="server" />Backups</h2>
       <p class="dim" style="margin:0">The database and config are backed up at startup and nightly, outside the repo${s.lastBackup ? ` — last ${ago(s.lastBackup.at, s.now)}` : ''}. Restore with <code>./restore-db.sh</code>.</p>
       ${backups && backups.backups && backups.backups.length ? html`<ul class="plain-list dim" style="font-size:.82rem">${backups.backups.slice(0, 5).map((b) => html`<li key=${b.file || b.db || b.name}><span class="mono">${b.file || b.db || b.name}</span><span style="margin-left:auto">${b.at ? ago(b.at, s.now) : ''}</span></li>`)}</ul>` : null}
       <div><button class="btn" onClick=${act.backupNow}><${Icon} name="download" />Back up now</button></div>
     </section>
 
-    <section class="card card-pad stack">
+    <section id="set-enroll" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="beacon" />Enroll a machine</h2>
       <p class="dim" style="margin:0">Run the enroll command on the machine, then the elevate command once as an administrator so installs never stop at a permission prompt.</p>
       <${Commands} />
     </section>
+    </div>
+    </div>
   </div>`;
 }

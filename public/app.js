@@ -267,7 +267,9 @@ function productStatus(node, product) {
 }
 
 async function api(method, url, body) {
-  const res = await fetch(url, {
+  // Relative URLs ("api/state"), so this classic dashboard works at /classic both directly and
+  // behind the deadlinefarm.com /tracker/ proxy (which no longer injects a URL-rewriting shim).
+  const res = await fetch(String(url).replace(/^\//, ''), {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,

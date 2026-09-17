@@ -4,6 +4,7 @@ import { pref } from '../lib/ui.js';
 import { go } from '../lib/router.js';
 import { AGENT_NAME } from '../lib/domain.js';
 import { Icon, Badge } from '../components/common.js';
+import { PageHeader } from '../components/page.js';
 
 const topic = pref('help.topic', 'start');
 
@@ -77,8 +78,8 @@ const CONTENT = {
 };
 
 export function HelpView() {
-  return html`<div class="page help">
+  return html`<div class="page"><${PageHeader} title="Help" subtitle="How the tracker works, and what to do when something looks wrong." /><div class="help">
     <aside class="help-nav">${TOPICS.map(([k, l, i]) => html`<button key=${k} class=${topic.value === k ? 'on' : ''} onClick=${() => { topic.value = k; }}><${Icon} name=${i} />${l}</button>`)}</aside>
     <article class="card card-pad help-body"><h1>${(TOPICS.find((t) => t[0] === topic.value) || TOPICS[0])[1]}</h1>${(CONTENT[topic.value] || CONTENT.start)()}</article>
-  </div>`;
+  </div></div>`;
 }

@@ -13,7 +13,9 @@ import {
   isTracked, newestPackage, agentOutdated, canShutdown, nodeIssues, AGENT_NAME,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
-import { Icon, OsStatus, ProductLogo, Badge, Kpi, Bar, Empty } from '../components/common.js';
+import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
+import { PageHeader } from '../components/page.js';
+import { Sparkline, AreaChart, StackBar, Num, useMetrics, metrics, STATE_COLOR } from '../components/viz.js';
 
 const view = pref('machines.view', 'grid');
 const quick = pref('machines.quick', 'all');
@@ -145,39 +147,74 @@ const toggleSel = (id) => {
 };
 
 // ---------------------------------------------------------------- grid card
-function MachineCard({ m, model }) {
+// The one state a machine is shown in (same rules as the Overview map).
+function cardState(m) {
   const { node: n, activity: a, dl } = m;
+  if (!n.online) return { key: 'offline', label: 'Offline' };
+  if (dl && dl.state === 'down') return { key: 'deadline', label: 'Out of Deadline' };
+  if (['installing', 'downloading'].includes(a.key)) return { key: 'installing', label: a.label, detail: a.detail };
+  if (a.key === 'queued') return { key: 'queued', label: 'Queued', detail: a.detail };
+  if (a.key === 'rendering') return { key: 'rendering', label: 'Rendering' };
+  if (n.pending_reboot) return { key: 'reboot', label: 'Reboot pending' };
+  return { key: 'idle', label: 'Idle' };
+}
+
+const gpuSeries = (id) => {
+  const series = metrics.value && metrics.value.nodes && metrics.value.nodes[id];
+  return series ? series.map((p) => p[1]) : [];
+};
+
+function MachineCard({ m, model }) {
+  const { node: n, dl, behind } = m;
   const sel = selected.value.has(n.id);
-  return html`<article class=${`card mcard ${n.online ? '' : 'offline'} ${sel ? 'selected' : ''}`} onClick=${() => go('machines', n.hostname)}>
-    <header class="mcard-head">
-      <input type="checkbox" aria-label=${`Select ${n.hostname}`} checked=${sel} onClick=${(e) => { e.stopPropagation(); toggleSel(n.id); }} />
+  const st = cardState(m);
+  const color = STATE_COLOR[st.key];
+  const tracked = model.tracked.filter((p) => productStatus(n, p).status !== 'na');
+  const current = tracked.filter((p) => ['uptodate', 'selfupdate'].includes(productStatus(n, p).status)).length;
+  const gpu = n.online && n.gpu_util != null ? n.gpu_util : null;
+  return html`<article class=${`card mcard2 s-${st.key} ${sel ? 'selected' : ''} ${selected.value.size ? 'selecting' : ''}`} style=${`--state:${color}`}
+    onClick=${() => (selected.value.size ? toggleSel(n.id) : go('machines', n.hostname))}>
+    <header class="mc-head">
+      <label class="mc-check" onClick=${(e) => e.stopPropagation()}><input type="checkbox" aria-label=${`Select ${n.hostname}`} checked=${sel} onChange=${() => toggleSel(n.id)} /></label>
       <${OsStatus} node=${n} />
-      <span class="mcard-name">${n.hostname}</span>
-      <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => { e.stopPropagation(); openMenu(e.currentTarget, machineMenuItems(n, dl)); }}><${Icon} name="more" /></button>
+      <div class="mc-title"><b>${n.hostname}</b><span class="mc-state">${st.label}${st.detail ? html` <span class="muted">· ${st.detail}</span>` : ''}</span></div>
+      <button class="btn ghost sm icon mc-more" aria-label="Machine actions" onClick=${(e) => { e.stopPropagation(); openMenu(e.currentTarget, machineMenuItems(n, dl)); }}><${Icon} name="more" /></button>
     </header>
-    <div class="mcard-badges">
-      <${ActivityBadge} a=${a} />
+
+    <div class="mc-gpu">
+      <div class="mc-gpu-num">${gpu != null ? html`<${Num} value=${gpu} /><small>%</small>` : html`<span class="dim">—</span>`}<span class="mc-gpu-label">GPU</span></div>
+      <${Sparkline} values=${gpuSeries(n.id)} width=${150} height=${36} color=${n.online ? 'var(--violet)' : 'var(--text-3)'} title="GPU load, last 48 h" />
+    </div>
+
+    <div class="mc-pills">
+      ${dl ? (dl.state === 'ok'
+        ? html`<${Badge} tone="ok" icon="film" title=${dl.detail}>Deadline<//>`
+        : html`<${Badge} tone=${dl.state === 'down' ? 'bad' : 'warn'} icon="alert" title=${dl.detail + (dl.canFix ? ' Click to fix.' : '')}
+            onClick=${dl.canFix ? (e) => { e.stopPropagation(); act.fixDeadline([n]); } : null}>${dl.state === 'down' ? 'Deadline down' : 'No auto-start'}<//>`) : null}
+      ${behind.length
+        ? html`<${Badge} tone="info" icon="up" title=${behind.map((p) => p.name).join(', ')} onClick=${(e) => { e.stopPropagation(); go('machines', n.hostname); }}>${plural(behind.length, 'update')}<//>`
+        : tracked.length ? html`<${Badge} tone="ok" icon="check">Up to date<//>` : null}
+      ${n.online && n.pending_reboot ? html`<${Badge} tone="warn" icon="refresh" title="Windows has a restart pending">Reboot<//>` : null}
+      ${n.elevated === 0 ? html`<${Badge} tone="warn" icon="shieldOff" title="Needs elevation">Not ready<//>` : null}
       <${WakeIndicator} node=${n} />
-      <${DeadlineBadge} node=${n} dl=${dl} />
-      ${n.online && n.pending_reboot ? html`<${Badge} tone="warn" icon="refresh" title="Windows has a restart pending">reboot<//>` : null}
-      ${n.elevated === 0 ? html`<${Badge} tone="warn" icon="shieldOff" title="Needs elevation — installs would stop at a permission prompt">not ready<//>` : null}
     </div>
-    <div class="mcard-meta">
-      <span title=${n.gpu || ''}>${n.gpu ? n.gpu.replace(/NVIDIA GeForce |NVIDIA /g, '') : '—'}</span>
-      <span>seen ${ago(n.last_seen, model.s.now)}</span>
+
+    ${tracked.length ? html`<${StackBar} height=${4} total=${tracked.length} title=${`${current} of ${tracked.length} apps current`} parts=${[
+      { value: current, color: 'var(--ok)', label: 'current' },
+      { value: behind.length, color: 'var(--info)', label: 'behind' },
+    ]} />` : null}
+
+    <footer class="mc-foot">
+      <span title=${n.gpu || ''}>${n.gpu ? n.gpu.replace(/NVIDIA GeForce |NVIDIA /g, '') : n.os === 'macos' ? 'Apple silicon' : '—'}</span>
+      <span>${ago(n.last_seen, model.s.now)}</span>
+    </footer>
+
+    <div class="mc-quick" onClick=${(e) => e.stopPropagation()}>
+      ${n.online
+        ? html`<button class="btn sm" onClick=${() => act.restart([n])}><${Icon} name="refresh" />Restart</button>`
+        : html`<button class="btn sm primary" disabled=${n.wake && n.wake.state === 'waking'} onClick=${() => act.wake([n])}><${Icon} name="power" />Wake</button>`}
+      <button class="btn sm" onClick=${() => go('machines', n.hostname)}>Details<${Icon} name="chevron" /></button>
     </div>
-    <ul class="mcard-products">
-      ${model.tracked.map((p) => {
-        const st = productStatus(n, p);
-        if (st.status === 'na') return null;
-        return html`<li key=${p.key}>
-          <${ProductLogo} product=${p} size=${16} />
-          <span class="pname">${p.name}</span>
-          <span class="pver mono">${st.version || '—'}</span>
-          <${StatusChip} s=${model.s} node=${n} product=${p} compact />
-        </li>`;
-      })}
-    </ul>
   </article>`;
 }
 
@@ -199,7 +236,7 @@ function MachineTable({ rows, model }) {
         <td class="nowrap"><span class="row" style="gap:10px;flex-wrap:nowrap"><${OsStatus} node=${n} /><b>${n.hostname}</b><${WakeIndicator} node=${n} /></span></td>
         <td><${ActivityBadge} a=${a} /></td>
         <td>${dl ? (dl.state === 'ok' ? html`<span style="color:var(--ok)" title=${dl.detail}><${Icon} name="check" /></span>` : html`<${DeadlineBadge} node=${n} dl=${dl} />`) : html`<span class="dim">—</span>`}</td>
-        <td>${n.online && n.gpu_util != null ? html`<span class="row" style="flex-wrap:nowrap;gap:8px"><${Bar} pct=${n.gpu_util} /><span class="mono dim">${n.gpu_util}%</span></span>` : html`<span class="dim">—</span>`}</td>
+        <td><span class="row" style="flex-wrap:nowrap;gap:8px"><${Sparkline} values=${gpuSeries(n.id)} width=${90} height=${22} color="var(--violet)" /><span class="mono" style="width:38px;text-align:right">${n.online && n.gpu_util != null ? `${n.gpu_util}%` : '—'}</span></span></td>
         <td>${behind.length ? html`<${Badge} tone="info" title=${behind.map((p) => p.name).join(', ')}>${behind.length}<//>` : html`<span class="dim">0</span>`}</td>
         <td class="hide-sm mono" style=${agentOutdated(model.s, n) ? 'color:var(--warn)' : ''} title=${agentOutdated(model.s, n) ? `Latest is ${model.s.latestAgentVersion}` : ''}>${n.agent_version || '—'}</td>
         <td class="hide-sm mono dim">${n.gpu_driver || '—'}</td>
@@ -280,6 +317,13 @@ function MachineDrawer({ hostname, model }) {
     <div class="content">
       ${issues.length ? html`<div class="row">${issues.map((i) => html`<${Badge} tone=${i.tone}>${i.label}<//>`)}</div>` : html`<div class="banner info"><${Icon} name="check" />Nothing needs attention on this machine.</div>`}
 
+      <section class="card card-pad" style="padding:12px 14px">
+        <div class="row" style="justify-content:space-between;margin-bottom:6px"><h3 class="section-title" style="margin:0">GPU load · 48 h</h3>
+          <span class="mono">${n.online && n.gpu_util != null ? `${n.gpu_util}% now` : 'offline'}</span></div>
+        <${AreaChart} rows=${((metrics.value && metrics.value.nodes && metrics.value.nodes[n.id]) || []).map((p) => ({ ts: p[0], gpu: p[1] ?? 0 }))} height=${120} max=${100}
+          series=${[{ key: 'gpu', label: 'GPU load', color: '#a78bfa' }]} format=${(v) => `${Math.round(v)}%`} />
+      </section>
+
       <section>
         <h3 class="section-title">Machine</h3>
         <dl class="kv">
@@ -350,6 +394,7 @@ function MachineDrawer({ hostname, model }) {
 // ---------------------------------------------------------------- page
 export function MachinesView() {
   const model = useMachineModel();
+  useMetrics(48);
   useEffect(() => {
     const onKey = (e) => {
       if (isTyping(e)) return;
@@ -371,36 +416,27 @@ export function MachinesView() {
     .sort(SORTS[sortBy.value] || SORTS.name);
 
   const online = nodes.filter((m) => m.node.online).length;
-  const rendering = counts.rendering;
-  const updating = counts.updating;
-  const dlDown = nodes.filter((m) => m.dl && m.dl.state === 'down').length;
-  const dlFragile = nodes.filter((m) => m.dl && m.dl.state === 'fragile').length;
-  const win = nodes.filter((m) => m.node.os === 'windows').length;
   const setQuick = (k) => { quick.value = quick.value === k ? 'all' : k; };
+  const TONE = { online: 'var(--ok)', offline: 'var(--text-3)', rendering: 'var(--violet)', updating: 'var(--accent)', behind: 'var(--info)', deadline: 'var(--bad-text)', reboot: 'var(--warn)' };
 
   const drawerHost = route.value.name === 'machines' ? route.value.params[0] : null;
 
   return html`<div class="page">
-    <div class="kpis">
-      <${Kpi} label="Machines" value=${nodes.length} sub=${`${win} Windows · ${nodes.length - win} Mac`} onClick=${() => { quick.value = 'all'; }} active=${quick.value === 'all'} />
-      <${Kpi} label="Online" value=${`${online}/${nodes.length}`} tone=${online === nodes.length ? 'ok' : 'warn'} sub=${online === nodes.length ? 'all reachable' : `${nodes.length - online} offline`} onClick=${() => setQuick('offline')} active=${quick.value === 'offline'} />
-      <${Kpi} label="Rendering" value=${rendering} sub="GPU busy right now" onClick=${() => setQuick('rendering')} active=${quick.value === 'rendering'} />
-      <${Kpi} label="Updating" value=${updating} sub=${updating ? 'installing or queued' : 'nothing running'} onClick=${() => setQuick('updating')} active=${quick.value === 'updating'} />
-      <${Kpi} label="Deadline issues" value=${dlDown + dlFragile} tone=${dlDown ? 'bad' : dlFragile ? 'warn' : 'ok'} sub=${dlDown || dlFragile ? `${dlDown} down · ${dlFragile} no auto-start` : 'all workers healthy'} onClick=${() => setQuick('deadline')} active=${quick.value === 'deadline'} />
-      <${Kpi} label="Behind" value=${counts.behind} tone=${counts.behind ? 'warn' : 'ok'} sub=${counts.behind ? 'machines with updates' : 'everything current'} onClick=${() => setQuick('behind')} active=${quick.value === 'behind'} />
-    </div>
+    <${PageHeader} title="Machines" subtitle=${`${online} of ${nodes.length} online · ${counts.rendering} rendering · ${counts.updating} updating${counts.deadline ? ` · ${counts.deadline} with Deadline issues` : ''}`}>
+      <label class="search"><${Icon} name="search" /><input id="machine-search" class="field" placeholder="Search name, GPU or IP   /" value=${search.value} onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:260px" /></label>
+    </${PageHeader}>
 
-    <div class="toolbar">
-      <div class="row" style="gap:6px">
-        ${QUICK.map(([k, label]) => html`<button key=${k} class=${'chip' + (quick.value === k ? ' on' : '')} onClick=${() => { quick.value = k; }}>${label}${k !== 'all' ? html` <span class="n">${counts[k]}</span>` : ''}</button>`)}
+    <div class="filterbar">
+      <div class="pills" role="tablist" aria-label="Filter machines">
+        ${QUICK.map(([k, label]) => html`<button key=${k} role="tab" aria-selected=${quick.value === k} class=${'pill' + (quick.value === k ? ' on' : '')} onClick=${() => setQuick(k)} disabled=${k !== 'all' && !counts[k]}>
+          ${k !== 'all' ? html`<i style=${`background:${TONE[k]}`}></i>` : null}${label}<span class="n">${k === 'all' ? nodes.length : counts[k]}</span></button>`)}
       </div>
       <span class="grow"></span>
-      <label class="search"><${Icon} name="search" /><input id="machine-search" class="field" placeholder="Search machines, GPUs, IPs…  /" value=${search.value} onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:240px" /></label>
       <div class="seg" role="group" aria-label="Operating system">
         ${[['all', 'All'], ['windows', 'Windows'], ['macos', 'Mac']].map(([k, l]) => html`<button key=${k} class=${osFilter.value === k ? 'on' : ''} onClick=${() => { osFilter.value = k; }}>${l}</button>`)}
       </div>
       <select class="field" aria-label="Sort" value=${sortBy.value} onChange=${(e) => { sortBy.value = e.currentTarget.value; }}>
-        <option value="name">Sort: name</option><option value="behind">Sort: most behind</option><option value="gpu">Sort: GPU load</option><option value="seen">Sort: last seen</option><option value="os">Sort: OS</option>
+        <option value="name">Name</option><option value="behind">Most updates</option><option value="gpu">GPU load</option><option value="seen">Last seen</option><option value="os">OS</option>
       </select>
       <div class="seg" role="group" aria-label="View">
         <button class=${view.value === 'grid' ? 'on' : ''} title="Cards" onClick=${() => { view.value = 'grid'; }}><${Icon} name="grid" /></button>
@@ -415,7 +451,7 @@ export function MachinesView() {
     ${!nodes.length ? html`<${Empty}>No machines yet — enroll one from Help → Getting started.<//>`
       : !rows.length ? html`<${Empty}>No machines match these filters.<//>`
       : view.value === 'table' ? html`<${MachineTable} rows=${rows} model=${model} />`
-      : html`<div class="mgrid">${rows.map((m) => html`<${MachineCard} key=${m.node.id} m=${m} model=${model} />`)}</div>`}
+      : html`<div class="mgrid2">${rows.map((m) => html`<${MachineCard} key=${m.node.id} m=${m} model=${model} />`)}</div>`}
 
     <${BulkBar} model=${model} />
     ${drawerHost && html`<${MachineDrawer} hostname=${drawerHost} model=${model} />`}

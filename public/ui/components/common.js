@@ -91,6 +91,14 @@ export function DialogHost() {
       </div>
     </div>`;
   }
+  if (d.kind === 'sheet') {
+    return html`<div class="drawer-back" onMouseDown=${() => d.resolve(null)}></div>
+      <aside class="drawer sheet" role="dialog" aria-modal="true" aria-label=${d.title} style=${`width:min(${d.width}px, 100vw)`}>
+        <header><div class="grow" style="min-width:0"><h2>${d.title}</h2>${d.subtitle && html`<p class="muted" style="margin:2px 0 0;font-size:.86rem">${d.subtitle}</p>`}</div>
+          <button class="btn ghost icon" aria-label="Close" onClick=${() => d.resolve(null)}><${Icon} name="close" /></button></header>
+        <div class="content">${d.render(d.resolve)}</div>
+      </aside>`;
+  }
   return html`<div class="overlay" onMouseDown=${backdrop}>
     <div class=${'dialog' + (d.wide ? ' wide' : '')} role="dialog" aria-modal="true" aria-label=${d.title}>
       ${d.title && html`<header>${d.title}</header>`}

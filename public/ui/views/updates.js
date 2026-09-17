@@ -5,16 +5,18 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import { signal } from '@preact/signals-core';
 import { farm, refresh } from '../lib/store.js';
 import { get, post, put } from '../lib/api.js';
-import { pref, toast } from '../lib/ui.js';
+import { pref, toast, openSheet } from '../lib/ui.js';
 import { ago, elapsed, plural, cmpVersion } from '../lib/format.js';
 import { go } from '../lib/router.js';
 import {
-  normalizeProducts, isTracked, appliesToOS, latestForOS, latestInstallerReady, isDeployable,
+  normalizeProducts, isTracked, appliesToOS, productStatus, latestForOS, latestInstallerReady, isDeployable,
   nodesByKind, inProgressNodes, stagedFor, savedSource, ACTIVE, deadlineStatus,
 } from '../lib/domain.js';
 import { presetCommand, ADOBE_RUM } from '../lib/presets.js';
 import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
+import { PageHeader } from '../components/page.js';
+import { Ring, StackBar, Num } from '../components/viz.js';
 
 // ---- wizard state (module-level so it survives tab switches) ----
 const chosenProducts = signal(new Set());
@@ -105,7 +107,7 @@ function ProductCard({ p, s, downloads }) {
 }
 
 // ---------------------------------------------------------------- deploy panel
-function DeployPanel({ s, products }) {
+function DeployPanel({ s, products, onDone }) {
   const [files, setFiles] = useState([]);
   const [fields, setFields] = useState({ url: '', urlMac: '', file: '', fileMac: '', version: '', remember: true });
   const set = (k) => (e) => setFields({ ...fields, [k]: e.currentTarget.type === 'checkbox' ? e.currentTarget.checked : e.currentTarget.value });
@@ -234,7 +236,7 @@ function DeployPanel({ s, products }) {
       }
       const uniq = [...new Set(queued)];
       progress.value = { text: uniq.length ? `Queued on ${plural(uniq.length, 'machine')} — each starts as soon as it's free (a new version tests on 3 machines first).` : 'Nothing queued — those machines are current, offline, or already queued.', tone: uniq.length ? 'ok' : '', skipped };
-      if (uniq.length) toast(`Update queued on ${plural(uniq.length, 'machine')}.`, 'success');
+      if (uniq.length) { toast(`Update queued on ${plural(uniq.length, 'machine')}.`, 'success'); if (onDone && !skipped.length) setTimeout(() => onDone(true), 400); }
     } catch (e) {
       progress.value = { text: e.message, tone: 'bad', skipped };
     } finally {
@@ -395,17 +397,130 @@ function Jobs({ s, products }) {
   </section>`;
 }
 
+// ---------------------------------------------------------------- rollout sheet
+function DeploySheet({ close }) {
+  const s = farm.value;
+  const products = normalizeProducts(s);
+  const tracked = products.filter(isTracked).filter(isDeployable);
+  return html`<div class="stack" style="gap:14px">
+    <div>
+      <p class="section-title">Apps</p>
+      <div class="row" style="gap:6px">${tracked.map((p) => {
+        const on = chosenProducts.value.has(p.key);
+        return html`<button key=${p.key} class=${'pill' + (on ? ' on' : '')} onClick=${() => { const next = new Set(chosenProducts.value); if (on) next.delete(p.key); else next.add(p.key); chosenProducts.value = next; source.value = 'auto'; }}>
+          <${ProductLogo} product=${p} size=${16} />${p.name}</button>`;
+      })}</div>
+    </div>
+    <${DeployPanel} s=${s} products=${products} onDone=${close} />
+  </div>`;
+}
+
+export function openRollout({ productKey, mode = 'outdated', major = false } = {}) {
+  if (productKey) chosenProducts.value = new Set([productKey]);
+  targetMode.value = mode;
+  includeMajor.value = major;
+  source.value = 'auto';
+  progress.value = null;
+  const p = productKey && farm.value.products.find((x) => x.key === productKey);
+  openSheet((close) => html`<${DeploySheet} close=${close} />`, {
+    title: p ? `Update ${p.name}` : 'Roll out updates',
+    subtitle: 'Every idle machine starts right away · a new version tests on 3 machines first · never under a render',
+    width: 640,
+  });
+}
+
+function UpdateCard({ p, s }) {
+  const oses = ['windows', 'macos'];
+  const applicable = s.nodes.filter((n) => appliesToOS(p, n.os) && (productStatus(n, p).status !== 'na'));
+  const installed = applicable.filter((n) => (n.software || []).some((x) => x.product_key === p.key));
+  const current = installed.filter((n) => ['uptodate', 'selfupdate'].includes(productStatus(n, p).status));
+  const patch = nodesByKind(s, p, oses, ['patch']);
+  const major = nodesByKind(s, p, oses, ['major', 'missing']);
+  const busyN = inProgressNodes(s, p, oses);
+  const ready = oses.every((os) => latestInstallerReady(p, os));
+  const pct = installed.length ? Math.round((current.length / installed.length) * 100) : 100;
+  const deployable = isDeployable(p);
+  return html`<article class="card ucard hover-lift">
+    <header class="row" style="flex-wrap:nowrap;gap:12px">
+      <${ProductLogo} product=${p} size=${36} />
+      <div class="grow" style="min-width:0"><b class="uc-name">${p.name}</b><span class="mono dim uc-ver">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : `Latest ${p.latest_version || '—'}`}</span></div>
+      <${Ring} size=${58} stroke=${6} total=${Math.max(1, installed.length)} label=${`${current.length} of ${installed.length} current`}
+        segments=${[{ value: current.length, color: 'var(--ok)' }, { value: busyN.length, color: 'var(--accent)' }]}>
+        <span class="uc-pct">${pct}<small>%</small></span>
+      <//>
+    </header>
+    <div class="uc-stats">
+      <span><b><${Num} value=${current.length} /></b> current</span>
+      <span style="color:var(--info)"><b><${Num} value=${patch.length} /></b> behind</span>
+      ${busyN.length ? html`<span style="color:var(--accent)"><b>${busyN.length}</b> updating</span>` : null}
+      ${major.length ? html`<span style="color:var(--violet)"><b>${major.length}</b> new major</span>` : null}
+    </div>
+    ${!deployable ? html`<${Badge} title="Add an install command in Catalog to deploy">Tracking only<//>`
+      : !ready && (patch.length || major.length) ? html`<div class="uc-warn"><${Icon} name="alert" />Installer not on the server yet${p.source_url_win || p.source_url_mac ? ' — Automatic will download it once' : ''}</div>`
+      : html`<div class="uc-ok"><${Icon} name="check" />Installer ready${ADOBE_RUM[p.key] ? ' (Adobe RUM)' : ''}</div>`}
+    <footer class="row" style="gap:8px">
+      <button class="btn primary grow" disabled=${!deployable || !patch.length} onClick=${() => openRollout({ productKey: p.key })}>
+        <${Icon} name="download" />${patch.length ? `Update ${plural(patch.length, 'machine')}` : busyN.length ? 'Updating…' : 'All current'}</button>
+      <button class="btn icon" title="Choose machines & options" aria-label=${`Choose machines for ${p.name}`} disabled=${!deployable} onClick=${() => openRollout({ productKey: p.key, mode: 'choose' })}><${Icon} name="sliders" /></button>
+    </footer>
+  </article>`;
+}
+
+function RolloutsPanel({ s, products }) {
+  const names = new Map(products.map((p) => [p.key, p]));
+  const groups = new Map();
+  for (const j of s.jobs) {
+    const k = `${j.product_key}|${j.package_version}`;
+    if (!groups.has(k)) groups.set(k, { key: j.product_key, version: j.package_version, jobs: [] });
+    groups.get(k).jobs.push(j);
+  }
+  const live = [...groups.values()].filter((g) => g.jobs.some((j) => ACTIVE.includes(j.status)));
+  if (!live.length) return null;
+  return html`<section class="card card-pad">
+    <h2 class="card-title"><${Icon} name="activity" />Rolling out now</h2>
+    <div class="rollout-grid">${live.map((g) => {
+      const c = (st) => g.jobs.filter((j) => st.includes(j.status)).length;
+      const done = c(['success']); const running = c(['downloading', 'installing']); const queued = c(['pending']); const failed = c(['failed', 'cancelled']);
+      const p = names.get(g.key) || { key: g.key, name: g.key };
+      return html`<div key=${g.key + g.version} class="rollout">
+        <div class="row" style="flex-wrap:nowrap"><${ProductLogo} product=${p} size=${22} /><b class="grow">${p.name} <span class="mono dim">${g.version}</span></b><span class="mono">${done}/${g.jobs.length}</span></div>
+        <${StackBar} height=${8} total=${g.jobs.length} parts=${[{ value: done, color: 'var(--ok)', label: 'done' }, { value: running, color: 'var(--accent)', label: 'installing' }, { value: queued, color: 'var(--info)', label: 'queued' }, { value: failed, color: 'var(--bad)', label: 'failed/stopped' }]} />
+        <div class="legend" style="font-size:.76rem">${running ? html`<span><i style="background:var(--accent)"></i>${running} installing</span>` : null}${queued ? html`<span><i style="background:var(--info)"></i>${queued} queued</span>` : null}${failed ? html`<span><i style="background:var(--bad)"></i>${failed} failed</span>` : null}${done ? html`<span><i style="background:var(--ok)"></i>${done} done</span>` : null}</div>
+      </div>`;
+    })}</div>
+  </section>`;
+}
+
 // ---------------------------------------------------------------- page
 export function UpdatesView() {
   const s = farm.value;
   const products = useMemo(() => (s ? normalizeProducts(s) : []), [s]);
-  const downloads = useDownloads(!!s);
-  if (!s) return html`<div class="page"><${Empty}>Loading…<//></div>`;
+  useDownloads(!!s);
+  if (!s) return null;
   const tracked = products.filter(isTracked);
+  const need = (p) => nodesByKind(s, p, ['windows', 'macos'], ['patch']).length + nodesByKind(s, p, ['windows', 'macos'], ['major', 'missing']).length + inProgressNodes(s, p, ['windows', 'macos']).length;
+  const available = tracked.filter((p) => need(p) > 0).sort((a, b) => need(b) - need(a));
+  const current = tracked.filter((p) => need(p) === 0);
+  const behindTotal = tracked.reduce((c, p) => c + nodesByKind(s, p, ['windows', 'macos'], ['patch']).length, 0);
+  const running = s.jobs.filter((j) => ACTIVE.includes(j.status)).length;
   return html`<div class="page stack">
-    <div class="page-head"><h1>Updates</h1><span class="muted">Pick apps, choose machines, roll out — installs never run under a render.</span></div>
-    <div class="pgrid">${tracked.map((p) => html`<${ProductCard} key=${p.key} p=${p} s=${s} downloads=${downloads} />`)}</div>
-    <${DeployPanel} s=${s} products=${products} />
+    <${PageHeader} title="Updates" subtitle=${`${behindTotal ? `${plural(behindTotal, 'update')} ready to roll out` : 'Every machine is current'}${running ? ` · ${running} running or queued` : ''}`}>
+      <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check versions</button>
+      <button class="btn primary" onClick=${() => openRollout({})}><${Icon} name="download" />Roll out…</button>
+    </${PageHeader}>
+
+    <${RolloutsPanel} s=${s} products=${products} />
+
+    ${available.length ? html`<section>
+      <h2 class="section-h">Available</h2>
+      <div class="ugrid">${available.map((p) => html`<${UpdateCard} key=${p.key} p=${p} s=${s} />`)}</div>
+    </section>` : html`<section class="card"><div class="empty-inline"><${Icon} name="check" /><div><b>Everything is up to date</b><p class="muted">New versions are checked automatically — or check now.</p></div></div></section>`}
+
+    ${current.length ? html`<section>
+      <h2 class="section-h">Up to date</h2>
+      <div class="row" style="gap:8px">${current.map((p) => html`<span key=${p.key} class="current-chip" title=${p.latest_version || ''}><${ProductLogo} product=${p} size=${18} />${p.name}<span class="mono dim">${p.latest_version || ''}</span><${Icon} name="check" /></span>`)}</div>
+    </section>` : null}
+
     <${Jobs} s=${s} products=${products} />
   </div>`;
 }

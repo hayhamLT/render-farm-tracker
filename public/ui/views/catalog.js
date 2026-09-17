@@ -4,11 +4,13 @@ import { html } from '../lib/html.js';
 import { useState } from 'preact/hooks';
 import { farm, refresh } from '../lib/store.js';
 import { post, put, del } from '../lib/api.js';
-import { pref, toast, confirm, openDialog } from '../lib/ui.js';
+import { pref, toast, confirm, openSheet } from '../lib/ui.js';
 import { ago, plural } from '../lib/format.js';
-import { normalizeProducts, SELF_MANAGED } from '../lib/domain.js';
+import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { Icon, ProductLogo, Badge, Empty } from '../components/common.js';
+import { PageHeader } from '../components/page.js';
+import { StackBar } from '../components/viz.js';
 
 const tab = pref('catalog.tab', 'app');
 const catOf = (p) => (p.category === 'plugin' || p.category === 'script' ? p.category : 'app');
@@ -95,7 +97,7 @@ function ProductForm({ prod, cat, close }) {
     });
   }
 
-  return html`<div class="body form">
+  return html`<div class="form">
     <div class="row" style="flex-wrap:nowrap">
       ${f.icon ? html`<img src=${f.icon} alt="" style="width:36px;height:36px;border-radius:8px" onError=${(e) => e.currentTarget.remove()} />` : html`<span class="form-icon"><${Icon} name="package" /></span>`}
       <label class="grow">Name<input class="field" autofocus value=${f.name} onInput=${set('name')} placeholder=${cat === 'plugin' ? 'Element 3D' : cat === 'script' ? 'Motion Tools' : '7-Zip'} /></label>
@@ -127,7 +129,7 @@ function ProductForm({ prod, cat, close }) {
       ${f.uninstall && html`<div class="row">${win && html`<input class="field grow mono" value=${f.uwin} onInput=${set('uwin')} placeholder='"%ProgramFiles%\\7-Zip\\Uninstall.exe" /S' />`}${mac && html`<input class="field grow mono" value=${f.umac} onInput=${set('umac')} placeholder='rm -rf "/Applications/App.app"' />`}</div>`}
       <label>Icon URL<input class="field" value=${f.icon} onInput=${set('icon')} placeholder="https://…/favicon.png" /></label>
     </div>`}
-    <footer style="margin:8px -18px -16px">
+    <footer class="sheet-foot">
       <button class="btn ghost" onClick=${() => close(null)}>Cancel</button>
       <button class="btn primary" disabled=${!f.name.trim()} onClick=${submit}>${prod ? 'Save' : `Add ${LABEL[cat]}`}</button>
     </footer>
@@ -135,7 +137,7 @@ function ProductForm({ prod, cat, close }) {
 }
 
 async function addProduct(cat) {
-  const fields = await openDialog((close) => html`<${ProductForm} cat=${cat} close=${close} />`, { title: `Add ${LABEL[cat]}`, wide: true });
+  const fields = await openSheet((close) => html`<${ProductForm} cat=${cat} close=${close} />`, { title: `Add ${LABEL[cat]}`, subtitle: 'A name and a link are usually enough — Auto-fill does the rest.', width: 620 });
   if (!fields) return;
   try {
     await post('/api/products', fields);
@@ -146,7 +148,7 @@ async function addProduct(cat) {
 }
 
 async function editProduct(p) {
-  const fields = await openDialog((close) => html`<${ProductForm} prod=${p} cat=${catOf(p)} close=${close} />`, { title: `Edit ${p.name}`, wide: true });
+  const fields = await openSheet((close) => html`<${ProductForm} prod=${p} cat=${catOf(p)} close=${close} />`, { title: `Edit ${p.name}`, width: 620 });
   if (!fields) return;
   try { await put(`/api/products/${p.key}`, fields); toast('Saved.', 'success'); } catch (e) { toast(e.message, 'error'); }
   refresh();
@@ -185,27 +187,37 @@ export function CatalogView() {
     try { await put(`/api/products/${p.key}`, { autodeploy: on ? 1 : 0 }); toast(on ? `Auto-deploy on for ${p.name} — installs where missing and updates where behind, testing on 3 machines first.` : `Auto-deploy off for ${p.name}.`, 'success', 6000); } catch (e) { toast(e.message, 'error'); }
     refresh();
   };
+  const coverage = (p) => {
+    const nodes = s.nodes.filter((n) => appliesToOS(p, n.os));
+    const have = nodes.filter((n) => (n.software || []).some((x) => x.product_key === p.key));
+    const current = have.filter((n) => ['uptodate', 'selfupdate'].includes(productStatus(n, p).status));
+    return { have: have.length, current: current.length, total: nodes.length };
+  };
   return html`<div class="page stack">
-    <div class="page-head"><h1>Catalog</h1><span class="muted">What the tracker watches, and how each one updates.</span>
-      <span class="grow"></span>
-      <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for new versions</button>
+    <${PageHeader} title="Catalog" subtitle="What the tracker watches, how it finds new versions, and how each one updates.">
+      <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check versions</button>
       <button class="btn primary" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button>
-    </div>
-    <div class="seg" style="align-self:flex-start">${[['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts']].map(([k, l]) => html`<button key=${k} class=${tab.value === k ? 'on' : ''} onClick=${() => { tab.value = k; }}>${l} <span class="dim">${count(k)}</span></button>`)}</div>
+    </${PageHeader}>
+    <div class="pills">${[['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}<span class="n">${count(k)}</span></button>`)}</div>
     <section class="card table-wrap">
-      ${!rows.length ? html`<${Empty}>No ${LABEL[tab.value]}s yet — add one to start tracking it.<//>` : html`<table class="table">
-        <thead><tr><th style="width:70px">Track</th><th>Name</th><th>Latest version</th><th>Checked</th><th>Auto-deploy</th><th></th></tr></thead>
-        <tbody>${rows.map((p) => html`<tr key=${p.key}>
-          <td><${Switch} on=${p.dashboard_hidden !== 1} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /></td>
-          <td class="nowrap"><span class="row" style="flex-wrap:nowrap"><${ProductLogo} product=${p} size=${22} /><b>${p.name}</b>${p.custom ? html`<${Badge}>custom<//>` : null}</span></td>
-          <td class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? html`Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected yet</span>`}</td>
-          <td class="dim nowrap">${p.updated_at ? ago(p.updated_at, s.now) : '—'}</td>
-          <td>${SELF_MANAGED.has(p.key) ? html`<span class="dim">self-managed</span>` : html`<span class="row" style="flex-wrap:nowrap"><${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} /><span class="dim" style="font-size:.8rem">${p.autodeploy ? 'On' : 'Off'}</span></span>`}</td>
-          <td class="right nowrap">${p.custom ? html`
-            <button class="btn sm ghost icon" title="Edit" aria-label=${`Edit ${p.name}`} onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
-            <button class="btn sm ghost icon" title="Uninstall from machines" aria-label=${`Uninstall ${p.name}`} onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
-            <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}</td>
-        </tr>`)}</tbody>
+      ${!rows.length ? html`<div class="empty-inline"><${Icon} name="package" /><div><b>No ${LABEL[tab.value]}s yet</b><p class="muted">Add one to track its version across the farm.</p></div><button class="btn primary" style="margin-left:auto" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button></div>` : html`<table class="table cat-table">
+        <thead><tr><th>Name</th><th>Latest</th><th style="width:220px">On the farm</th><th>Track</th><th>Auto-deploy</th><th></th></tr></thead>
+        <tbody>${rows.map((p) => {
+          const cv = coverage(p);
+          const tracked = p.dashboard_hidden !== 1;
+          return html`<tr key=${p.key} style=${tracked ? '' : 'opacity:.62'}>
+            <td><span class="row" style="flex-wrap:nowrap;gap:12px"><${ProductLogo} product=${p} size=${30} /><span style="display:flex;flex-direction:column"><b>${p.name}</b><span class="dim" style="font-size:.76rem">${p.custom ? 'Custom' : 'Built in'}${p.check_url ? ' · checks a web page' : ''}</span></span></span></td>
+            <td><span class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? html`Win ${p.latest_win}<br />Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</span><div class="dim" style="font-size:.74rem">${p.updated_at ? `checked ${ago(p.updated_at, s.now)}` : ''}</div></td>
+            <td>${cv.have ? html`<div class="row" style="flex-wrap:nowrap;gap:10px"><${StackBar} height=${7} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} /><span class="mono nowrap" style="font-size:.8rem">${cv.current}/${cv.have}</span></div>
+              <div class="dim" style="font-size:.74rem">installed on ${cv.have} of ${cv.total}</div>` : html`<span class="dim">not installed anywhere</span>`}</td>
+            <td><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /></td>
+            <td>${SELF_MANAGED.has(p.key) ? html`<span class="dim" title="Updates itself or rides along with other installs">self-managed</span>` : html`<${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} />`}</td>
+            <td class="right nowrap">${p.custom ? html`
+              <button class="btn sm ghost icon" title="Edit" aria-label=${`Edit ${p.name}`} onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
+              <button class="btn sm ghost icon" title="Uninstall from machines" aria-label=${`Uninstall ${p.name}`} onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
+              <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}</td>
+          </tr>`;
+        })}</tbody>
       </table>`}
     </section>
   </div>`;
