@@ -1584,12 +1584,18 @@ function fullState() {
   // latest) from the dashboard — config.hiddenNodes (short hostname, any case).
   const _hidden = (config.hiddenNodes || []).map((h) => String(h).split('.')[0].toUpperCase());
   const wakesNow = commands.allWakes();
+  // When each machine last installed something successfully — from the timeline, which keeps 30
+  // days, so it survives "clear finished" and the 200-job window on the jobs list.
+  const lastInstall = new Map(db.prepare(
+    "SELECT node_id, MAX(COALESCE(end_ts, ts)) AS at FROM node_timeline WHERE kind = 'install' AND state = 'success' GROUP BY node_id"
+  ).all().map((r) => [r.node_id, r.at]));
   const nodes = db.prepare('SELECT * FROM nodes ORDER BY hostname').all()
     .filter((n) => !_hidden.includes(String(n.hostname || '').split('.')[0].toUpperCase()))
     .map((n) => ({
     ...n,
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     wake: wakesNow.get(n.id) || null,
+    last_install: lastInstall.get(n.id) || null,
     software: db
       // detected_at is left out: every check-in rewrites it, which would make each node's
       // software list look "changed" to the live-update diff. Nothing displays it.

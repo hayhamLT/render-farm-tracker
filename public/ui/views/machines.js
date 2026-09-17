@@ -44,7 +44,9 @@ export function useMachineModel() {
       const dl = deadlineStatus(n);
       const behind = machineUpdates(s, tracked, n);
       const failed = s.jobs.filter((j) => j.hostname === n.hostname && j.status === 'failed' && j.updated_at > Date.now() - DAY);
-      const lastOk = s.jobs.filter((j) => j.hostname === n.hostname && j.status === 'success').reduce((t, j) => Math.max(t, j.updated_at), 0);
+      // Newest of: a success still on the jobs list, or what the timeline recorded (30 days).
+      const lastOk = s.jobs.filter((j) => j.hostname === n.hostname && j.status === 'success')
+        .reduce((t, j) => Math.max(t, j.updated_at), n.last_install || 0);
       return { node: n, activity, dl, behind, failed, lastOk };
     });
     return { s, products, tracked, names, nodes };
@@ -194,7 +196,7 @@ function MachineCard({ m, model }) {
     <${StatusCell} m=${m} />
     <div class="mc3-updates"><${BehindCell} m=${m} model=${model} /></div>
     <footer>
-      <span class="dim">${m.lastOk ? `updated ${ago(m.lastOk, model.s.now)}` : 'no installs yet'}</span>
+      <span class="dim">${m.lastOk ? `updated ${ago(m.lastOk, model.s.now)}` : 'no installs on record'}</span>
       <span class="grow"></span>
       ${m.behind.length && !blockedReason(n) ? html`<button class="btn sm" onClick=${(e) => { e.stopPropagation(); updateMachines(model, [n]); }}><${Icon} name="download" />Update ${m.behind.length}</button>` : null}
     </footer>
