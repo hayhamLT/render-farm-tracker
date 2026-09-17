@@ -17,6 +17,7 @@ const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
+const { createRollouts } = require('./lib/rollouts');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -261,6 +262,20 @@ function isHiddenHost(hostname) {
   const k = String(hostname || '').split('.')[0].toUpperCase();
   return (config.hiddenNodes || []).some((h) => String(h).split('.')[0].toUpperCase() === k);
 }
+
+// Scheduled / windowed rollouts with a Slack report (lib/rollouts.js).
+const rollouts = createRollouts({
+  notify: (text) => notifySlack(text),
+  startWake: (nodeId) => startWake(db.prepare('SELECT * FROM nodes WHERE id = ?').get(nodeId)),
+  offlineMs: () => (config.offlineAfterSeconds || 180) * 1000,
+  productName: (key) => { const r = db.prepare('SELECT name FROM products WHERE key = ?').get(key); return r ? r.name : key; },
+});
+setInterval(() => { try { rollouts.tick(); } catch (e) { console.error('rollouts tick failed:', e.message); } }, 30 * 1000);
+// A valid rollout id from a request body, or null.
+const rolloutIdFrom = (b) => {
+  const r = b && b.rollout_id != null ? rollouts.get(b.rollout_id) : null;
+  return r && ['scheduled', 'running'].includes(r.status) ? r.id : null;
+};
 
 // Web-based Maxon "latest version" auto-detect: read Maxon's public release notes
 // (Zendesk Help Center API) and bump the catalog upward. Maxon has no headless mx1
@@ -695,7 +710,9 @@ function reapStaleJobs() {
          OR (j.status = 'pending' AND j.updated_at < ?)`
   ).all(now - JOB_STALE_MS, now - 24 * 3600 * 1000);
   let verified = 0, failed = 0;
+  const waiting = rollouts.waitingJobIds();   // queued for a rollout that hasn't started yet — not stuck
   for (const j of stale) {
+    if (waiting.has(j.id)) continue;
     // If the machine already reports the target version (or newer), the install
     // succeeded — the agent just restarted before it could acknowledge. Mark success.
     const done = j.installed_version &&
@@ -1469,6 +1486,7 @@ function fullState() {
     maxConcurrentInstalls: config.maxConcurrentInstalls || 4,
     slackWebhook: config.slackWebhook || '',
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
+    rollouts: rollouts.list(),
     downloadDir: downloadDir(),
     downloadDirPlugins: config.downloadDirPlugins || '',
     downloadDirScripts: config.downloadDirScripts || '',
@@ -1742,21 +1760,28 @@ function handleCheckin(body) {
   //    before a broken update reaches every machine. After one success, everyone goes.
   //  • Vendor-download commands (Adobe RUM, Maxon App CLI) pull from the internet, so only
   //    `maxConcurrentInstalls` of those run farm-wide.
-  const jobCols = `j.id, j.status, p.id AS package_id, p.product_key, p.version, p.filename, p.install_command, p.kind`;
+  const jobCols = `j.id, j.status, j.rollout_id, p.id AS package_id, p.product_key, p.version, p.filename, p.install_command, p.kind`;
   // This node's already-running jobs always come back (so it keeps reporting).
   const jobs = db.prepare(
     `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
       WHERE j.node_id = ? AND j.status IN ('downloading', 'installing') ORDER BY j.id`
   ).all(node.id);
   if (jobs.length === 0) {
-    const next = db.prepare(
+    // First queued job this machine may run now. A job belonging to a rollout waits for the
+    // rollout's start time / window, and for an idle GPU when the rollout asks for that.
+    const fresh = db.prepare('SELECT gpu_util FROM nodes WHERE id = ?').get(node.id) || node;
+    const queuedJobs = db.prepare(
       `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
-        WHERE j.node_id = ? AND j.status = 'pending' ORDER BY j.id LIMIT 1`
-    ).get(node.id);
-    // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
-    // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
-    if (next && rolloutHalted(next.product_key, next.version)) flagRolloutHalt(next.product_key, next.version);
-    else if (next && dispatchSlotFree(next)) jobs.push(next);
+        WHERE j.node_id = ? AND j.status = 'pending' ORDER BY j.id`
+    ).all(node.id);
+    for (const next of queuedJobs) {
+      if (!rollouts.allows(next, fresh)) continue;
+      // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
+      // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
+      if (rolloutHalted(next.product_key, next.version)) { flagRolloutHalt(next.product_key, next.version); break; }
+      if (dispatchSlotFree(next)) jobs.push(next);
+      break;
+    }
   }
 
   // Attach the installer's SHA256 so the agent can verify integrity before running.
@@ -2312,6 +2337,21 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // Rollouts: create one (then queue jobs into it with rollout_id), cancel, or start early.
+    if (req.method === 'POST' && p === '/api/rollouts') {
+      const b = await readBody(req);
+      const r = rollouts.create(b);
+      if (r.status === 'scheduled') logEvent('deploy', `Rollout scheduled: ${r.name} — starts ${new Date(r.run_at).toLocaleString()}`);
+      return sendJson(res, 200, { ok: true, rollout: r });
+    }
+    const rolloutAct = p.match(/^\/api\/rollouts\/(\d+)\/(cancel|start)$/);
+    if (req.method === 'POST' && rolloutAct) {
+      try {
+        const out = rolloutAct[2] === 'cancel' ? rollouts.cancel(rolloutAct[1]) : rollouts.startNow(rolloutAct[1]);
+        return sendJson(res, 200, { ok: true, result: out });
+      } catch (e) { return sendJson(res, 400, { error: e.message }); }
+    }
+
     if (req.method === 'POST' && p === '/api/deployments') {
       const b = await readBody(req);
       const pkg = db.prepare('SELECT * FROM packages WHERE id = ?').get(Number(b.package_id));
@@ -2324,6 +2364,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: 'node_ids required' });
       }
       const created = [], skippedNoDriver = [];
+      const rolloutId = rolloutIdFrom(b);
       for (const nid of b.node_ids) {
         const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nid));
         if (!node || node.os !== pkg.os) continue; // never send a package to the wrong OS
@@ -2334,8 +2375,8 @@ const server = http.createServer(async (req, res) => {
         if (activeJobForProduct(node.id, usePkg.product_key)) continue;
         const now = Date.now();
         db.prepare(
-          'INSERT INTO jobs (package_id, node_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
-        ).run(usePkg.id, node.id, 'pending', now, now);
+          'INSERT INTO jobs (package_id, node_id, status, created_at, updated_at, rollout_id) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(usePkg.id, node.id, 'pending', now, now, rolloutId);
         created.push(node.hostname);
       }
       logEvent('deploy', `Deployment queued: ${pkg.product_key} ${pkg.version} → ${created.length ? created.join(', ') : '(no eligible nodes)'}`);
@@ -2360,8 +2401,8 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, queued: [], note: `an update for ${usePkg.product_key} is already in progress on ${node.hostname}` });
       }
       const now = Date.now();
-      db.prepare('INSERT INTO jobs (package_id, node_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-        .run(usePkg.id, node.id, 'pending', now, now);
+      db.prepare('INSERT INTO jobs (package_id, node_id, status, created_at, updated_at, rollout_id) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(usePkg.id, node.id, 'pending', now, now, rolloutIdFrom(b));
       logEvent('deploy', `Update queued: ${usePkg.product_key} ${usePkg.version} → ${node.hostname}`);
       return sendJson(res, 200, { ok: true, queued: [node.hostname] });
     }
@@ -2376,6 +2417,7 @@ const server = http.createServer(async (req, res) => {
       if (pkg.kind === 'installer' && !resolveInstaller(pkg.filename))
         return sendJson(res, 400, { error: `installer not found on the server: ${pkg.filename} (is the INSTALLERS mount available?)` });
       const onlyOnline = b.onlyOnline !== false;
+      const rolloutId = rolloutIdFrom(b);
       // Default = safe in-place patches only (same major). Major-behind or
       // not-installed nodes are opt-in side-by-side installs (includeMajor).
       const includeMajor = b.includeMajor === true;
@@ -2397,8 +2439,8 @@ const server = http.createServer(async (req, res) => {
           if (verMajorServer(installed) !== verMajorServer(usePkg.version)) continue; // major behind = opt-in
         }
         if (activeJobForProduct(node.id, usePkg.product_key)) continue;
-        db.prepare('INSERT INTO jobs (package_id, node_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-          .run(usePkg.id, node.id, 'pending', now, now);
+        db.prepare('INSERT INTO jobs (package_id, node_id, status, created_at, updated_at, rollout_id) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(usePkg.id, node.id, 'pending', now, now, rolloutId);
         queued.push(node.hostname);
       }
       logEvent('deploy', `Batch update: ${pkg.product_key} ${pkg.version} → ${queued.length} node(s)`);

@@ -48,7 +48,8 @@ const collapsed = pref('shell.collapsed', false);
 function Sidebar() {
   const s = farm.value;
   const r = route.value.name;
-  const running = s ? s.jobs.filter((j) => ACTIVE.includes(j.status)).length : 0;
+  const waiting = new Set(s && s.rollouts ? s.rollouts.filter((x) => x.status === 'scheduled').map((x) => x.id) : []);
+  const running = s ? s.jobs.filter((j) => ACTIVE.includes(j.status) && !(j.status === 'pending' && waiting.has(j.rollout_id))).length : 0;
   const failed = s ? s.jobs.filter((j) => j.status === 'failed').length : 0;
   const attention = s ? s.nodes.filter((n) => {
     if (!n.online) return true;

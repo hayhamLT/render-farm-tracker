@@ -16,6 +16,7 @@ import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { MachineTimeline } from './timeline.js';
+import { waitingRollout, whenLabel } from '../components/rollouts.js';
 import { Sparkline, AreaChart, StackBar, Num, useMetrics, metrics, STATE_COLOR } from '../components/viz.js';
 
 const view = pref('machines.view', 'grid');
@@ -97,6 +98,8 @@ function StatusChip({ s, node, product, compact }) {
   if (job) {
     if (job.status === 'downloading') return html`<${Badge} tone="accent" icon="download" title="Downloading the installer">${job.dl_pct != null ? job.dl_pct + '%' : 'downloading'}<//>`;
     if (job.status === 'installing') return html`<${Badge} tone="accent" icon="spinner" title="Installing now">${job.cancel_requested_at ? 'stopping…' : 'installing'}<//>`;
+    const wr = waitingRollout(s, job);
+    if (wr) return html`<${Badge} tone="info" icon="clock" title=${`Part of “${wr.name}”`}>${whenLabel(wr.run_at)}<//>`;
     return html`<${Badge} tone="info" icon="clock" title=${job.log || 'Queued — starts when the machine is free'}>queued<//>`;
   }
   const st = productStatus(node, product);

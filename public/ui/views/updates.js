@@ -17,6 +17,7 @@ import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { Ring, StackBar, Num } from '../components/viz.js';
+import { WhenPicker, RolloutList, rolloutPlan, resetWhen, whenLabel, when, waitingRollout } from '../components/rollouts.js';
 
 // ---- wizard state (module-level so it survives tab switches) ----
 const chosenProducts = signal(new Set());
@@ -169,13 +170,20 @@ function DeployPanel({ s, products, onDone }) {
     busy.value = true;
     const skipped = [];
     const queued = [];
+    // Every update is a rollout: it groups the jobs, holds them until the start time, and
+    // reports when done.
+    const plan = rolloutPlan(sel.map((p) => `${p.name}${sel.length === 1 && p.latest_version ? ` ${p.latest_version}` : ''}`).join(', '), s);
+    let rollout;
+    try { rollout = (await post('/api/rollouts', plan)).rollout; } catch (e) { busy.value = false; progress.value = { text: e.message, tone: 'bad' }; return; }
     const queue = async (pkgId, os, major) => {
       if (targetMode.value === 'outdated') {
-        const r = await post('/api/update-outdated', { package_id: pkgId, includeMajor: major });
+        // A scheduled rollout also takes machines that are off right now — they're woken or
+        // pick it up when they come back.
+        const r = await post('/api/update-outdated', { package_id: pkgId, includeMajor: major, rollout_id: rollout.id, onlyOnline: !plan.later });
         queued.push(...(r.queued || []));
       } else {
         const ids = [...chosenNodes.value].filter((id) => { const n = s.nodes.find((x) => x.id === id); return n && n.os === os; });
-        if (ids.length) { const r = await post('/api/deployments', { package_id: pkgId, node_ids: ids }); queued.push(...(r.queued || [])); }
+        if (ids.length) { const r = await post('/api/deployments', { package_id: pkgId, node_ids: ids, rollout_id: rollout.id }); queued.push(...(r.queued || [])); }
       }
     };
     const fetchToServer = async (url) => {
@@ -235,8 +243,18 @@ function DeployPanel({ s, products, onDone }) {
         setFields({ ...fields, version: '' });
       }
       const uniq = [...new Set(queued)];
-      progress.value = { text: uniq.length ? `Queued on ${plural(uniq.length, 'machine')} — each starts as soon as it's free (a new version tests on 3 machines first).` : 'Nothing queued — those machines are current, offline, or already queued.', tone: uniq.length ? 'ok' : '', skipped };
-      if (uniq.length) { toast(`Update queued on ${plural(uniq.length, 'machine')}.`, 'success'); if (onDone && !skipped.length) setTimeout(() => onDone(true), 400); }
+      const later = rollout.status === 'scheduled';
+      progress.value = {
+        text: !uniq.length ? 'Nothing queued — those machines are current, offline, or already queued.'
+          : later ? `Scheduled on ${plural(uniq.length, 'machine')} — starts ${whenLabel(rollout.run_at)}.`
+          : `Queued on ${plural(uniq.length, 'machine')} — each starts as soon as it's free (a new version tests on 3 machines first).`,
+        tone: uniq.length ? 'ok' : '', skipped,
+      };
+      if (uniq.length) {
+        toast(later ? `Update scheduled for ${whenLabel(rollout.run_at)} on ${plural(uniq.length, 'machine')}.` : `Update queued on ${plural(uniq.length, 'machine')}.`, 'success');
+        resetWhen();
+        if (onDone && !skipped.length) setTimeout(() => onDone(true), 400);
+      }
     } catch (e) {
       progress.value = { text: e.message, tone: 'bad', skipped };
     } finally {
@@ -292,13 +310,15 @@ function DeployPanel({ s, products, onDone }) {
     ${needInstaller.length > 0 && html`<div class="banner warn"><${Icon} name="alert" />Installer not on the server for ${needInstaller.map((p) => `${p.name} ${p.latest_version || ''}`).join(', ')} — add it (Automatic downloads from a saved link), or paste a link.</div>`}
     ${trackOnly.length > 0 && html`<div class="banner info"><${Icon} name="package" />${trackOnly.map((p) => p.name).join(', ')} ${trackOnly.length === 1 ? 'is' : 'are'} tracking-only — add an install command in Catalog to deploy.</div>`}
 
+    <${WhenPicker} s=${s} />
+
     <div class="deploy-go">
       <span class="muted">${targetMode.value === 'choose' ? `${chosenNodes.value.size} selected` : `${plural(targets.length, 'machine')} will update${busyIds.size ? ` · ${busyIds.size} already updating` : ''}`}</span>
       <span class="grow"></span>
       ${progress.value && html`<span class=${'deploy-progress ' + (progress.value.tone || '')}>${progress.value.text}${progress.value.skipped && progress.value.skipped.length ? html`<br /><span style="color:var(--warn)">Skipped: ${progress.value.skipped.join(' · ')}</span>` : ''}</span>`}
       <button class="btn primary" disabled=${!canGo} onClick=${run}
         title=${!deployable ? 'Stage the installer first — see the warning above' : !targets.length ? 'Those machines are already up to date or updating' : ''}>
-        ${busy.value ? html`<${Icon} name="spinner" cls="spin" />Working…` : html`<${Icon} name="download" />Update now`}
+        ${busy.value ? html`<${Icon} name="spinner" cls="spin" />Working…` : when.value === 'now' ? html`<${Icon} name="download" />Update now` : html`<${Icon} name="clock" />Schedule`}
       </button>
     </div>
   </div>`;
@@ -312,6 +332,8 @@ function JobStatus({ j, s }) {
   if (j.status === 'installing' && j.inst_overrun) return html`<span class="row" style="flex-wrap:nowrap;gap:8px" title="Taking longer than usual — still running"><${Bar} indet /><span class="dim">finishing…</span></span>`;
   if (j.status === 'installing') return html`<span class="row" style="flex-wrap:nowrap;gap:8px" title="Estimated from typical install time"><${Bar} pct=${j.inst_pct} indet=${j.inst_pct == null} /><span class="mono dim">${j.inst_pct != null ? j.inst_pct + '%' : 'installing'}</span></span>`;
   if (j.status === 'pending') {
+    const wr = waitingRollout(s, j);
+    if (wr) return html`<${Badge} tone="info" icon="clock" title=${`Part of “${wr.name}” — starts ${whenLabel(wr.run_at)}`}>scheduled · ${whenLabel(wr.run_at)}<//>`;
     const node = s.nodes.find((n) => n.hostname === j.hostname);
     if (node && !node.online) return html`<${Badge} tone="warn" icon="power" title="Runs when the machine is back online">machine offline<//>`;
     if (node && node.elevated === 0) return html`<${Badge} tone="warn" icon="shieldOff">needs elevation<//>`;
@@ -424,7 +446,7 @@ export function openRollout({ productKey, mode = 'outdated', major = false } = {
   const p = productKey && farm.value.products.find((x) => x.key === productKey);
   openSheet((close) => html`<${DeploySheet} close=${close} />`, {
     title: p ? `Update ${p.name}` : 'Roll out updates',
-    subtitle: 'Every idle machine starts right away · a new version tests on 3 machines first · never under a render',
+    subtitle: 'Now or tonight · a new version tests on 3 machines first · never under a render',
     width: 640,
   });
 }
@@ -469,15 +491,18 @@ function UpdateCard({ p, s }) {
 function RolloutsPanel({ s, products }) {
   const names = new Map(products.map((p) => [p.key, p]));
   const groups = new Map();
-  for (const j of s.jobs) {
+  const hasRollouts = (s.rollouts || []).length > 0;
+  for (const j of s.jobs.filter((x) => !x.rollout_id)) {
     const k = `${j.product_key}|${j.package_version}`;
     if (!groups.has(k)) groups.set(k, { key: j.product_key, version: j.package_version, jobs: [] });
     groups.get(k).jobs.push(j);
   }
   const live = [...groups.values()].filter((g) => g.jobs.some((j) => ACTIVE.includes(j.status)));
-  if (!live.length) return null;
+  if (!live.length && !hasRollouts) return null;
   return html`<section class="card card-pad">
-    <h2 class="card-title"><${Icon} name="activity" />Rolling out now</h2>
+    <h2 class="card-title"><${Icon} name="activity" />Rollouts</h2>
+    <${RolloutList} s=${s} />
+    ${live.length ? html`<p class="section-title" style="margin-top:14px">Other installs in progress</p>` : null}
     <div class="rollout-grid">${live.map((g) => {
       const c = (st) => g.jobs.filter((j) => st.includes(j.status)).length;
       const done = c(['success']); const running = c(['downloading', 'installing']); const queued = c(['pending']); const failed = c(['failed', 'cancelled']);
@@ -502,9 +527,10 @@ export function UpdatesView() {
   const available = tracked.filter((p) => need(p) > 0).sort((a, b) => need(b) - need(a));
   const current = tracked.filter((p) => need(p) === 0);
   const behindTotal = tracked.reduce((c, p) => c + nodesByKind(s, p, ['windows', 'macos'], ['patch']).length, 0);
-  const running = s.jobs.filter((j) => ACTIVE.includes(j.status)).length;
+  const running = s.jobs.filter((j) => ACTIVE.includes(j.status) && !waitingRollout(s, j)).length;
+  const scheduledN = (s.rollouts || []).filter((r) => r.status === 'scheduled').length;
   return html`<div class="page stack">
-    <${PageHeader} title="Updates" subtitle=${`${behindTotal ? `${plural(behindTotal, 'update')} ready to roll out` : 'Every machine is current'}${running ? ` · ${running} running or queued` : ''}`}>
+    <${PageHeader} title="Updates" subtitle=${`${behindTotal ? `${plural(behindTotal, 'update')} ready to roll out` : 'Every machine is current'}${running ? ` · ${running} running or queued` : ''}${scheduledN ? ` · ${plural(scheduledN, 'scheduled rollout')}` : ''}`}>
       <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check versions</button>
       <button class="btn primary" onClick=${() => openRollout({})}><${Icon} name="download" />Roll out…</button>
     </${PageHeader}>

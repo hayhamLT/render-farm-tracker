@@ -730,3 +730,39 @@ button.stat { cursor: pointer; }
   .lane-name .os-status, .lane-stat { display: none !important; }
   .timeline-lanes .card-head .search .field { width: 130px !important; }
 }
+
+/* ---------------------------------------------------------------- rollouts: when picker + cards */
+.when { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-2); border: 1px solid var(--border); }
+.when .seg .icon { width: 14px; height: 14px; }
+.when-times { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+.when-t { display: flex; flex-direction: column; gap: 5px; }
+.when-t .field { width: auto; color-scheme: dark; }
+.when-summary { display: inline-flex; align-items: center; gap: 7px; font-size: 0.84rem; color: var(--text-2); flex-basis: 100%; }
+.when-summary .icon { width: 15px; height: 15px; color: var(--accent); flex: none; }
+.when-summary b { color: var(--text); font-weight: 600; }
+.when-opts { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.when-opts label.check { font-size: 0.84rem; color: var(--text); font-weight: 500; }
+
+.rlist { display: flex; flex-direction: column; gap: 10px; }
+.rcard { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--surface-2); }
+.rcard.scheduled { border-color: rgba(96, 165, 250, 0.35); background: linear-gradient(0deg, var(--surface-2), var(--surface-2)), var(--info-soft); }
+.rcard.running { border-color: rgba(34, 211, 238, 0.35); }
+.rcard.done, .rcard.cancelled { background: transparent; }
+.rcard-icon { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; flex: none; background: var(--surface-3); color: var(--text-2); }
+.rcard-icon .icon { width: 16px; height: 16px; }
+.rcard-icon.scheduled { background: var(--info-soft); color: var(--info); }
+.rcard-icon.running { background: var(--accent-soft); color: var(--accent); }
+.rcard-icon.done { background: var(--ok-soft); color: var(--ok); }
+.rcard-name { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcard-when { display: block; font-size: 0.8rem; color: var(--text-2); }
+.rcard-when b { color: var(--text); font-weight: 600; }
+.rcard-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.rdone summary { cursor: pointer; font-size: 0.82rem; color: var(--text-2); padding: 4px 0; list-style: none; display: flex; align-items: center; gap: 6px; }
+.rdone summary::-webkit-details-marker { display: none; }
+.rdone summary::before { content: '›'; display: inline-block; transition: transform 0.15s var(--ease); font-size: 1rem; }
+.rdone[open] summary::before { transform: rotate(90deg); }
+.rdone .rlist { margin-top: 8px; }
+@media (max-width: 720px) {
+  .rcard header { flex-wrap: wrap !important; }
+}
+.when .deploy-field { align-items: flex-start; }

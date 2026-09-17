@@ -10,6 +10,7 @@ import * as act from '../lib/actions.js';
 import { useMachineModel, showMachines } from './machines.js';
 import { Icon, Badge, ProductLogo } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
+import { whenLabel } from '../components/rollouts.js';
 import { Ring, AreaChart, Sparkline, StackBar, Num, useMetrics, STATE_COLOR } from '../components/viz.js';
 
 // The one state each machine is shown in on the map (worst/most important first).
@@ -69,17 +70,25 @@ function FarmMap({ model }) {
 
 function Rollouts({ s, names }) {
   const groups = new Map();
-  for (const j of s.jobs) {
+  const waiting = new Set((s.rollouts || []).filter((r) => r.status === 'scheduled').map((r) => r.id));
+  for (const j of s.jobs.filter((x) => !(x.status === 'pending' && waiting.has(x.rollout_id)))) {
     const k = `${j.product_key}|${j.package_version}`;
     if (!groups.has(k)) groups.set(k, { key: j.product_key, version: j.package_version, jobs: [] });
     groups.get(k).jobs.push(j);
   }
   const live = [...groups.values()].filter((g) => g.jobs.some((j) => ACTIVE.includes(j.status)))
     .sort((a, b) => b.jobs.filter((j) => ACTIVE.includes(j.status)).length - a.jobs.filter((j) => ACTIVE.includes(j.status)).length);
+  const scheduled = (s.rollouts || []).filter((r) => r.status === 'scheduled').sort((a, b) => a.run_at - b.run_at);
+  const upcoming = scheduled.length ? html`<ul class="rollouts" style="margin-bottom:${live.length ? 14 : 0}px">${scheduled.slice(0, 3).map((r) => html`<li key=${'r' + r.id}>
+      <span class="tl-icon sm t-info" style="width:28px;height:28px"><${Icon} name="clock" /></span>
+      <div class="grow" style="min-width:0"><b>${r.name}</b>
+        <div class="muted" style="font-size:.8rem">Scheduled ${whenLabel(r.run_at)} · ${plural(r.counts.machines, 'machine')}${r.wake ? ' · wakes sleeping machines' : ''}</div></div>
+    </li>`)}</ul>` : null;
+  if (!live.length && upcoming) return upcoming;
   if (!live.length) {
     return html`<div class="empty-inline"><${Icon} name="check" /><div><b>No rollouts running</b><p class="muted">Queue updates from the Updates page — they start on every idle machine at once.</p></div></div>`;
   }
-  return html`<ul class="rollouts">${live.slice(0, 6).map((g) => {
+  return html`${upcoming}<ul class="rollouts">${live.slice(0, 6).map((g) => {
     const c = (st) => g.jobs.filter((j) => (Array.isArray(st) ? st.includes(j.status) : j.status === st)).length;
     const done = c('success'); const running = c(['downloading', 'installing']); const queued = c('pending'); const failed = c(['failed', 'cancelled']);
     const total = g.jobs.length;

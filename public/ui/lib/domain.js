@@ -122,6 +122,12 @@ export function nodeActivity(state, n, names) {
     const nm = names.get(pick.product_key) || pick.product_key;
     if (pick.status === 'installing') return { key: 'installing', label: 'Installing', detail: nm, tone: 'accent' };
     if (pick.status === 'downloading') return { key: 'downloading', label: 'Downloading', detail: nm, tone: 'accent' };
+    // Waiting for a scheduled rollout rather than for a free slot.
+    const r = pick.rollout_id && state.rollouts ? state.rollouts.find((x) => x.id === pick.rollout_id) : null;
+    if (r && r.status === 'scheduled') {
+      const t = new Date(r.run_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      return { key: 'queued', label: 'Scheduled', detail: `${nm} · ${t}`, tone: 'info' };
+    }
     return { key: 'queued', label: 'Queued', detail: nm, tone: 'info' };
   }
   if (n.gpu_util != null && n.gpu_util >= 20) return { key: 'rendering', label: 'Rendering', detail: `GPU ${n.gpu_util}%`, tone: 'violet' };
