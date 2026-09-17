@@ -930,6 +930,15 @@ function agentAuthorized(req) {
   return req.headers['x-agent-key'] === config.agentKey;
 }
 
+// The address machines use to reach the tracker. Pinned in config.agentServerUrl (e.g.
+// "http://10.10.10.55:4400") so the enrol commands and the one-click installer files always
+// point at the real farm server — never at whichever machine happens to serve the page (a dev
+// copy on a laptop would otherwise bake in its own IP).
+function agentBaseUrl() {
+  const u = String(config.agentServerUrl || '').trim().replace(/\/$/, '');
+  return u || `http://${lanAddress()}:${config.port}`;
+}
+
 function lanAddress() {
   for (const ifaces of Object.values(os.networkInterfaces())) {
     for (const i of ifaces || []) {
@@ -2749,7 +2758,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/enroll-files') {
       const share = downloadDir();
       if (!share) return sendJson(res, 503, { error: `the installer share (${config.downloadDir || SHARED_INSTALLERS}) isn't mounted on the tracker server` });
-      const base = `http://${lanAddress()}:${config.port}`;
+      const base = agentBaseUrl();
       const dir = path.join(share, 'Tracker Agent');
       try {
         await fs.promises.mkdir(dir, { recursive: true });
@@ -2772,7 +2781,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         agentKey: config.agentKey,
         port: config.port,
-        lanUrl: `http://${lanAddress()}:${config.port}`,
+        lanUrl: agentBaseUrl(),
       });
     }
 
