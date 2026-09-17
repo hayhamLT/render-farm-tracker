@@ -9,6 +9,7 @@ import { ago } from '../lib/format.js';
 import * as act from '../lib/actions.js';
 import { Icon, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
+import { InstallerLibrary } from './installers.js';
 import { alertsOn, alertTypes, ALERT_TYPES, enableAlerts, permission, supported, testAlert } from '../lib/alerts.js';
 
 // ---------------------------------------------------------------- desktop alerts (per browser)
@@ -129,7 +130,7 @@ export function SettingsView() {
     try { await post('/api/settings', body); toast(msg, 'success'); } catch (e) { toast(e.message, 'error'); }
     refresh();
   };
-  const NAV = [['downloads', 'Installer downloads', 'folder'], ['desktop', 'Desktop alerts', 'bell'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Enroll a machine', 'beacon']];
+  const NAV = [['downloads', 'Installer downloads', 'folder'], ['library', 'Installer library', 'package'], ['desktop', 'Desktop alerts', 'bell'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Enroll a machine', 'beacon']];
   return html`<div class="page settings-page">
     <${PageHeader} title="Settings" subtitle="How the tracker downloads, alerts, schedules and backs up." />
     <div class="settings-layout">
@@ -142,6 +143,12 @@ export function SettingsView() {
       <${FolderSetting} field="downloadDir" label="Apps folder" hint="Where the tracker saves app installers it downloads — the THIS-server share by default, never the server's own disk." value=${s.downloadDir} />
       <${FolderSetting} field="downloadDirPlugins" label="Plug-ins folder" hint="Leave empty to use the apps folder." value=${s.downloadDirPlugins} fallback=${s.downloadDir} />
       <${FolderSetting} field="downloadDirScripts" label="Scripts folder" hint="Leave empty to use the apps folder." value=${s.downloadDirScripts} fallback=${s.downloadDir} />
+    </section>
+
+    <section id="set-library" class="card card-pad stack">
+      <h2 class="card-title"><${Icon} name="package" />Installer library</h2>
+      <p class="dim" style="margin:0">The installers the tracker keeps on the share, one folder per app. Old installers that nothing uses any more can be cleaned up here — other files on the share are never touched.</p>
+      <${InstallerLibrary} />
     </section>
 
     <${DesktopAlerts} />

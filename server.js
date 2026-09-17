@@ -20,6 +20,7 @@ const timeline = require('./lib/timeline');
 const { createRollouts } = require('./lib/rollouts');
 const { createAsk } = require('./lib/ask');
 const installerFiles = require('./lib/installer_files');
+const { createLibrary } = require('./lib/installer_library');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -180,7 +181,7 @@ function fetchToInstallers(dlId, fileUrl, filename, destDir) {
     logEvent('package', `Installer download failed (${filename}): ${rec.error}`);
     return;
   }
-  const dest = path.join(dir, filename);
+  const dest = path.join(installerLibrary.destinationFor(dir, filename), filename);
   const tmp = dest + '.part';
 
   const go = (u, redirects) => {
@@ -766,9 +767,20 @@ function installerDirs() {
 // Resolve a filename (basename) to a full path, searching cache then mirrors.
 function resolveInstaller(filename) {
   const base = path.basename(filename);
+  // Where the (background) listing last saw it — including app folders.
+  const seen = installerLister.list(30000).find((f) => f.name === base);
+  if (seen && seen.dir) { const full = path.join(seen.dir, base); if (fs.existsSync(full)) return full; }
   for (const dir of installerDirs()) {
     const full = path.join(dir, base);
     if (fs.existsSync(full) && fs.statSync(full).isFile()) return full;
+  }
+  // Just moved into an app folder and not listed yet.
+  const prod = installerLibrary.productFor(base);
+  if (prod) {
+    for (const dir of installerDirs()) {
+      const full = path.join(dir, installerLibrary.folderName(prod), base);
+      if (fs.existsSync(full)) return full;
+    }
   }
   return null;
 }
@@ -783,7 +795,25 @@ function installerSha256(fullPath) {
 
 // Installer files across all source folders (deduped by name, first folder wins). The listing
 // is refreshed in the background (the share can stall under load) and returned immediately.
-const installerLister = installerFiles.createLister({ dirs: () => installerDirs(), localDir: INSTALLERS_DIR });
+const installerLister = installerFiles.createLister({
+  // Base folders plus each app's folder inside them (INSTALLERS/Redshift/…).
+  dirs: () => { const bases = installerDirs(); const apps = installerLibrary.appFolderNames(); return [...bases, ...bases.filter((b) => b !== INSTALLERS_DIR).flatMap((b) => apps.map((a) => path.join(b, a)))]; },
+  localDir: INSTALLERS_DIR,
+});
+// The installer library: app folders, organizing, finding unused installers (lib/installer_library.js).
+const installerLibrary = createLibrary({
+  db,
+  bases: () => [...new Set([config.downloadDir, config.downloadDirPlugins, config.downloadDirScripts, SHARED_INSTALLERS].filter((d) => d && path.resolve(d) !== path.resolve(INSTALLERS_DIR) && fs.existsSync(d)))],
+  keywordsFor: (prod) => productKeywords(prod.key, prod.name),
+  isBuiltin: (key) => !!PRODUCT_KEYWORDS[key],
+  cmpVersion: cmpVersionServer,
+  versionFromFilename,
+  activeFilenames: () => new Set([
+    ...db.prepare("SELECT DISTINCT p.filename FROM jobs j JOIN packages p ON p.id = j.package_id WHERE j.status IN ('pending','downloading','installing')").all().map((r) => r.filename),
+    ...[...downloads.values()].filter((d) => d.status === 'downloading').map((d) => d.filename),
+  ]),
+  logEvent,
+});
 installerLister.refresh();
 function cachedInstallerFiles() { return installerLister.list(30000); }
 // Start checksums for installers that queued jobs will need, so they're ready when a machine asks.
@@ -812,18 +842,19 @@ const PRODUCT_KEYWORDS = {
   notchlc: [/notch/i],
   nvidia: [/nvidia/i, /geforce/i, /nsd.*dch/i],
 };
-function findStagedInstaller(productKey, os, version, files) {
-  let kws = PRODUCT_KEYWORDS[productKey];
-  if (!kws) {
-    // Custom product: derive match keywords from its name + key (e.g. "Element 3D" → /element/i),
-    // so a manually-staged installer is found just like the built-ins.
-    const prod = db.prepare('SELECT name FROM products WHERE key = ?').get(productKey);
-    const words = new Set();
-    for (const src of [prod && prod.name, productKey]) {
-      String(src || '').toLowerCase().split(/[^a-z0-9]+/).forEach((w) => { if (w.length >= 3) words.add(w); });
-    }
-    kws = [...words].map((w) => new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+// Filename keywords for an app: built-in ones, or — for a custom product — derived from its
+// name + key (e.g. "Element 3D" → /element/i), so a manually-staged installer is found too.
+function productKeywords(productKey, name) {
+  if (PRODUCT_KEYWORDS[productKey]) return PRODUCT_KEYWORDS[productKey];
+  if (name === undefined) { const prod = db.prepare('SELECT name FROM products WHERE key = ?').get(productKey); name = prod && prod.name; }
+  const words = new Set();
+  for (const src of [name, productKey]) {
+    String(src || '').toLowerCase().split(/[^a-z0-9]+/).forEach((w) => { if (w.length >= 3) words.add(w); });
   }
+  return [...words].map((w) => new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+}
+function findStagedInstaller(productKey, os, version, files) {
+  const kws = productKeywords(productKey);
   if (!kws.length) return null;
   // Scripts (.jsx/.jsxbin/.zip) are OS-agnostic — they match on either platform. Otherwise
   // require an OS-appropriate installer extension.
@@ -1904,7 +1935,7 @@ const server = http.createServer(async (req, res) => {
         if (!filename) return sendJson(res, 400, { error: 'filename required' });
         const dir = downloadDir();
         if (!dir) { req.resume(); return sendJson(res, 503, { error: `installer share ${config.downloadDir || SHARED_INSTALLERS} is not mounted on the tracker server` }); }
-        const dest = path.join(dir, filename);
+        const dest = path.join(installerLibrary.destinationFor(dir, filename), filename);
         const tmp = dest + '.uploading';
         const out = fs.createWriteStream(tmp);
         req.pipe(out);
@@ -2127,6 +2158,26 @@ const server = http.createServer(async (req, res) => {
 
     // Start a server-side download of an installer from an online/vendor URL
     // into the cache. The farm nodes then pull it over the LAN from the server.
+    // Installer library: what's on the share, organize into app folders, delete unused ones.
+    if (req.method === 'GET' && p === '/api/installers') {
+      const files = await installerLibrary.inventory();
+      let space = null;
+      try { const st = await fs.promises.statfs(downloadDir() || SHARED_INSTALLERS); space = { free: st.bavail * st.bsize, total: st.blocks * st.bsize }; } catch { /* not mounted */ }
+      const plan = files.filter((f) => f.product && !f.organized);
+      return sendJson(res, 200, { share: config.downloadDir, mounted: !!downloadDir(), space, files: files.filter((f) => f.status !== 'other'), otherCount: files.filter((f) => f.status === 'other').length, toOrganize: plan.length });
+    }
+    if (req.method === 'POST' && p === '/api/installers/organize') {
+      const r = await installerLibrary.organize();
+      await installerLister.refresh();
+      return sendJson(res, 200, { ok: true, ...r });
+    }
+    if (req.method === 'POST' && p === '/api/installers/delete') {
+      const b = await readBody(req);
+      const r = await installerLibrary.removeUnused(Array.isArray(b.paths) ? b.paths : []);
+      await installerLister.refresh();
+      return sendJson(res, 200, { ok: true, ...r });
+    }
+
     if (req.method === 'POST' && p === '/api/download-url') {
       const b = await readBody(req);
       let parsed;
