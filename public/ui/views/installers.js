@@ -126,10 +126,10 @@ export function InstallerLibrary() {
         <${StackBar} height=${6} total=${data.space.total} parts=${[{ value: data.space.total - data.space.free, color: 'var(--accent)', label: 'used' }]} /></div>`}
     </div>
     <div class="row" style="gap:8px">
-      <button class="btn" disabled=${!loose} onClick=${() => openSheet((close) => html`<${OrganizeSheet} data=${data} close=${close} />`, { title: 'Organize installers', subtitle: 'One folder per app on the share', width: 620 }).then(after)}
-        title=${loose ? '' : 'Already organized'}><${Icon} name="folder" />${loose ? `Organize into app folders (${loose})` : 'Organized into app folders'}</button>
-      <button class="btn" disabled=${!unused.length} onClick=${() => openSheet((close) => html`<${CleanupSheet} data=${data} close=${close} products=${products} />`, { title: 'Clean up old installers', subtitle: unused.length ? `${plural(unused.length, 'installer')} · ${gb(unusedSize)} can go` : '', width: 680 }).then(after)}>
-        <${Icon} name="trash" />${unused.length ? `Clean up ${gb(unusedSize)}…` : 'Nothing to clean up'}</button>
+      ${loose ? html`<button class="btn" onClick=${() => openSheet((close) => html`<${OrganizeSheet} data=${data} close=${close} />`, { title: 'Organize installers', subtitle: 'One folder per app on the share', width: 620 }).then(after)}>
+        <${Icon} name="folder" />Organize into app folders (${loose})</button>` : null}
+      ${unused.length ? html`<button class="btn" onClick=${() => openSheet((close) => html`<${CleanupSheet} data=${data} close=${close} products=${products} />`, { title: 'Clean up old installers', subtitle: `${plural(unused.length, 'installer')} · ${gb(unusedSize)} can go`, width: 680 }).then(after)}>
+        <${Icon} name="trash" />Clean up ${gb(unusedSize)}…</button>` : null}
       <button class="btn ghost sm icon" title="Refresh" aria-label="Refresh" onClick=${load}><${Icon} name="refresh" /></button>
     </div>
     <div class="card lib-list">
