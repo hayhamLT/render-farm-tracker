@@ -138,7 +138,8 @@ export function SettingsView() {
 
     <section id="set-downloads" class="card card-pad stack">
       <h2 class="card-title"><${Icon} name="folder" />Installer downloads</h2>
-      <${FolderSetting} field="downloadDir" label="Apps folder" hint="Where the tracker saves app installers it downloads." value=${s.downloadDir} />
+      ${s.installerShareMounted === false ? html`<div class="banner bad"><${Icon} name="alert" />The installer share isn't mounted on the tracker server, so nothing can be downloaded or staged right now. It remounts by itself; check THIS-server if this stays.</div>` : null}
+      <${FolderSetting} field="downloadDir" label="Apps folder" hint="Where the tracker saves app installers it downloads — the THIS-server share by default, never the server's own disk." value=${s.downloadDir} />
       <${FolderSetting} field="downloadDirPlugins" label="Plug-ins folder" hint="Leave empty to use the apps folder." value=${s.downloadDirPlugins} fallback=${s.downloadDir} />
       <${FolderSetting} field="downloadDirScripts" label="Scripts folder" hint="Leave empty to use the apps folder." value=${s.downloadDirScripts} fallback=${s.downloadDir} />
     </section>

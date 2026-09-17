@@ -169,10 +169,17 @@ function filenameFromUrl(u, fallback) {
   return fallback;
 }
 
-// Fetch a URL into installers/, following redirects, tracking progress.
+// Fetch a URL into the installer share, following redirects, tracking progress.
 function fetchToInstallers(dlId, fileUrl, filename, destDir) {
   const rec = downloads.get(dlId);
-  const dest = path.join(destDir || downloadDir(), filename);
+  const dir = destDir || downloadDir();
+  if (!dir) {
+    rec.status = 'error';
+    rec.error = `the installer share (${config.downloadDir || SHARED_INSTALLERS}) isn't mounted on the tracker server — nothing was downloaded`;
+    logEvent('package', `Installer download failed (${filename}): ${rec.error}`);
+    return;
+  }
+  const dest = path.join(dir, filename);
   const tmp = dest + '.part';
 
   const go = (u, redirects) => {
@@ -230,23 +237,17 @@ if (fs.existsSync(CONFIG_PATH)) {
 // Monitoring is always on (the master on/off toggle was removed by request).
 config.monitoringActive = true;
 
-// Extra read-only installer source folders (e.g. a network share you control).
-// Files in installers/ and these dirs are all available to deploy.
+// Installers live on the THIS-server share — every download and upload goes there, never
+// onto the tracker server's own (small) disk. The local installers/ folder is only read, as
+// a last fallback for files put there by older versions. config.sharedInstallers overrides.
+const SHARED_INSTALLERS = config.sharedInstallers || '/Volumes/THIS-server/INSTALLERS';
 let configDirty = false;
-if (!Array.isArray(config.installerSources)) {
-  config.installerSources = [];
-  // Auto-pick up the THIS-server mirror if it's mounted.
-  const mirror = '/Volumes/THIS-server/INSTALLERS';
-  if (fs.existsSync(mirror)) config.installerSources.push(mirror);
-  configDirty = true;
-}
-
-// Where downloaded installers are written. Default to the THIS-server share so the
-// (Dropbox-synced) project folder doesn't fill up with multi-GB installers. Settable
-// in the Catalog tab.
-if (config.downloadDir === undefined) {
-  const mirror = '/Volumes/THIS-server/INSTALLERS';
-  config.downloadDir = fs.existsSync(mirror) ? mirror : INSTALLERS_DIR;
+if (!Array.isArray(config.installerSources)) { config.installerSources = []; configDirty = true; }
+if (!config.installerSources.includes(SHARED_INSTALLERS)) { config.installerSources.unshift(SHARED_INSTALLERS); configDirty = true; }
+// Where downloaded installers are written (Settings → Installer downloads). A missing or local
+// setting — even one saved while the share happened to be unmounted — becomes the share.
+if (!config.downloadDir || path.resolve(config.downloadDir) === path.resolve(INSTALLERS_DIR)) {
+  config.downloadDir = SHARED_INSTALLERS;
   configDirty = true;
 }
 
@@ -514,6 +515,7 @@ async function checkCustomVersions() {
       if (!filename || resolveInstaller(filename)) continue;
       if ([...downloads.values()].some((d) => d.filename === filename)) continue;
       const dest = downloadDirFor(prod.category);
+      if (!dest) continue;   // share not mounted — try again on the next check
       try { const st = fs.statfsSync(dest); if (st.bavail * st.bsize < 25e9) continue; } catch { /* ignore */ }
       const dlId = crypto.randomBytes(6).toString('hex');
       downloads.set(dlId, { url: srcUrl, filename, status: 'downloading', received: 0, total: 0, error: null });
@@ -741,19 +743,21 @@ reapStaleJobs();
 
 // All folders that may hold installer files: the local cache first, then mirrors.
 // Where new downloads land, per category (apps / plug-ins / scripts can use different
-// folders). Falls back to the apps folder → share → local cache. Writable wins.
+// folders): that folder, else the apps folder, else the share. null when none is writable
+// (share unmounted) — callers report it instead of quietly filling the server's own disk.
 function downloadDirFor(category) {
   const k = category === 'plugin' ? 'downloadDirPlugins' : category === 'script' ? 'downloadDirScripts' : 'downloadDir';
-  for (const d of [config[k], config.downloadDir, ...(config.installerSources || []), INSTALLERS_DIR].filter(Boolean)) {
+  for (const d of [config[k], config.downloadDir, SHARED_INSTALLERS].filter(Boolean)) {
+    if (path.resolve(d) === path.resolve(INSTALLERS_DIR)) continue;
     try { fs.accessSync(d, fs.constants.W_OK); return d; } catch { /* not writable / missing */ }
   }
-  return INSTALLERS_DIR;
+  return null;
 }
 function downloadDir() { return downloadDirFor('app'); }
 // All folders searched for staged installers — includes every category's download folder, so
 // a file staged in any of them is found regardless of the product's category.
 function installerDirs() {
-  const dirs = [INSTALLERS_DIR, config.downloadDir, config.downloadDirPlugins, config.downloadDirScripts, ...config.installerSources];
+  const dirs = [config.downloadDir, config.downloadDirPlugins, config.downloadDirScripts, SHARED_INSTALLERS, ...config.installerSources, INSTALLERS_DIR];
   return [...new Set(dirs.filter((d) => d && fs.existsSync(d)))];
 }
 
@@ -1493,11 +1497,12 @@ function fullState() {
     slackWebhook: config.slackWebhook || '',
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
     rollouts: rollouts.list(),
-    downloadDir: downloadDir(),
+    downloadDir: downloadDir() || config.downloadDir,
+    installerShareMounted: !!downloadDir(),
     downloadDirPlugins: config.downloadDirPlugins || '',
     downloadDirScripts: config.downloadDirScripts || '',
     lastBackup: lastBackup(),   // {db, config, size, at} of the most recent DB snapshot, or null
-    installerSources: [...new Set([config.downloadDir, '/Volumes/THIS-server/INSTALLERS', INSTALLERS_DIR, ...config.installerSources].filter(Boolean))],
+    installerSources: [...new Set([config.downloadDir, SHARED_INSTALLERS, ...config.installerSources].filter(Boolean))],
     nodes,
     products,
     packages: db.prepare('SELECT * FROM packages ORDER BY created_at DESC').all(),
@@ -1912,7 +1917,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/api/agent/upload') {
         const filename = path.basename(url.searchParams.get('filename') || '');
         if (!filename) return sendJson(res, 400, { error: 'filename required' });
-        const dest = path.join(INSTALLERS_DIR, filename);
+        const dir = downloadDir();
+        if (!dir) { req.resume(); return sendJson(res, 503, { error: `installer share ${config.downloadDir || SHARED_INSTALLERS} is not mounted on the tracker server` }); }
+        const dest = path.join(dir, filename);
         const tmp = dest + '.uploading';
         const out = fs.createWriteStream(tmp);
         req.pipe(out);
@@ -2090,6 +2097,9 @@ const server = http.createServer(async (req, res) => {
         if (typeof b[field] !== 'string') continue;
         const dir = b[field].trim();
         if (!dir) { config[field] = field === 'downloadDir' ? config.downloadDir : null; saveConfig(); continue; }
+        if (path.resolve(dir) === path.resolve(INSTALLERS_DIR)) {
+          return sendJson(res, 400, { error: `${label} folder can't be the tracker server's own installers folder — use the share (${SHARED_INSTALLERS}) or another network folder.` });
+        }
         try {
           fs.mkdirSync(dir, { recursive: true });
           fs.accessSync(dir, fs.constants.W_OK);
@@ -2714,7 +2724,7 @@ server.listen(LISTEN_PORT, () => {
   console.log(`Render Farm Update Tracker`);
   console.log(`  Dashboard : http://localhost:${LISTEN_PORT}`);
   console.log(`  Agent key : ${config.agentKey}`);
-  console.log(`  Installers: ${INSTALLERS_DIR}`);
+  console.log(`  Installers: ${config.downloadDir}${downloadDir() ? '' : ' (NOT MOUNTED)'}`);
   // Automated DB + config backups (one now, then nightly) — see lib/backup.js.
   scheduleBackups(config);
 });
