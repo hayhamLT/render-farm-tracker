@@ -6,16 +6,16 @@ import { useMemo } from 'preact/hooks';
 import { signal } from '@preact/signals-core';
 import { farm } from '../lib/store.js';
 import { go } from '../lib/router.js';
-import { openMenu } from '../lib/ui.js';
+import { openMenu, pref } from '../lib/ui.js';
 import { ago, plural, cmpVersion } from '../lib/format.js';
 import {
   normalizeProducts, isTracked, appliesToOS, productStatus, inProgressNodes, latestForOS, nodesByKind, nvidiaTarget, SELF_UPDATING,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, installerState, updateTargets } from '../lib/updater.js';
-import { Icon, OsStatus, ProductLogo } from '../components/common.js';
+import { Icon, OsStatus, ProductLogo, ViewToggle } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
-import { StackBar, Donut, Num } from '../components/viz.js';
+import { StackBar, Donut, Num, Ring } from '../components/viz.js';
 import { RolloutList } from '../components/rollouts.js';
 import { openUpdate } from '../components/update-sheet.js';
 import { openRollout } from './deploy.js';
@@ -24,6 +24,7 @@ import { showMachines } from './machines.js';
 const selectedApps = signal(new Set());   // product keys ticked for a batch update
 const expanded = signal(null);            // product key whose machines are shown
 const picks = signal({});                 // product key -> Set(node ids) chosen by hand
+const view = pref('updates.view', 'list');
 
 const RENDER_GPU = 20;
 const OSES = ['windows', 'macos'];
@@ -140,6 +141,31 @@ function AppRow({ m, s }) {
       </div>
     </div>`}
   </div>`;
+}
+
+// Grid view: the same app, as a card.
+function AppCard({ m }) {
+  const { p } = m;
+  const chosen = chosenFor(m);
+  const blocked = m.installers.length && m.installers.every((i) => !i.ok);
+  const pct = m.installed.length ? Math.round((m.current.length / m.installed.length) * 100) : 100;
+  return html`<article class="card ucard3">
+    <header>
+      <${ProductLogo} product=${p} size=${32} />
+      <div class="uc3-name"><b>${p.name}</b><span class="ur-ver"><span class="mono dim">${m.from[0] || ''}</span>${m.from.length ? html`<${Icon} name="chevron" />` : null}<span class="mono">${m.targets.join(' / ')}</span></span></div>
+      <${Ring} size=${46} stroke=${5} total=${Math.max(1, m.installed.length)} label=${`${m.current.length} of ${m.installed.length} current`}
+        segments=${[{ value: m.current.length, color: 'var(--ok)' }, { value: m.updating.length, color: 'var(--accent)' }, { value: m.behind.length, color: 'var(--info)' }]}>
+        <span class="uc3-pct">${pct}<small>%</small></span>
+      <//>
+    </header>
+    <div class="uc3-meta"><${Installers} m=${m} />${m.updating.length ? html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${m.updating.length} updating</span>` : null}</div>
+    <footer>
+      <span class="dim">${m.behind.length ? `${plural(m.behind.length, 'machine')} behind` : 'up to date'}</span>
+      <span class="grow"></span>
+      <button class="btn sm" onClick=${() => { view.value = 'list'; expanded.value = p.key; }}>Choose…</button>
+      <button class="btn sm primary" disabled=${!chosen.length || blocked} onClick=${() => openUpdate([{ product: p, nodes: chosen }])}><${Icon} name="download" />Update ${m.behind.length}</button>
+    </footer>
+  </article>`;
 }
 
 function Attention({ s, models }) {
@@ -259,6 +285,7 @@ export function UpdatesView() {
   return html`<div class="page updates-page">
     <${PageHeader} title="Updates" subtitle=${updateCount ? `${plural(updateCount, 'update')} for ${plural(behindMachines.size, 'machine')}` : 'Every machine is up to date'}>
       <button class="btn" onClick=${() => openRollout({})}><${Icon} name="package" />Install a specific version…</button>
+      ${available.length ? html`<${ViewToggle} value=${view.value} onChange=${(v) => { view.value = v; }} />` : null}
     </${PageHeader}>
 
     <div class="stack">
@@ -287,7 +314,9 @@ export function UpdatesView() {
           <span class="dim">${plural(g.rows.reduce((c, m) => c + m.behind.length, 0), 'update')} · ${plural(g.rows.length, 'app')}</span>
           ${g.hint ? html`<span class="grow"></span><span class="dim" style="font-size:.8rem">${g.hint}</span>` : null}
         </div>
-        ${g.rows.map((m) => html`<${AppRow} key=${m.p.key} m=${m} s=${s} />`)}
+        ${view.value === 'grid'
+          ? html`<div class="ugrid3">${g.rows.map((m) => html`<${AppCard} key=${m.p.key} m=${m} />`)}</div>`
+          : g.rows.map((m) => html`<${AppRow} key=${m.p.key} m=${m} s=${s} />`)}
       </section>`) : null}
 
       ${majors.length ? html`<section class="card ulist">

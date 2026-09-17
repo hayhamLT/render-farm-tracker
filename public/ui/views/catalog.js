@@ -8,13 +8,16 @@ import { pref, toast, confirm, openSheet, openMenu } from '../lib/ui.js';
 import { ago, plural } from '../lib/format.js';
 import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
-import { Icon, ProductLogo, Badge, Empty } from '../components/common.js';
+import { Icon, ProductLogo, Badge, Empty, ViewToggle } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { StackBar, Ring } from '../components/viz.js';
 import { InstallerLibrary } from './installers.js';
 
 const tab = pref('catalog.tab', 'catalog');
 const SECTIONS = [['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts']];
+const view = pref('apps.view', 'grid');
+// Anything that isn't the installer library is the catalog (older builds stored 'app'/'plugin').
+const onCatalog = () => tab.value !== 'installers';
 const catOf = (p) => (p.category === 'plugin' || p.category === 'script' ? p.category : 'app');
 const LABEL = { app: 'app', plugin: 'plug-in', script: 'script' };
 
@@ -198,14 +201,35 @@ export function CatalogView() {
   return html`<div class="page stack">
     <${PageHeader} title="Apps" subtitle="What the tracker keeps updated, where new versions come from, and the installers on the share.">
       <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
-      ${tab.value !== 'installers' ? html`<button class="btn primary" onClick=${(e) => openMenu(e.currentTarget, SECTIONS.map(([k, l]) => ({ label: `Add ${LABEL[k]}`, icon: 'plus', onSelect: () => addProduct(k) })))}><${Icon} name="plus" />Add…</button>` : null}
+      ${onCatalog() ? html`<button class="btn primary" onClick=${(e) => openMenu(e.currentTarget, SECTIONS.map(([k, l]) => ({ label: `Add ${LABEL[k]}`, icon: 'plus', onSelect: () => addProduct(k) })))}><${Icon} name="plus" />Add…</button>` : null}
     </${PageHeader}>
-    <div class="pills">${[['catalog', 'Tracked apps'], ['installers', 'Installers on the share']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}${k === 'catalog' ? html`<span class="n">${products.length}</span>` : null}</button>`)}</div>
-    ${tab.value === 'installers' ? html`<section class="card card-pad"><${InstallerLibrary} /></section>`
+    <div class="row">
+      <div class="pills">${[['catalog', 'Tracked apps'], ['installers', 'Installers on the share']].map(([k, l]) => html`<button key=${k} class=${'pill' + ((k === 'installers' ? !onCatalog() : onCatalog()) ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}${k === 'catalog' ? html`<span class="n">${products.length}</span>` : null}</button>`)}</div>
+      <span class="grow"></span>
+      ${onCatalog() ? html`<${ViewToggle} value=${view.value} onChange=${(v) => { view.value = v; }} />` : null}
+    </div>
+    ${!onCatalog() ? html`<section class="card card-pad"><${InstallerLibrary} /></section>`
       : sections.filter((sec) => sec.rows.length).map((sec) => html`<section key=${sec.k} class="stack" style="gap:10px">
         <div class="row"><h2 class="section-h" style="margin:0">${sec.label}</h2><span class="dim">${sec.rows.length}</span><span class="grow"></span>
           <button class="btn ghost sm" onClick=${() => addProduct(sec.k)}><${Icon} name="plus" />Add ${LABEL[sec.k]}</button></div>
-        <div class="appgrid">${sec.rows.map((p) => {
+        ${view.value === 'list' ? html`<div class="card table-wrap"><table class="table">
+          <thead><tr><th>${sec.label.replace(/s$/, '')}</th><th>Latest</th><th style="width:190px">On the farm</th><th>Track</th><th>Auto</th><th></th></tr></thead>
+          <tbody>${sec.rows.map((p) => {
+            const cv = coverage(p);
+            const tracked = p.dashboard_hidden !== 1;
+            return html`<tr key=${p.key} style=${tracked ? '' : 'opacity:.6'}>
+              <td class="nowrap"><span class="row" style="flex-wrap:nowrap;gap:10px"><${ProductLogo} product=${p} size=${22} /><b>${p.name}</b></span></td>
+              <td class="mono nowrap">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</td>
+              <td>${cv.have ? html`<div class="row" style="flex-wrap:nowrap;gap:9px"><${StackBar} height=${6} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} /><span class="mono nowrap" style="font-size:.78rem">${cv.current}/${cv.have}</span></div>` : html`<span class="dim">not installed</span>`}</td>
+              <td><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /></td>
+              <td>${SELF_MANAGED.has(p.key) ? html`<span class="dim" title="Updates itself">self</span>` : html`<${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} />`}</td>
+              <td class="right nowrap">${p.custom ? html`
+                <button class="btn sm ghost icon" title="Edit" onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
+                <button class="btn sm ghost icon" title="Uninstall from machines" onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
+                <button class="btn sm ghost icon" title="Delete from the tracker" onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}</td>
+            </tr>`;
+          })}</tbody></table></div>`
+        : html`<div class="appgrid">${sec.rows.map((p) => {
           const cv = coverage(p);
           const tracked = p.dashboard_hidden !== 1;
           const pct = cv.have ? Math.round((cv.current / cv.have) * 100) : null;
@@ -239,7 +263,7 @@ export function CatalogView() {
                 <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}
             </footer>
           </article>`;
-        })}</div>
+        })}</div>`}
       </section>`)}
   </div>`;
 }

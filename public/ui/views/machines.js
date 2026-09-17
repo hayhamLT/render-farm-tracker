@@ -15,7 +15,7 @@ import {
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
-import { Icon, OsStatus, ProductLogo, Badge, Empty } from '../components/common.js';
+import { Icon, OsStatus, ProductLogo, Badge, Empty, ViewToggle } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { waitingRollout, whenLabel } from '../components/rollouts.js';
 import { Donut } from '../components/viz.js';
@@ -24,6 +24,7 @@ import { askAbout } from '../components/ask.js';
 import { Jobs } from './history.js';
 
 const quick = pref('machines.quick', 'all');
+const view = pref('machines.view', 'list');
 const osFilter = pref('machines.os', 'all');
 const sortBy = pref('machines.sort', 'name');
 const search = signal('');
@@ -178,9 +179,38 @@ function MachineTable({ rows, model, head = true }) {
   </table></div>`;
 }
 
+// Grid view: one card per machine, same information as a row.
+function MachineCard({ m, model }) {
+  const { node: n, dl } = m;
+  const sel = selected.value.has(n.id);
+  const st = rowState(m);
+  return html`<article class=${`card mcard3 s-${st}${sel ? ' selected' : ''}`} onClick=${() => go('machines', n.hostname)}>
+    <header>
+      <label class="mc3-check" onClick=${(e) => e.stopPropagation()}><input type="checkbox" aria-label=${`Select ${n.hostname}`} checked=${sel} onChange=${() => toggleSel(n.id)} /></label>
+      <${OsStatus} node=${n} />
+      <b class="mc3-name">${n.hostname}</b>
+      <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => { e.stopPropagation(); openMenu(e.currentTarget, machineMenuItems(n, dl)); }}><${Icon} name="more" /></button>
+    </header>
+    <${StatusCell} m=${m} />
+    <div class="mc3-updates"><${BehindCell} m=${m} model=${model} /></div>
+    <footer>
+      <span class="dim">${m.lastOk ? `updated ${ago(m.lastOk, model.s.now)}` : 'no installs yet'}</span>
+      <span class="grow"></span>
+      ${m.behind.length && !blockedReason(n) ? html`<button class="btn sm" onClick=${(e) => { e.stopPropagation(); updateMachines(model, [n]); }}><${Icon} name="download" />Update ${m.behind.length}</button>` : null}
+    </footer>
+  </article>`;
+}
+
+function MachineList({ rows, model, head = true }) {
+  if (view.value === 'grid') return html`<div class="mgrid3">${rows.map((m) => html`<${MachineCard} key=${m.node.id} m=${m} model=${model} />`)}</div>`;
+  return html`<${MachineTable} rows=${rows} model=${model} head=${head} />`;
+}
+
 function GroupedMachines({ rows, model }) {
   const groups = GROUPS.map((g) => ({ ...g, rows: rows.filter((m) => groupOf(m) === g.key) })).filter((g) => g.rows.length);
-  if (groups.length === 1) return html`<div class="card">${html`<${MachineTable} rows=${groups[0].rows} model=${model} />`}</div>`;
+  if (groups.length === 1) return view.value === 'grid'
+    ? html`<${MachineList} rows=${groups[0].rows} model=${model} />`
+    : html`<div class="card"><${MachineTable} rows=${groups[0].rows} model=${model} /></div>`;
   return html`<div class="stack" style="gap:12px">${groups.map((g) => {
     const shown = openGroups.value[g.key] ?? g.open;
     const ids = g.rows.map((m) => m.node.id);
@@ -195,7 +225,7 @@ function GroupedMachines({ rows, model }) {
         <span class="grow"></span>
         <button class="btn ghost sm" onClick=${() => { const next = new Set(selected.value); ids.forEach((id) => (allSel ? next.delete(id) : next.add(id))); selected.value = next; }}>${allSel ? 'Deselect' : 'Select all'}</button>
       </header>
-      ${shown ? html`<${MachineTable} rows=${g.rows} model=${model} head=${false} />` : null}
+      ${shown ? html`<${MachineList} rows=${g.rows} model=${model} head=${false} />` : null}
     </section>`;
   })}</div>`;
 }
@@ -387,12 +417,14 @@ export function MachinesView() {
       <button class="btn ghost sm" title="Sort" onClick=${(e) => openMenu(e.currentTarget, [
         ['name', 'Name'], ['behind', 'Most updates'], ['updated', 'Recently updated'], ['os', 'OS'],
       ].map(([k, l]) => ({ label: l, icon: sortBy.value === k ? 'check' : 'dot', onSelect: () => { sortBy.value = k; } })))}><${Icon} name="list" />Sort</button>
+      <${ViewToggle} value=${view.value} onChange=${(v) => { view.value = v; }} />
       <${HiddenMachines} />
     </div>
 
     ${!nodes.length ? html`<${Empty}>No machines yet — enroll one from Settings → Enroll a machine.<//>`
       : !rows.length ? html`<${Empty}>No machines match these filters.<//>`
       : quick.value === 'all' ? html`<${GroupedMachines} rows=${rows} model=${model} />`
+      : view.value === 'grid' ? html`<${MachineList} rows=${rows} model=${model} />`
       : html`<div class="card"><${MachineTable} rows=${rows} model=${model} /></div>`}
 
     <${BulkBar} model=${model} />

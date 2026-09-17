@@ -135,3 +135,11 @@ export function MenuHost() {
         </button>`))}
   </div>`;
 }
+
+// List / grid switch — same control everywhere, remembered per page by the caller.
+export function ViewToggle({ value, onChange, labels = { list: 'List', grid: 'Cards' } }) {
+  return html`<div class="seg" role="group" aria-label="View">
+    ${[['list', 'list'], ['grid', 'grid']].map(([k, icon]) => html`<button key=${k} class=${value === k ? 'on' : ''} title=${labels[k]} aria-label=${labels[k]} aria-pressed=${value === k}
+      onClick=${() => onChange(k)}><${Icon} name=${icon} /></button>`)}
+  </div>`;
+}
