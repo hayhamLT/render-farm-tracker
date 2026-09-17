@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.31.1"
+AGENT_VERSION = "2.31.2"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -343,6 +343,30 @@ $autologon = ("$($wl.AutoAdminLogon)" -eq '1')
 if (-not $du -and $autologon -and $wl.DefaultUserName) { $d = if ($wl.DefaultDomainName) { $wl.DefaultDomainName } else { $env:COMPUTERNAME }; $du = "$d\$($wl.DefaultUserName)" }
 """
 
+# That user's own deadline.ini ($uini). The Launcher runs as the desktop user and its per-user
+# settings OVERRIDE the machine-wide %ProgramData% ones — a user file with
+# LaunchSlaveAtStartup=0 keeps the Worker from starting even though the machine-wide file says
+# True (MARS-05, Sep 2026). $lsas = the value that actually applies.
+_PS_DEADLINE_INI = r"""
+$sini = "$env:ProgramData\Thinkbox\Deadline10\deadline.ini"
+$uini = $null
+if ($du) {
+  try {
+    $sid = (New-Object System.Security.Principal.NTAccount($du)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    $prof = (Get-CimInstance Win32_UserProfile -Filter "SID='$sid'" -ErrorAction SilentlyContinue).LocalPath
+    if ($prof) { $uini = Join-Path $prof 'AppData\Local\Thinkbox\Deadline10\deadline.ini' }
+  } catch { }
+}
+function Get-IniValue($path, $key) {
+  if (-not $path -or -not (Test-Path $path)) { return $null }
+  $m = Select-String -Path $path -Pattern "^$key=(.*)$" | Select-Object -First 1
+  if ($m) { return $m.Matches[0].Groups[1].Value.Trim() } else { return $null }
+}
+$lsasUser = Get-IniValue $uini 'LaunchSlaveAtStartup'
+$lsasSys = Get-IniValue $sini 'LaunchSlaveAtStartup'
+$lsas = if ($lsasUser -ne $null) { $lsasUser } else { $lsasSys }
+"""
+
 
 def detect_deadline():
     """{installed, launcher, worker, autostart, autologon, user, how} — read-only, best-effort."""
@@ -358,11 +382,11 @@ if (Get-Service | Where-Object { $_.Name -match 'deadline' -and $_.StartType -eq
 $startup = @('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp') + (Get-ChildItem C:\Users -Directory | ForEach-Object { "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup" })
 if ($startup | Where-Object { Get-ChildItem $_ -Filter '*deadline*' }) { $how += 'startup-folder' }
 foreach ($rk in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') { $v = Get-ItemProperty $rk; if ($v -and ($v.PSObject.Properties | Where-Object { "$($_.Value)" -match 'deadlinelauncher' })) { $how += 'run-key' } }
-$ini = "$env:ProgramData\Thinkbox\Deadline10\deadline.ini"
-$lsas = if (Test-Path $ini) { (Select-String -Path $ini -Pattern '^LaunchSlaveAtStartup=(.*)$' | Select-Object -First 1).Matches.Groups[1].Value } else { '' }
+%s
 [pscustomobject]@{ installed = $installed; launcher = [bool](Get-Process deadlinelauncher); worker = [bool](Get-Process deadlineworker);
-  starts_worker = ($lsas -match '^(1|true)$'); how = $how; autologon = $autologon; user = $du } | ConvertTo-Json -Compress
-""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK)
+  starts_worker = ("$lsas" -match '^(1|true)$'); user_ini_off = ($lsasUser -ne $null -and "$lsasUser" -notmatch '^(1|true)$');
+  how = $how; autologon = $autologon; user = $du } | ConvertTo-Json -Compress
+""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK, _PS_DEADLINE_INI)
             out = (_run_powershell(ps, timeout=60).stdout or "").strip()
             d = json.loads(out) if out else None
             if not d:
@@ -397,7 +421,10 @@ def fix_deadline_startup():
     """Make Deadline start by itself and start it now (Windows). Registers a scheduled task that
     runs the Deadline Launcher at logon of the desktop user — in that user's own session, like
     starting it by hand, so shares and licenses behave normally; no password involved — and
-    turns on LaunchSlaveAtStartup so the Launcher brings up the Worker. Returns (ok, message)."""
+    turns on LaunchSlaveAtStartup so the Launcher brings up the Worker — machine-wide AND in the
+    desktop user's own deadline.ini, which overrides the machine-wide one. If the Launcher is
+    already running without a Worker, it's restarted in the user's session so the corrected
+    setting takes effect (never touched while a Worker runs). Returns (ok, message)."""
     if not IS_WINDOWS:
         return False, "Automatic Deadline startup fix is Windows-only."
     ps = r"""$ProgressPreference='SilentlyContinue'
@@ -406,17 +433,33 @@ $bin = '%s'; $task = '%s'
 if (-not (Test-Path "$bin\deadlinelauncher.exe")) { 'ERROR: Deadline is not installed in ' + $bin; exit 2 }
 if (-not $du) { 'ERROR: nobody is logged in and automatic login is off, so there is no desktop session for Deadline to run in. Log in once (or enable automatic login), then try again.'; exit 3 }
 & "$bin\deadlinecommand.exe" -SetIniFileSetting LaunchSlaveAtStartup True 2>&1 | Out-Null
+%s
+$userFixed = $false
+if ($uini -and (Test-Path $uini) -and $lsasUser -ne $null -and "$lsasUser" -notmatch '^(1|true)$') {
+  $txt = [IO.File]::ReadAllText($uini)
+  $txt = [regex]::Replace($txt, '(?m)^LaunchSlaveAtStartup=.*$', 'LaunchSlaveAtStartup=True')
+  [IO.File]::WriteAllText($uini, $txt)
+  $userFixed = $true
+}
 $act = New-ScheduledTaskAction -Execute "$bin\deadlinelauncher.exe"
 $trg = New-ScheduledTaskTrigger -AtLogOn -User $du
 $pri = New-ScheduledTaskPrincipal -UserId $du -LogonType Interactive -RunLevel Highest
 $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $task -Action $act -Trigger $trg -Principal $pri -Settings $set -Force | Out-Null
 $started = $false
+$restarted = $false
+$running = [bool](Get-Process deadlineworker -ErrorAction SilentlyContinue)
+if ($ex -and -not $running -and (Get-Process deadlinelauncher -ErrorAction SilentlyContinue)) {
+  # A Launcher that started with the Worker switched off won't start it until it's restarted.
+  Get-Process deadlinelauncher -ErrorAction SilentlyContinue | Stop-Process -Force
+  Start-Sleep 3
+  $restarted = $true
+}
 if (-not (Get-Process deadlinelauncher -ErrorAction SilentlyContinue)) { if ($ex) { Start-ScheduledTask -TaskName $task; $started = $true } }
 for ($i = 0; $i -lt 24 -and -not (Get-Process deadlineworker -ErrorAction SilentlyContinue); $i++) { Start-Sleep 5 }
 $w = [bool](Get-Process deadlineworker -ErrorAction SilentlyContinue)
-"OK: Deadline now starts at logon of $du (auto-login: $autologon)." + $(if ($started) { " Started it now." } else { "" }) + $(if ($w) { " Worker is running." } elseif ($ex) { " Worker hasn't appeared yet — check Deadline Monitor." } else { " Nobody is logged in right now, so it starts at the next logon." })
-""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK)
+"OK: Deadline now starts at logon of $du (auto-login: $autologon)." + $(if ($userFixed) { " Turned on 'start the Worker' in $du's own Deadline settings (it was off there)." } else { "" }) + $(if ($restarted) { " Restarted the Launcher." } elseif ($started) { " Started it now." } else { "" }) + $(if ($w) { " Worker is running." } elseif ($ex) { " Worker hasn't appeared yet — check Deadline Monitor." } else { " Nobody is logged in right now, so it starts at the next logon." })
+""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK, _PS_DEADLINE_INI)
     try:
         p = _run_powershell(ps, timeout=240)
         msg = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
