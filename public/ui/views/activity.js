@@ -1,4 +1,4 @@
-// Activity: a live timeline of everything the tracker did — installs, rollouts, machines,
+// Activity log (History → Activity log): a live timeline of everything the tracker did — installs, rollouts, machines,
 // versions — filterable, grouped by day, with machine names linked to their details.
 import { html } from '../lib/html.js';
 import { signal } from '@preact/signals-core';
@@ -6,7 +6,6 @@ import { farm } from '../lib/store.js';
 import { go } from '../lib/router.js';
 import { ago } from '../lib/format.js';
 import { Icon } from '../components/common.js';
-import { PageHeader } from '../components/page.js';
 
 const kind = signal('');
 const query = signal('');
@@ -59,7 +58,7 @@ function Message({ text, hosts }) {
   return parts;
 }
 
-export function ActivityView() {
+export function ActivityLog() {
   const s = farm.value;
   if (!s) return null;
   const q = query.value.toLowerCase();
@@ -67,10 +66,11 @@ export function ActivityView() {
   const rows = s.events.filter((e) => (!kind.value || e.kind === kind.value) && (!q || e.message.toLowerCase().includes(q)));
   const hosts = s.nodes.map((n) => n.hostname).sort((a, b) => b.length - a.length);
   let lastDay = '';
-  return html`<div class="page stack" style="max-width:1100px">
-    <${PageHeader} title="Activity" subtitle=${`The last ${s.events.length} things the tracker did — live.`}>
+  return html`<div class="stack">
+    <div class="row">
       <label class="search"><${Icon} name="search" /><input class="field" placeholder="Search activity" value=${query.value} onInput=${(e) => { query.value = e.currentTarget.value; }} style="width:260px" /></label>
-    </${PageHeader}>
+      <span class="dim">The last ${s.events.length} things the tracker did — live.</span>
+    </div>
     <div class="pills">${KINDS.map(([k, l]) => html`<button key=${k} class=${'pill' + (kind.value === k ? ' on' : '')} disabled=${!counts[k]} onClick=${() => { kind.value = k; }}>${l}<span class="n">${counts[k]}</span></button>`)}</div>
     <section class="card timeline-card">
       ${!rows.length ? html`<div class="empty-inline"><${Icon} name="search" /><div><b>Nothing matches</b><p class="muted">Try another filter or search.</p></div></div>` : html`<ol class="timeline">${rows.map((e) => {

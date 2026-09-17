@@ -6,7 +6,7 @@ const parse = () => {
   const h = (location.hash || '').replace(/^#\/?/, '');
   const [path, query = ''] = h.split('?');
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
-  return { name: parts[0] || 'overview', params: parts.slice(1), query: Object.fromEntries(new URLSearchParams(query)) };
+  return { name: parts[0] || 'updates', params: parts.slice(1), query: Object.fromEntries(new URLSearchParams(query)) };
 };
 
 export const route = signal(parse());

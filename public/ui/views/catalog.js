@@ -11,6 +11,7 @@ import * as act from '../lib/actions.js';
 import { Icon, ProductLogo, Badge, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { StackBar } from '../components/viz.js';
+import { InstallerLibrary } from './installers.js';
 
 const tab = pref('catalog.tab', 'app');
 const catOf = (p) => (p.category === 'plugin' || p.category === 'script' ? p.category : 'app');
@@ -178,7 +179,7 @@ export function CatalogView() {
   if (!s) return html`<div class="page"><${Empty}>Loading…<//></div>`;
   const products = normalizeProducts(s);
   const count = (c) => products.filter((p) => catOf(p) === c).length;
-  const rows = products.filter((p) => catOf(p) === tab.value);
+  const rows = tab.value === 'installers' ? [] : products.filter((p) => catOf(p) === tab.value);
   const setTrack = async (p, shown) => {
     try { await put(`/api/products/${p.key}`, { dashboard_hidden: shown ? 0 : 1 }); toast(`${p.name} ${shown ? 'is tracked on the dashboard' : 'is no longer tracked'}.`, shown ? 'success' : 'info'); } catch (e) { toast(e.message, 'error'); }
     refresh();
@@ -194,12 +195,12 @@ export function CatalogView() {
     return { have: have.length, current: current.length, total: nodes.length };
   };
   return html`<div class="page stack">
-    <${PageHeader} title="Catalog" subtitle="What the tracker watches, how it finds new versions, and how each one updates.">
-      <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check versions</button>
-      <button class="btn primary" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button>
+    <${PageHeader} title="Apps" subtitle="What the tracker keeps updated, where new versions come from, and the installers on the share.">
+      <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
+      ${tab.value !== 'installers' ? html`<button class="btn primary" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button>` : null}
     </${PageHeader}>
-    <div class="pills">${[['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}<span class="n">${count(k)}</span></button>`)}</div>
-    <section class="card table-wrap">
+    <div class="pills">${[['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts'], ['installers', 'Installers']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}${k !== 'installers' ? html`<span class="n">${count(k)}</span>` : null}</button>`)}</div>
+    ${tab.value === 'installers' ? html`<section class="card card-pad"><${InstallerLibrary} /></section>` : html`<section class="card table-wrap">
       ${!rows.length ? html`<div class="empty-inline"><${Icon} name="package" /><div><b>No ${LABEL[tab.value]}s yet</b><p class="muted">Add one to track its version across the farm.</p></div><button class="btn primary" style="margin-left:auto" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button></div>` : html`<table class="table cat-table">
         <thead><tr><th>Name</th><th>Latest</th><th style="width:220px">On the farm</th><th>Track</th><th>Auto-deploy</th><th></th></tr></thead>
         <tbody>${rows.map((p) => {
@@ -219,6 +220,6 @@ export function CatalogView() {
           </tr>`;
         })}</tbody>
       </table>`}
-    </section>
+    </section>`}
   </div>`;
 }

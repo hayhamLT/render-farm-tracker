@@ -1,0 +1,280 @@
+// Advanced install: pick apps, machines and an installer SOURCE (server file, saved link, pasted link,
+// a specific version) and queue it. The everyday path is the Updates page (views/updates.js); this is
+// "Install a specific version…". Deploy logic is a faithful port of the classic wizard.
+import { html } from '../lib/html.js';
+import { useEffect, useState } from 'preact/hooks';
+import { signal } from '@preact/signals-core';
+import { farm, refresh } from '../lib/store.js';
+import { get, post, put } from '../lib/api.js';
+import { toast, openSheet } from '../lib/ui.js';
+import { plural } from '../lib/format.js';
+import {
+  normalizeProducts, isTracked, appliesToOS, latestForOS, latestInstallerReady, isDeployable,
+  nodesByKind, inProgressNodes, stagedFor, savedSource,
+} from '../lib/domain.js';
+import { presetCommand, ADOBE_RUM } from '../lib/presets.js';
+import { Icon, OsStatus, ProductLogo, Badge } from '../components/common.js';
+import { WhenPicker, rolloutPlan, resetWhen, whenLabel, when } from '../components/rollouts.js';
+
+// ---- wizard state (module-level so it survives tab switches) ----
+const chosenProducts = signal(new Set());
+const osSel = signal('both');
+const targetMode = signal('outdated');
+const chosenNodes = signal(new Set());
+const includeMajor = signal(false);
+const source = signal('auto');
+const nodeSearch = signal('');
+const busy = signal(false);
+const progress = signal(null);   // { text, tone }
+
+const osList = () => (osSel.value === 'both' ? ['windows', 'macos'] : [osSel.value]);
+const shortUrl = (u) => { try { const x = new URL(u); return x.hostname + (x.pathname.length > 1 ? '/…' : ''); } catch { return String(u).slice(0, 30); } };
+
+// ---------------------------------------------------------------- deploy panel
+function DeployPanel({ s, products, onDone }) {
+  const [files, setFiles] = useState([]);
+  const [fields, setFields] = useState({ url: '', urlMac: '', file: '', fileMac: '', version: '', remember: true });
+  const set = (k) => (e) => setFields({ ...fields, [k]: e.currentTarget.type === 'checkbox' ? e.currentTarget.checked : e.currentTarget.value });
+  const sel = products.filter((p) => chosenProducts.value.has(p.key));
+  const oses = osList();
+  const both = osSel.value === 'both';
+  const mode = source.value;
+  useEffect(() => { if (mode === 'file') get('/api/installer-files').then((r) => setFiles(r.files || [])).catch(() => setFiles([])); }, [mode]);
+
+  if (!sel.length) {
+    const behind = products.filter(isTracked).some((p) => nodesByKind(s, p, ['windows', 'macos'], ['patch', 'major']).length);
+    return html`<div class="card card-pad deploy-empty">
+      <${Icon} name=${behind ? 'up' : 'check'} />
+      <div><b>${behind ? 'Pick one or more apps above' : 'Everything is up to date'}</b>
+      <p class="muted" style="margin:2px 0 0">${behind ? 'Then choose the machines and start the rollout. New versions test on 3 machines before the rest.' : 'Every tracked app is on its latest version across the farm.'}</p></div>
+    </div>`;
+  }
+
+  const patchIds = new Set();
+  const majorIds = new Set();
+  const busyIds = new Set();
+  for (const p of sel) {
+    nodesByKind(s, p, oses, ['patch']).forEach((n) => patchIds.add(n.id));
+    nodesByKind(s, p, oses, ['major', 'missing']).forEach((n) => majorIds.add(n.id));
+    inProgressNodes(s, p, oses).forEach((n) => busyIds.add(n.id));
+  }
+  const deployable = sel.some((p) => ADOBE_RUM[p.key] || oses.every((os) => latestInstallerReady(p, os)));
+  const trackOnly = sel.filter((p) => !isDeployable(p));
+  const needInstaller = sel.filter((p) => !ADOBE_RUM[p.key] && isDeployable(p) && (nodesByKind(s, p, oses, ['patch', 'major']).length) && !oses.every((os) => latestInstallerReady(p, os)));
+  const outdatedTargets = new Set([...patchIds, ...(includeMajor.value ? majorIds : [])]);
+  const targetIds = targetMode.value === 'choose' ? chosenNodes.value : outdatedTargets;
+  const targets = s.nodes.filter((n) => targetIds.has(n.id));
+  const unelevated = targets.filter((n) => n.elevated === 0);
+  const canGo = !busy.value && deployable && targets.length > 0;
+
+  const sourceNote = () => {
+    if (mode === 'auto') {
+      return html`<div class="src-grid">${sel.map((p) => html`<div key=${p.key} class="src-tile"><${ProductLogo} product=${p} size=${16} /><b>${p.name}</b>
+        ${oses.filter((os) => appliesToOS(p, os)).map((os) => {
+          const rum = ADOBE_RUM[p.key];
+          if (rum) return html`<${Badge} tone=${rum[os] ? 'ok' : 'warn'}>${os}: ${rum[os] ? 'Adobe RUM' : 'no Mac package'}<//>`;
+          const staged = stagedFor(p, os);
+          if (staged && latestInstallerReady(p, os)) return html`<${Badge} tone="ok" title=${staged}>${os}: ready<//>`;
+          if (staged) return html`<${Badge} tone="warn" title=${staged}>${os}: staged is older<//>`;
+          if (savedSource(p, os)) return html`<${Badge} tone="info" title=${savedSource(p, os)}>${os}: downloads once<//>`;
+          return html`<${Badge} tone="warn">${os}: no installer<//>`;
+        })}</div>`)}</div>`;
+    }
+    if (sel.length > 1 && mode !== 'staged') return html`<div class="banner warn"><${Icon} name="alert" />Several apps are selected — use Automatic or Server installer, or pick a single app.</div>`;
+    if (mode === 'staged') return html`<p class="dim" style="margin:0">Uses the installer already on the server: ${sel.map((p) => oses.filter((os) => appliesToOS(p, os)).map((os) => stagedFor(p, os) ? `${p.name} (${os}): ${stagedFor(p, os)}` : `${p.name} (${os}): not on server`).join(' · ')).join(' · ')}</p>`;
+    if (mode === 'saved') return html`<p class="dim" style="margin:0">Saved links — ${oses.map((os) => `${os}: ${savedSource(sel[0], os) ? shortUrl(savedSource(sel[0], os)) : 'none saved'}`).join(' · ')}</p>`;
+    if (mode === 'url') return html`<p class="dim" style="margin:0">Paste a direct download link (vendor pages usually need a signed-in or share link). The server downloads it once and every machine installs from the server.</p>`;
+    return html`<p class="dim" style="margin:0">Pick an installer from the server's installer folders${both ? ' — one per OS' : ''}.</p>`;
+  };
+
+  async function run() {
+    progress.value = null;
+    if (targetMode.value === 'choose' && !chosenNodes.value.size) { progress.value = { text: 'Select at least one machine.', tone: 'bad' }; return; }
+    busy.value = true;
+    const skipped = [];
+    const queued = [];
+    // Every update is a rollout: it groups the jobs, holds them until the start time, and
+    // reports when done.
+    const plan = rolloutPlan(sel.map((p) => `${p.name}${sel.length === 1 && p.latest_version ? ` ${p.latest_version}` : ''}`).join(', '), s);
+    let rollout;
+    try { rollout = (await post('/api/rollouts', plan)).rollout; } catch (e) { busy.value = false; progress.value = { text: e.message, tone: 'bad' }; return; }
+    const queue = async (pkgId, os, major) => {
+      if (targetMode.value === 'outdated') {
+        // A scheduled rollout also takes machines that are off right now — they're woken or
+        // pick it up when they come back.
+        const r = await post('/api/update-outdated', { package_id: pkgId, includeMajor: major, rollout_id: rollout.id, onlyOnline: !plan.later });
+        queued.push(...(r.queued || []));
+      } else {
+        const ids = [...chosenNodes.value].filter((id) => { const n = s.nodes.find((x) => x.id === id); return n && n.os === os; });
+        if (ids.length) { const r = await post('/api/deployments', { package_id: pkgId, node_ids: ids, rollout_id: rollout.id }); queued.push(...(r.queued || [])); }
+      }
+    };
+    const fetchToServer = async (url) => {
+      const { dlId, filename } = await post('/api/download-url', { url });
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const r = await get('/api/downloads');
+        const d = (r.downloads || r || []).find((x) => x.id === dlId);
+        if (!d) throw new Error('download vanished');
+        if (d.status === 'done') return d.filename || filename;
+        if (d.status === 'error') throw new Error(d.error || 'download failed');
+        progress.value = { text: `Downloading ${d.filename || filename}${d.total ? `: ${Math.round((d.received / d.total) * 100)}%` : '…'} (keep this page open)`, tone: '' };
+      }
+    };
+    try {
+      for (const p of sel.filter((x) => ADOBE_RUM[x.key])) {
+        if (nodesByKind(s, p, oses, ['major']).length) skipped.push(`${p.name}: machines on an older major need a full install from the Admin Console (RUM only patches within a major)`);
+        for (const os of oses) {
+          const cfg = ADOBE_RUM[p.key][os];
+          if (!cfg) { skipped.push(`${p.name} (${os}): no Adobe package for this OS`); continue; }
+          const { id } = await post('/api/packages', { product_key: p.key, version: p.latest_version || 'latest', os, kind: 'installer', filename: cfg.filename, install_command: cfg.command });
+          await queue(id, os, false);
+        }
+      }
+      const others = sel.filter((x) => !ADOBE_RUM[x.key]);
+      if (others.length > 1 && !['auto', 'staged'].includes(mode)) throw new Error('Use Automatic for several apps at once — links and files apply to a single app.');
+      if (mode === 'auto' || mode === 'staged') {
+        progress.value = { text: 'Queuing updates…', tone: '' };
+        await Promise.all(others.flatMap((p) => oses.filter((os) => appliesToOS(p, os)).map(async (os) => {
+          let filename = stagedFor(p, os);
+          if (!filename && mode === 'auto' && savedSource(p, os)) {
+            try { filename = await fetchToServer(savedSource(p, os)); } catch (e) { skipped.push(`${p.name} (${os}): download failed: ${e.message}`); return; }
+          }
+          if (!filename) { skipped.push(`${p.name} (${os}): ${mode === 'staged' ? 'not on the server' : 'no installer on the server and no saved link'}`); return; }
+          const { id } = await post('/api/packages', { product_key: p.key, version: latestForOS(p, os) || (mode === 'staged' ? 'staged' : 'latest'), os, kind: 'installer', filename, install_command: presetCommand(p.key, os) });
+          await queue(id, os, includeMajor.value);
+        })));
+      } else if (others.length === 1) {
+        const p = others[0];
+        const version = fields.version.trim() || p.latest_version;
+        if (!version) throw new Error('Enter the new version number for this installer.');
+        for (const os of oses.filter((o) => appliesToOS(p, o))) {
+          let filename;
+          let link = null;
+          if (mode === 'file') {
+            filename = os === 'macos' && both ? fields.fileMac : fields.file;
+            if (!filename) throw new Error(`Pick the ${os} installer file.`);
+          } else {
+            link = mode === 'saved' ? savedSource(p, os) : (os === 'macos' && both ? fields.urlMac : fields.url).trim();
+            if (!link) throw new Error(mode === 'saved' ? `No saved ${os} link yet — choose "Paste a link".` : `Paste the ${os} download link.`);
+            filename = await fetchToServer(link);
+          }
+          const { id } = await post('/api/packages', { product_key: p.key, version, os, kind: 'installer', filename, install_command: presetCommand(p.key, os) });
+          if (link && mode === 'url' && fields.remember) await put(`/api/products/${p.key}`, { [os === 'windows' ? 'source_url_win' : 'source_url_mac']: link });
+          await queue(id, os, includeMajor.value);
+        }
+        setFields({ ...fields, version: '' });
+      }
+      const uniq = [...new Set(queued)];
+      const later = rollout.status === 'scheduled';
+      progress.value = {
+        text: !uniq.length ? 'Nothing queued — those machines are current, offline, or already queued.'
+          : later ? `Scheduled on ${plural(uniq.length, 'machine')} — starts ${whenLabel(rollout.run_at)}.`
+          : `Queued on ${plural(uniq.length, 'machine')} — each starts as soon as it's free (a new version tests on 3 machines first).`,
+        tone: uniq.length ? 'ok' : '', skipped,
+      };
+      if (uniq.length) {
+        toast(later ? `Update scheduled for ${whenLabel(rollout.run_at)} on ${plural(uniq.length, 'machine')}.` : `Update queued on ${plural(uniq.length, 'machine')}.`, 'success');
+        resetWhen();
+        if (onDone && !skipped.length) setTimeout(() => onDone(true), 400);
+      }
+    } catch (e) {
+      progress.value = { text: e.message, tone: 'bad', skipped };
+    } finally {
+      busy.value = false;
+      refresh();
+    }
+  }
+
+  const shownNodes = s.nodes.filter((n) => oses.includes(n.os) && n.hostname.toLowerCase().includes(nodeSearch.value.toLowerCase()))
+    .sort((a, b) => a.hostname.localeCompare(b.hostname, undefined, { numeric: true }));
+  const needCount = (n) => sel.reduce((c, p) => c + (nodesByKind(s, p, [n.os], ['patch', 'major', 'missing']).some((x) => x.id === n.id) ? 1 : 0), 0);
+
+  return html`<div class="card deploy">
+    <div class="deploy-grid">
+      <div class="deploy-field"><span class="label">Platform</span>
+        <div class="seg">${[['both', 'All'], ['windows', 'Windows'], ['macos', 'Mac']].map(([k, l]) => html`<button key=${k} class=${osSel.value === k ? 'on' : ''} onClick=${() => { osSel.value = k; }}>${l}</button>`)}</div></div>
+      <div class="deploy-field"><span class="label">Machines</span>
+        <div class="seg">${[['outdated', 'Outdated only'], ['choose', 'Pick machines']].map(([k, l]) => html`<button key=${k} class=${targetMode.value === k ? 'on' : ''} onClick=${() => { targetMode.value = k; }}>${l}</button>`)}</div></div>
+      <div class="deploy-field"><span class="label">Installer</span>
+        <select class="field" value=${mode} onChange=${(e) => { source.value = e.currentTarget.value; }}>
+          <option value="auto">Automatic (recommended)</option><option value="staged">Server installer only</option>
+          <option value="saved">Saved download link</option><option value="url">Paste a link</option><option value="file">Pick a server file</option>
+        </select></div>
+    </div>
+
+    ${mode === 'url' && html`<div class="row"><input class="field grow" placeholder=${both ? 'Windows installer link' : 'https://…'} value=${fields.url} onInput=${set('url')} />
+      ${both && html`<input class="field grow" placeholder="macOS installer link" value=${fields.urlMac} onInput=${set('urlMac')} />`}
+      <label class="check"><input type="checkbox" checked=${fields.remember} onChange=${set('remember')} />remember</label></div>`}
+    ${mode === 'file' && html`<div class="row">
+      <select class="field grow" value=${fields.file} onChange=${set('file')}><option value="">${both ? 'Windows file…' : 'Installer file…'}</option>${files.map((f) => html`<option value=${f.name}>${f.name} · ${Math.round(f.size / 1048576)} MB</option>`)}</select>
+      ${both && html`<select class="field grow" value=${fields.fileMac} onChange=${set('fileMac')}><option value="">macOS file…</option>${files.map((f) => html`<option value=${f.name}>${f.name} · ${Math.round(f.size / 1048576)} MB</option>`)}</select>`}
+    </div>`}
+    ${['saved', 'url', 'file'].includes(mode) && sel.length === 1 && html`<input class="field" style="width:220px" placeholder=${sel[0].latest_version ? `Version (default ${sel[0].latest_version})` : 'Version, e.g. 2026.3.0'} value=${fields.version} onInput=${set('version')} />`}
+    ${sourceNote()}
+
+    ${targetMode.value === 'choose' && html`<div class="stack" style="gap:8px">
+      <div class="row"><label class="search"><${Icon} name="search" /><input class="field" placeholder="Filter machines" value=${nodeSearch.value} onInput=${(e) => { nodeSearch.value = e.currentTarget.value; }} /></label>
+        <button class="btn sm" onClick=${() => { const ids = shownNodes.map((n) => n.id); const all = ids.every((id) => chosenNodes.value.has(id)); chosenNodes.value = all ? new Set([...chosenNodes.value].filter((id) => !ids.includes(id))) : new Set([...chosenNodes.value, ...ids]); }}>Select all shown</button></div>
+      <div class="node-chips">${shownNodes.map((n) => {
+        const on = chosenNodes.value.has(n.id);
+        const need = needCount(n);
+        return html`<button key=${n.id} class=${'node-chip' + (on ? ' on' : '') + (n.online ? '' : ' off')} onClick=${() => { const next = new Set(chosenNodes.value); if (on) next.delete(n.id); else next.add(n.id); chosenNodes.value = next; }}>
+          <${OsStatus} node=${n} /><span>${n.hostname}</span>${n.elevated === 0 ? html`<${Icon} name="shieldOff" title="needs elevation" />` : null}
+          <span class="dim" style="font-size:.74rem">${need ? `${need} to update` : 'current'}</span></button>`;
+      })}</div>
+    </div>`}
+
+    ${targetMode.value === 'outdated' && majorIds.size > 0 && html`<label class="check"><input type="checkbox" checked=${includeMajor.value} onChange=${(e) => { includeMajor.value = e.currentTarget.checked; }} />
+      Also install ${plural(majorIds.size, 'new-major / fresh install')} — side-by-side, the current version stays in place</label>`}
+    ${targetMode.value === 'outdated' && targets.length > 0 && html`<div class="row" style="gap:5px"><span class="dim" style="font-size:.8rem">Will update:</span>
+      ${targets.slice(0, 16).map((n) => html`<${Badge} key=${n.id}>${n.hostname}<//>`)}${targets.length > 16 ? html`<span class="dim">+${targets.length - 16} more</span>` : ''}</div>`}
+    ${unelevated.length > 0 && html`<div class="banner warn"><${Icon} name="shieldOff" />${plural(unelevated.length, 'machine')} not ready (${unelevated.map((n) => n.hostname).join(', ')}) — installs there wait at a permission prompt.</div>`}
+    ${needInstaller.length > 0 && html`<div class="banner warn"><${Icon} name="alert" />Installer not on the server for ${needInstaller.map((p) => `${p.name} ${p.latest_version || ''}`).join(', ')} — add it (Automatic downloads from a saved link), or paste a link.</div>`}
+    ${trackOnly.length > 0 && html`<div class="banner info"><${Icon} name="package" />${trackOnly.map((p) => p.name).join(', ')} ${trackOnly.length === 1 ? 'is' : 'are'} tracking-only — add an install command in Catalog to deploy.</div>`}
+
+    <${WhenPicker} s=${s} />
+
+    <div class="deploy-go">
+      <span class="muted">${targetMode.value === 'choose' ? `${chosenNodes.value.size} selected` : `${plural(targets.length, 'machine')} will update${busyIds.size ? ` · ${busyIds.size} already updating` : ''}`}</span>
+      <span class="grow"></span>
+      ${progress.value && html`<span class=${'deploy-progress ' + (progress.value.tone || '')}>${progress.value.text}${progress.value.skipped && progress.value.skipped.length ? html`<br /><span style="color:var(--warn)">Skipped: ${progress.value.skipped.join(' · ')}</span>` : ''}</span>`}
+      <button class="btn primary" disabled=${!canGo} onClick=${run}
+        title=${!deployable ? 'Stage the installer first — see the warning above' : !targets.length ? 'Those machines are already up to date or updating' : ''}>
+        ${busy.value ? html`<${Icon} name="spinner" cls="spin" />Working…` : when.value === 'now' ? html`<${Icon} name="download" />Update now` : html`<${Icon} name="clock" />Schedule`}
+      </button>
+    </div>
+  </div>`;
+}
+
+// ---------------------------------------------------------------- rollout sheet
+function DeploySheet({ close }) {
+  const s = farm.value;
+  const products = normalizeProducts(s);
+  const tracked = products.filter(isTracked).filter(isDeployable);
+  return html`<div class="stack" style="gap:14px">
+    <div>
+      <p class="section-title">Apps</p>
+      <div class="row" style="gap:6px">${tracked.map((p) => {
+        const on = chosenProducts.value.has(p.key);
+        return html`<button key=${p.key} class=${'pill' + (on ? ' on' : '')} onClick=${() => { const next = new Set(chosenProducts.value); if (on) next.delete(p.key); else next.add(p.key); chosenProducts.value = next; source.value = 'auto'; }}>
+          <${ProductLogo} product=${p} size=${16} />${p.name}</button>`;
+      })}</div>
+    </div>
+    <${DeployPanel} s=${s} products=${products} onDone=${close} />
+  </div>`;
+}
+
+export function openRollout({ productKey, mode = 'outdated', major = false } = {}) {
+  if (productKey) chosenProducts.value = new Set([productKey]);
+  targetMode.value = mode;
+  includeMajor.value = major;
+  source.value = 'auto';
+  progress.value = null;
+  const p = productKey && farm.value.products.find((x) => x.key === productKey);
+  openSheet((close) => html`<${DeploySheet} close=${close} />`, {
+    title: p ? `Install ${p.name}` : 'Install a specific version',
+    subtitle: 'Choose the installer, machines and when · a new version tests on 3 machines first',
+    width: 640,
+  });
+}

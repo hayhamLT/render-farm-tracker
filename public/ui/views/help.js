@@ -26,10 +26,15 @@ const CONTENT = {
     <ol>
       <li><b>Enroll</b> the machine with the command from <button class="linkish" onClick=${() => go('settings')}>Settings → Enroll a machine</button>. It appears under Machines within a minute.</li>
       <li><b>Elevate</b> it once (the admin command). Without this, installs stop at a Windows UAC or macOS password prompt — the machine shows <${Badge} tone="warn" icon="shieldOff">not ready<//>.</li>
-      <li>Check its <b>Deadline</b> badge. If it says the Worker won't start after a restart, click it to fix.</li>
+      <li><b>Update</b> from the Updates page: everything at once, a few apps together, or one app on the machines you pick — now or tonight.</li>
     </ol>`,
   updates: () => html`
-    <p>New versions are detected automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and any app you add with a version check). Machines behind show a blue version chip.</p>
+    <p>New versions are detected automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and any app you add with a version check) and listed on the <b>Updates</b> page with how many machines are behind.</p>
+    <ul>
+      <li><b>Update all</b> updates every app on every machine that's behind. Tick several apps to update just those together, or open an app to pick exactly which machines get it.</li>
+      <li>Every update opens one review step: what installs where, anything that will make it wait (offline, rendering, restart needed), and <b>when</b> — now, tonight, or a time you pick, with optional wake-up and Slack report.</li>
+      <li>On <b>Machines</b>, select machines and <b>Update everything</b> on them; a machine's details list each app with its own Update button.</li>
+    </ul>
     <ul>
       <li><b>Every idle machine installs at once.</b> Installers stream from the tracker over the LAN, one job per machine.</li>
       <li><b>New versions test first:</b> until one machine installs a version successfully, at most 3 try it. If those fail, the rollout pauses — a broken update never reaches the whole farm.</li>
@@ -38,7 +43,7 @@ const CONTENT = {
       <li><b>Stop really stops.</b> Stopping a running job kills the installer and everything it started on the machine.</li>
     </ul>
     <${QA} q="Patch vs. new major">A patch (e.g. 2026.3.0 → 2026.3.4) replaces the installed version. A new major (2026 → 2027) installs side-by-side and is opt-in, so existing scenes keep working.<//>
-    <${QA} q="“Installer needed”">A newer version exists but its installer isn't on the tracker yet. With a saved download link, Automatic fetches it once; otherwise paste a link or drop the installer in the installer folder.<//>
+    <${QA} q="“Installer needed”">A newer version exists but its installer isn't on the tracker yet. With a saved download link, Automatic fetches it once; otherwise paste a link or drop the installer on the share (Apps → Installers).<//>
     <${QA} q="NVIDIA drivers">Driver updates are always in-place. GTX 9xx/10xx cards stay on NVIDIA's legacy driver track, so they're never flagged behind the current driver. A pending Windows restart blocks the driver installer — restart first.<//>
     <${QA} q="After Effects">After Effects updates through Adobe Remote Update Manager (together with Media Encoder). RUM only patches within a major; a new major needs a full install from the Adobe Admin Console.<//>`,
   deadline: () => html`
@@ -57,7 +62,7 @@ const CONTENT = {
     </ul>
     <${QA} q="Wake doesn't turn a machine on">The agent sets up each wired network card (wake on magic packet, wake from shutdown, Energy-Efficient Ethernet off). What it can't change is the BIOS: enable <b>Wake on LAN</b> / <b>Power On by PCIe</b> and disable <b>ErP/EuP</b> deep power-saving. Add-in 10G cards often can't wake a PC from full shutdown — cable the onboard port. Hover a machine's Wake action to see whether its card is ready.<//>`,
   custom: () => html`
-    <p>Catalog → <b>Add</b> tracks any app, After Effects plug-in or script. A name and a link are usually enough: Auto-fill finds the icon, version and installer.</p>
+    <p>Apps → <b>Add</b> tracks any app, After Effects plug-in or script. A name and a link are usually enough: Auto-fill finds the icon, version and installer.</p>
     <ul>
       <li>Apps are detected by installed name or by a file path (globs allowed).</li>
       <li>Plug-ins and scripts are found in After Effects' folders automatically from their name.</li>
@@ -66,7 +71,7 @@ const CONTENT = {
     </ul>`,
   keys: () => html`
     <table class="table" style="max-width:520px"><tbody>
-      ${[['⌘K / Ctrl K', 'Search machines, apps and actions'], ['/', 'Search machines'], ['g then m', 'Machines'], ['g then o', 'Overview'], ['g then u', 'Updates'], ['g then a', 'Activity'], ['g then c', 'Catalog'], ['g then s', 'Settings'], ['Esc', 'Close panel · clear selection']]
+      ${[['⌘K / Ctrl K', 'Search machines, apps and actions'], ['/', 'Search machines'], ['g then u', 'Updates'], ['g then m', 'Machines'], ['g then h', 'History'], ['g then a', 'Apps'], ['g then s', 'Settings'], ['⌘J / Ctrl J', 'Ask the farm'], ['Esc', 'Close panel · clear selection']]
         .map(([k, d]) => html`<tr key=${k}><td class="nowrap"><span class="kbd">${k}</span></td><td>${d}</td></tr>`)}
     </tbody></table>`,
   trouble: () => html`

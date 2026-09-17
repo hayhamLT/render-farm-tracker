@@ -10,29 +10,29 @@ import { PageSkeleton } from './components/viz.js';
 import { ago } from './lib/format.js';
 import { Icon, ToastHost, DialogHost, MenuHost } from './components/common.js';
 import { MachinesView } from './views/machines.js';
-import { OverviewView } from './views/overview.js';
 import { UpdatesView } from './views/updates.js';
-import { ActivityView } from './views/activity.js';
-import { TimelineView } from './views/timeline.js';
+import { HistoryView } from './views/history.js';
 import { CatalogView } from './views/catalog.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
 import { Palette } from './components/palette.js';
 import { AskPanel, askOpen, askShortcut } from './components/ask.js';
 import { startAlerts } from './lib/alerts.js';
+import { normalizeProducts, isTracked } from './lib/domain.js';
+import { canUpdate, updateTargets } from './lib/updater.js';
 
 const ACTIVE = ['pending', 'downloading', 'installing'];
 
 const ROUTES = [
-  { name: 'overview', label: 'Overview', icon: 'gauge', key: 'o', view: () => html`<${OverviewView} />` },
-  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
-  { name: 'timeline', label: 'Timeline', icon: 'clock', key: 't', view: () => html`<${TimelineView} />` },
   { name: 'updates', label: 'Updates', icon: 'download', key: 'u', view: () => html`<${UpdatesView} />` },
-  { name: 'activity', label: 'Activity', icon: 'activity', key: 'a', view: () => html`<${ActivityView} />` },
-  { name: 'catalog', label: 'Catalog', icon: 'package', key: 'c', view: () => html`<${CatalogView} />` },
+  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
+  { name: 'history', label: 'History', icon: 'activity', key: 'h', view: () => html`<${HistoryView} />` },
+  { name: 'catalog', label: 'Apps', icon: 'package', key: 'a', view: () => html`<${CatalogView} />` },
   { name: 'settings', label: 'Settings', icon: 'sliders', key: 's', view: () => html`<${SettingsView} />` },
-  { name: 'help', label: 'Help', icon: 'help', key: 'h', view: () => html`<${HelpView} />` },
+  { name: 'help', label: 'Help', icon: 'help', key: '?', view: () => html`<${HelpView} />` },
 ];
+// Old addresses from before the updates-first layout.
+const MOVED = { overview: 'updates', timeline: 'machines', activity: 'history' };
 
 function LiveIndicator({ compact }) {
   const l = link.value;
@@ -52,14 +52,13 @@ function Sidebar() {
   const r = route.value.name;
   const waiting = new Set(s && s.rollouts ? s.rollouts.filter((x) => x.status === 'scheduled').map((x) => x.id) : []);
   const running = s ? s.jobs.filter((j) => ACTIVE.includes(j.status) && !(j.status === 'pending' && waiting.has(j.rollout_id))).length : 0;
-  const failed = s ? s.jobs.filter((j) => j.status === 'failed').length : 0;
-  const attention = s ? s.nodes.filter((n) => {
-    if (!n.online) return true;
-    try { const d = n.deadline_info ? JSON.parse(n.deadline_info) : null; return !!(d && d.installed && !d.worker); } catch { return false; }
-  }).length : 0;
+  const failed = s ? s.jobs.filter((j) => j.status === 'failed' && j.updated_at > Date.now() - 24 * 3600 * 1000).length : 0;
+  const offline = s ? s.nodes.filter((n) => !n.online).length : 0;
+  const available = s ? normalizeProducts(s).filter((p) => isTracked(p) && canUpdate(p)).reduce((c, p) => c + updateTargets(s, p).length, 0) : 0;
   const counts = {
-    machines: attention ? { n: attention, cls: 'bad', title: `${attention} offline or out of Deadline` } : null,
-    updates: running ? { n: running, cls: 'accent', title: `${running} running or queued` } : failed ? { n: failed, cls: 'bad', title: `${failed} failed` } : null,
+    updates: running ? { n: running, cls: 'accent', title: `${running} updating or queued` } : available ? { n: available, cls: 'info', title: `${available} updates available` } : null,
+    machines: offline ? { n: offline, cls: 'bad', title: `${offline} offline` } : null,
+    history: failed ? { n: failed, cls: 'bad', title: `${failed} failed in the last 24 h` } : null,
   };
   return html`<aside class="sidebar">
     <div class="brand"><span class="brand-mark"><${Icon} name="zap" /></span><div><b>deadline_farm</b><span>tracker</span></div></div>
@@ -102,6 +101,7 @@ function App() {
   // Scroll to the top when changing section (not when opening a machine drawer).
   const name = route.value.name;
   useEffect(() => { window.scrollTo({ top: 0 }); }, [name]);
+  useEffect(() => { if (MOVED[name]) go(MOVED[name], ...route.value.params); }, [name]);
   const current = ROUTES.find((t) => t.name === name) || ROUTES[0];
   return html`<div class=${'shell' + (collapsed.value ? ' collapsed' : '') + (askOpen.value ? ' ask-open' : '')}>
     <${Sidebar} />

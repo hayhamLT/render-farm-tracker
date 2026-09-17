@@ -12,8 +12,8 @@ import { askOpen } from './ask.js';
 export const paletteOpen = signal(false);
 
 const SECTIONS = [
-  ['overview', 'Overview', 'gauge'], ['machines', 'Machines', 'server'], ['timeline', 'Timeline', 'clock'], ['updates', 'Updates', 'download'],
-  ['activity', 'Activity', 'activity'], ['catalog', 'Catalog', 'package'], ['settings', 'Settings', 'sliders'], ['help', 'Help', 'help'],
+  ['updates', 'Updates', 'download'], ['machines', 'Machines', 'server'], ['history', 'History', 'activity'],
+  ['catalog', 'Apps', 'package'], ['settings', 'Settings', 'sliders'], ['help', 'Help', 'help'],
 ];
 
 function buildItems(s) {
@@ -21,13 +21,11 @@ function buildItems(s) {
   for (const [name, label, icon] of SECTIONS) items.push({ group: 'Go to', label, icon, keywords: 'go section page', run: () => go(name) });
   if (!s) return items;
   const offline = s.nodes.filter((n) => !n.online);
-  const fixable = s.nodes.filter((n) => { const d = deadlineStatus(n); return d && d.canFix && d.state !== 'ok'; });
   const active = s.jobs.filter((j) => ACTIVE.includes(j.status)).length;
   items.push({ group: 'Actions', label: 'Ask the farm (local AI)', icon: 'sparkle', keywords: 'ai question chat assistant why', run: () => { askOpen.value = true; } });
   items.push({ group: 'Actions', label: 'Check for new versions', icon: 'refresh', run: act.checkVersions });
   items.push({ group: 'Actions', label: 'Back up the database', icon: 'server', run: act.backupNow });
   if (offline.length) items.push({ group: 'Actions', label: `Wake all offline machines (${offline.length})`, icon: 'power', run: () => act.wake(offline) });
-  if (fixable.length) items.push({ group: 'Actions', label: `Fix Deadline startup on ${fixable.length} machines`, icon: 'zap', run: () => act.fixDeadline(fixable) });
   if (active) items.push({ group: 'Actions', label: `Stop all running updates (${active})`, icon: 'stop', danger: true, run: () => act.stopAll(active) });
   for (const n of s.nodes) {
     const tags = `${n.hostname} ${n.gpu || ''} ${n.os} ${(n.ip || '').replace('::ffff:', '')}`;
