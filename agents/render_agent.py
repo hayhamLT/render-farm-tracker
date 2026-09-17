@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.30.0"
+AGENT_VERSION = "2.30.1"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -73,6 +73,47 @@ if IS_WINDOWS:
             super().__init__(*args, **kwargs)
 
     subprocess.Popen = _SilentPopen
+
+
+class _TeeLog:
+    """Mirror print() output into a size-capped log file next to the agent. The agent runs
+    hidden (no console), so without this there is no record of why a job failed on a machine."""
+    MAX_BYTES = 2 * 1024 * 1024
+
+    def __init__(self, stream, path):
+        self.stream, self.path, self._lock = stream, path, threading.Lock()
+
+    def write(self, text):
+        try:
+            if self.stream:
+                self.stream.write(text)
+        except Exception:
+            pass
+        if not text:
+            return
+        with self._lock:
+            try:
+                if os.path.exists(self.path) and os.path.getsize(self.path) > self.MAX_BYTES:
+                    os.replace(self.path, self.path + ".1")
+                with open(self.path, "a", encoding="utf-8", errors="replace") as f:
+                    if text.strip():
+                        f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.rstrip("\n") + "\n")
+            except Exception:
+                pass
+
+    def flush(self):
+        try:
+            if self.stream:
+                self.stream.flush()
+        except Exception:
+            pass
+
+
+def start_file_log():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+    sys.stdout = _TeeLog(sys.stdout, path)
+    sys.stderr = _TeeLog(sys.stderr, path)
+    return path
 
 
 def hide_own_console():
@@ -1023,6 +1064,8 @@ class Server:
         running = _JOB["id"]
         payload["running"] = [running] if running else []
         resp = self._request("POST", "/api/agent/checkin", payload)
+        if _UNSENT:
+            self.flush_unsent()
         if self.on_response:
             try:
                 self.on_response(resp)
@@ -1036,25 +1079,81 @@ class Server:
             return resp.read()
 
     def report(self, job_id, status, log=None):
-        try:
-            self._request("POST", "/api/agent/jobs/%d/status" % job_id,
-                          {"status": status, "log": log})
-        except Exception as e:
-            print("  ! failed to report job status: %s" % e)
+        """Send a job status. Progress updates are best-effort; a FINAL result (success /
+        failed / cancelled) is retried, and if the tracker is still unreachable it's kept
+        and re-sent after each check-in until it lands — so a tracker restart or network
+        blip can't turn a finished install into a job stuck "downloading" forever."""
+        final = status in ("success", "failed", "cancelled")
+        for attempt in range(4 if final else 1):
+            try:
+                self._request("POST", "/api/agent/jobs/%d/status" % job_id,
+                              {"status": status, "log": log})
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code == 404:          # job no longer exists in the tracker — nothing to deliver
+                    return True
+                err = e
+            except Exception as e:
+                err = e
+            if final and attempt < 3:
+                time.sleep(5 * (attempt + 1))
+        print("  ! failed to report job #%d %s: %s%s" % (job_id, status, err,
+              " — will re-send after the next check-in" if final else ""))
+        if final:
+            with _JOB_LOCK:
+                _UNSENT[job_id] = (status, log)
+        return False
 
-    def download(self, package_id, dest_path, cancel=None):
-        req = urllib.request.Request(
-            self.base + "/api/agent/download/%d" % package_id,
-            headers={"X-Agent-Key": self.key},
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp, open(dest_path, "wb") as out:
-            while True:
-                if cancel is not None and cancel.is_set():
-                    raise JobCancelled()
-                chunk = resp.read(1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
+    def flush_unsent(self):
+        with _JOB_LOCK:
+            pending = list(_UNSENT.items())
+        for job_id, (status, log) in pending:
+            try:
+                self._request("POST", "/api/agent/jobs/%d/status" % job_id, {"status": status, "log": log})
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    continue
+            except Exception:
+                continue
+            with _JOB_LOCK:
+                _UNSENT.pop(job_id, None)
+            print("  ↑ delivered earlier result for job #%d (%s)" % (job_id, status))
+
+    def download(self, package_id, dest_path, cancel=None, attempts=3):
+        """Download an installer. A dropped or stalled transfer (no data for 60 s) is
+        retried from scratch up to `attempts` times; a short file is an error, not a
+        success. Every attempt's failure is printed, so the log shows what happened."""
+        last = None
+        for attempt in range(1, attempts + 1):
+            req = urllib.request.Request(
+                self.base + "/api/agent/download/%d" % package_id,
+                headers={"X-Agent-Key": self.key},
+            )
+            try:
+                got = 0
+                with urllib.request.urlopen(req, timeout=60) as resp, open(dest_path, "wb") as out:
+                    expected = int(resp.headers.get("Content-Length") or 0)
+                    while True:
+                        if cancel is not None and cancel.is_set():
+                            raise JobCancelled()
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        got += len(chunk)
+                if expected and got != expected:
+                    raise IOError("incomplete download: %d of %d bytes" % (got, expected))
+                if attempt > 1:
+                    print("  download succeeded on attempt %d" % attempt)
+                return
+            except JobCancelled:
+                raise
+            except Exception as e:
+                last = e
+                print("  ! download attempt %d/%d failed: %s" % (attempt, attempts, e))
+                if attempt < attempts:
+                    time.sleep(10 * attempt)
+        raise last
 
 
 # --------------------------------------------------------------------------
@@ -1068,6 +1167,7 @@ INSTALL_TIMEOUT = 3600  # seconds
 _JOB = {"id": None, "proc": None, "cancel": threading.Event()}
 _JOB_LOCK = threading.Lock()
 _PENDING = {"reboot": False, "shutdown": False}
+_UNSENT = {}   # job id -> (status, log): final results the tracker hasn't received yet
 
 
 def _kill_tree(proc):
@@ -1240,12 +1340,18 @@ def _blockers(product_key):
     ae_apps = (["AfterFX.exe", "AfterFX.com", "aerender.exe", "Adobe Media Encoder.exe", "AfterFXLib.dll"]
                if IS_WINDOWS else ["After Effects", "aerender", "Adobe Media Encoder"])
     ae_render = ["aerender.exe"] if IS_WINDOWS else ["aerender"]
-    c4d = ["Cinema 4D.exe"] if IS_WINDOWS else ["Cinema 4D"]
+    # Cinema 4D renders on a farm run through the command-line renderer (Deadline launches
+    # Commandline.exe), not the Cinema 4D GUI — both must block, or an install lands on top
+    # of a live render. Redshift's standalone renderer counts too.
+    c4d = (["Cinema 4D.exe", "Commandline.exe", "c4dpy.exe", "redshiftCmdLine.exe"] if IS_WINDOWS
+           else ["Cinema 4D", "Commandline", "c4dpy", "redshiftCmdLine"])
+    blender = ["blender.exe"] if IS_WINDOWS else ["blender", "Blender"]
     return {
         "aftereffects": {"render": ae_apps, "gui": []},
         "cinema4d":     {"render": c4d, "gui": []},
         "redshift":     {"render": c4d, "gui": []},
         "redgiant":     {"render": c4d + ae_render, "gui": []},
+        "blender":      {"render": blender, "gui": []},
         # CC refresh must never bounce Adobe licensing mid-render — defer if rendering.
         "creativecloud": {"render": ae_render + c4d, "gui": []},
     }.get(product_key, {"render": [], "gui": []})
@@ -1264,6 +1370,11 @@ def prepare_for_install(product_key):
     b = _blockers(product_key)
     if not b["render"] and not b["gui"]:
         return True, ""
+    # Belt and braces: a GPU pinned by compute means something is rendering, whatever the
+    # renderer's process is called.
+    if b["render"] and _gpu_rendering():
+        return False, ("Deferred — the GPU is busy rendering; the %s update will run "
+                       "automatically once it's idle." % product_key)
     if _proc_running(b["render"]):
         return False, ("Deferred — this node is rendering; the %s update will run "
                        "automatically once it's idle." % product_key)
@@ -1787,6 +1898,8 @@ def main():
     ap.add_argument("--config", help="path to agent_config.json")
     ap.add_argument("--once", action="store_true", help="check in once and exit")
     args = ap.parse_args()
+    if not args.once:
+        start_file_log()
 
     # First thing on Windows: hide any console window we were launched with, so the agent is
     # truly invisible and can't be closed out from under an install. (Skipped for --once so

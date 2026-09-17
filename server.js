@@ -1556,8 +1556,10 @@ function reconcileRunning(node, body, now) {
   const running = body.running.map(Number).filter(Number.isFinite);
   for (const id of running) {
     const j = db.prepare('SELECT status FROM jobs WHERE id = ?').get(id);
-    if (!j || !['pending', 'downloading', 'installing'].includes(j.status)) {
-      if (!stop.has(id)) logEvent('job', `Stopping job #${id} on ${node.hostname} — it was still running there after being ${j ? j.status : 'removed'} in the tracker`);
+    // Only stop what the tracker has actually let go of. A job the machine itself already
+    // reported as success/failed is just wrapping up (e.g. restarting Creative Cloud).
+    if (!j || j.status === 'cancelled') {
+      if (!stop.has(id)) logEvent('job', `Stopping job #${id} on ${node.hostname} — it was still running there after being ${j ? 'stopped' : 'removed'} in the tracker`);
       stop.add(id);
     }
   }
@@ -1566,8 +1568,8 @@ function reconcileRunning(node, body, now) {
   ).all(node.id).filter((j) => !running.includes(j.id) && now - j.updated_at > LOST_JOB_GRACE_MS);
   for (const j of lost) {
     db.prepare("UPDATE jobs SET status = 'failed', log = COALESCE(log,'') || ?, updated_at = ?, cancel_requested_at = NULL WHERE id = ?")
-      .run(`\n[${node.hostname}'s agent is no longer running this job — it restarted or crashed mid-install, so the result is unknown. Retry it; if the software actually installed, the job corrects itself to success on the next check-in.]`, now, j.id);
-    logEvent('job', `Job #${j.id} failed: ${node.hostname}'s agent stopped running it (restart/crash mid-install)`);
+      .run(`\n[${node.hostname} is no longer running this job and no result ever arrived — the download or install ended without its report getting through (agent 2.30.1+ keeps a log: C:\\ProgramData\\TrackerAgent\\agent.log). Retry it; if the software actually installed, this corrects itself to success on the next check-in.]`, now, j.id);
+    logEvent('job', `Job #${j.id} failed: ${node.hostname} stopped running it without reporting a result`);
   }
   return [...stop];
 }
