@@ -95,9 +95,10 @@ function AppRow({ m, s }) {
       { label: 'Show machines', icon: 'grid', onSelect: () => go('machines') },
     ]);
   };
-  return html`<div class=${'ur' + (open ? ' open' : '') + (sel ? ' sel' : '')}>
+  const current = !m.behind.length && !m.updating.length;
+  return html`<div class=${'ur' + (open ? ' open' : '') + (sel ? ' sel' : '') + (current ? ' quiet-row' : '')}>
     <div class="ur-main" onClick=${() => { expanded.value = open ? null : p.key; }}>
-      <label class="ur-check" onClick=${(e) => e.stopPropagation()}><input type="checkbox" checked=${sel} onChange=${toggleSel} aria-label=${`Select ${p.name}`} /></label>
+      <label class="ur-check" onClick=${(e) => e.stopPropagation()}>${current ? null : html`<input type="checkbox" checked=${sel} onChange=${toggleSel} aria-label=${`Select ${p.name}`} />`}</label>
       <${ProductLogo} product=${p} size=${34} />
       <div class="ur-name">
         <b>${p.name}</b>
@@ -109,16 +110,22 @@ function AppRow({ m, s }) {
           { value: m.updating.length, color: 'var(--accent)', label: 'updating' },
           { value: m.behind.length, color: 'var(--info)', label: 'behind' },
         ]} />
-        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}</span>
+        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.p.updated_at ? html` · <span class="dim">checked ${ago(m.p.updated_at, s.now)}</span>` : ''}</span>
       </div>
       <div class="ur-actions" onClick=${(e) => e.stopPropagation()}>
-        <button class="btn primary" disabled=${!chosen.length || blocked} title=${blocked ? 'Add the installer to the share first (Apps)' : !chosen.length && m.behind.length ? 'No machines picked' : ''}
-          onClick=${() => openUpdate([{ product: p, nodes: chosen }])}>
-          ${m.behind.length ? html`<${Icon} name="download" />Update ${chosen.length !== m.behind.length ? `${chosen.length} of ${m.behind.length}` : m.behind.length}` : html`<${Icon} name="spinner" cls="spin" />Updating`}</button>
+        ${current
+          ? html`<span class="uptodate"><${Icon} name="check" />Current</span>`
+          : html`<button class="btn primary" disabled=${!chosen.length || blocked} title=${blocked ? 'Add the installer to the share first (Apps)' : !chosen.length && m.behind.length ? 'No machines picked' : ''}
+            onClick=${() => openUpdate([{ product: p, nodes: chosen }])}>
+            ${m.behind.length ? html`<${Icon} name="download" />Update ${chosen.length !== m.behind.length ? `${chosen.length} of ${m.behind.length}` : m.behind.length}` : html`<${Icon} name="spinner" cls="spin" />Updating`}</button>`}
         <button class="btn icon" aria-label=${`More for ${p.name}`} onClick=${menu}><${Icon} name="more" /></button>
       </div>
     </div>
-    ${open && html`<div class="ur-machines">
+    ${open && current ? html`<div class="ur-machines">
+      <div class="ur-mhead"><span class="muted">${plural(m.installed.length, 'machine')} have it — all on the newest version</span></div>
+      <div class="ur-grid">${m.installed.map((n) => html`<span key=${n.id} class="mchip"><${OsStatus} node=${n} /><span class="mchip-name">${n.hostname}</span><span class="mono dim">${productStatus(n, p).version || '—'}</span></span>`)}</div>
+    </div>` : null}
+    ${open && !current && html`<div class="ur-machines">
       <div class="ur-mhead">
         ${m.behind.length ? html`<span class="muted">${plural(m.behind.length, 'machine')} behind — pick which ones update</span>
         <button class="linkish" onClick=${() => setPick(m.behind.map((n) => n.id))}>All</button>
@@ -160,10 +167,11 @@ function AppCard({ m }) {
     </header>
     <div class="uc3-meta"><${Installers} m=${m} />${m.updating.length ? html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${m.updating.length} updating</span>` : null}</div>
     <footer>
-      <span class="dim">${m.behind.length ? `${plural(m.behind.length, 'machine')} behind` : 'up to date'}</span>
+      <span class="dim">${m.behind.length ? `${plural(m.behind.length, 'machine')} behind` : m.updating.length ? `${m.updating.length} updating` : `on ${plural(m.installed.length, 'machine')}`}</span>
       <span class="grow"></span>
-      <button class="btn sm" onClick=${() => { view.value = 'list'; expanded.value = p.key; }}>Choose…</button>
-      <button class="btn sm primary" disabled=${!chosen.length || blocked} onClick=${() => openUpdate([{ product: p, nodes: chosen }])}><${Icon} name="download" />Update ${m.behind.length}</button>
+      ${m.behind.length ? html`<button class="btn sm" onClick=${() => { view.value = 'list'; expanded.value = p.key; }}>Choose…</button>
+        <button class="btn sm primary" disabled=${!chosen.length || blocked} onClick=${() => openUpdate([{ product: p, nodes: chosen }])}><${Icon} name="download" />Update ${m.behind.length}</button>`
+        : html`<span class="uptodate"><${Icon} name="check" />Current</span>`}
     </footer>
   </article>`;
 }
@@ -263,10 +271,13 @@ export function UpdatesView() {
   }, [s]);
   if (!s) return null;
 
-  const available = models.filter((m) => canUpdate(m.p) && (m.behind.length || m.updating.length))
-    .sort((a, b) => b.behind.length - a.behind.length || b.updating.length - a.updating.length);
+  // Every app the tracker can update, the ones that need something first — so the page always
+  // says what's installed and on which version, not just what's pending.
+  const available = models.filter((m) => canUpdate(m.p) && (m.installed.length || m.behind.length || m.updating.length))
+    .sort((a, b) => b.behind.length - a.behind.length || b.updating.length - a.updating.length || a.p.name.localeCompare(b.p.name));
+  const pending = available.filter((m) => m.behind.length || m.updating.length);
   const majors = models.filter((m) => canUpdate(m.p) && m.majors.length);
-  const current = models.filter((m) => !available.includes(m) && m.installed.length && !SELF_UPDATING.has(m.p.key) && canUpdate(m.p));
+  const current = available.filter((m) => !m.behind.length && !m.updating.length);
   const selfManaged = models.filter((m) => m.installed.length && (SELF_UPDATING.has(m.p.key) || !canUpdate(m.p)));
   const behindMachines = new Set(available.flatMap((m) => m.behind.map((n) => n.id)));
   const updateCount = available.reduce((c, m) => c + m.behind.length, 0);
@@ -297,7 +308,7 @@ export function UpdatesView() {
         <${RolloutList} s=${s} limitDone=${0} />
       </section>` : null}
 
-      ${!available.length ? html`<${AllClear} s=${s} models=${models} />` : null}
+      ${!pending.length ? html`<${AllClear} s=${s} models=${models} />` : null}
       ${available.length ? groups.map((g) => html`<section key=${g.kind} class="card ulist">
         <div class="ulist-head">
           <label class="ur-check"><input type="checkbox" aria-label=${`Select all ${g.label.toLowerCase()} with updates`}
@@ -311,7 +322,7 @@ export function UpdatesView() {
             }} /></label>
           <span class=${'ulist-icon k-' + g.kind}><${Icon} name=${g.icon} /></span>
           <h2>${g.label}</h2>
-          <span class="dim">${plural(g.rows.reduce((c, m) => c + m.behind.length, 0), 'update')} · ${plural(g.rows.length, 'app')}</span>
+          <span class="dim">${g.rows.some((m) => m.behind.length) ? `${plural(g.rows.reduce((c, m) => c + m.behind.length, 0), 'update')} · ` : ''}${plural(g.rows.length, 'app')}</span>
           ${g.hint ? html`<span class="grow"></span><span class="dim" style="font-size:.8rem">${g.hint}</span>` : null}
         </div>
         ${view.value === 'grid'
@@ -329,10 +340,10 @@ export function UpdatesView() {
         </div></div>`)}
       </section>` : null}
 
-      ${current.length || selfManaged.length ? html`<details class="quiet">
-        <summary><${Icon} name="check" />${plural(current.length + selfManaged.length, 'app')} up to date${available.length ? '' : ' across the farm'}</summary>
-        <div class="current-list">${[...current, ...selfManaged].map((m) => html`<span key=${m.p.key} class="current-chip" title=${`${m.current.length}/${m.installed.length} machines`}><${ProductLogo} product=${m.p} size=${18} />${m.p.name}<span class="mono dim">${m.targets.join(' / ') || m.p.latest_version || ''}</span></span>`)}</div>
-        ${selfManaged.length ? html`<p class="dim" style="margin:8px 0 0;font-size:.82rem">${selfManaged.map((m) => m.p.name).join(', ')} ${selfManaged.length === 1 ? 'updates itself or is' : 'update themselves or are'} tracked only — shown on each machine, not updated from here.</p>` : null}
+      ${selfManaged.length ? html`<details class="quiet">
+        <summary><${Icon} name="refresh" />${plural(selfManaged.length, 'app')} the tracker doesn't update itself</summary>
+        <div class="current-list">${selfManaged.map((m) => html`<span key=${m.p.key} class="current-chip"><${ProductLogo} product=${m.p} size=${18} />${m.p.name}<span class="mono dim">${m.targets.join(' / ') || m.p.latest_version || ''}</span></span>`)}</div>
+        <p class="dim" style="margin:8px 0 0;font-size:.82rem">${selfManaged.map((m) => m.p.name).join(', ')} ${selfManaged.length === 1 ? 'updates itself or is' : 'update themselves or are'} tracked only — shown on each machine, not updated from here.</p>
       </details>` : null}
     </div>
 

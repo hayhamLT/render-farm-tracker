@@ -1093,3 +1093,5 @@ details.quiet[open] > summary { margin-bottom: 10px; }
 .uc3-pct small { font-size: 0.58rem; }
 .uc3-meta { display: flex; flex-wrap: wrap; gap: 6px; min-height: 20px; }
 .ucard3 footer { display: flex; align-items: center; gap: 8px; padding-top: 9px; border-top: 1px solid var(--border); font-size: 0.8rem; }
+.ur.quiet-row .ur-main { opacity: 0.78; }
+.ur.quiet-row:hover .ur-main, .ur.quiet-row.open .ur-main { opacity: 1; }
