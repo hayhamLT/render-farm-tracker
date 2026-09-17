@@ -311,15 +311,15 @@ export function UpdatesView() {
       ${!pending.length ? html`<${AllClear} s=${s} models=${models} />` : null}
       ${available.length ? groups.map((g) => html`<section key=${g.kind} class="card ulist">
         <div class="ulist-head">
-          <label class="ur-check"><input type="checkbox" aria-label=${`Select all ${g.label.toLowerCase()} with updates`}
-            disabled=${!g.rows.some((m) => m.behind.length)}
-            checked=${g.rows.some((m) => m.behind.length) && g.rows.filter((m) => m.behind.length).every((m) => selectedApps.value.has(m.p.key))}
+          <label class="ur-check">${g.rows.some((m) => m.behind.length) ? html`<input type="checkbox" aria-label=${`Select all ${g.label.toLowerCase()} with updates`}
+            title="Select every app here that has updates"
+            checked=${g.rows.filter((m) => m.behind.length).every((m) => selectedApps.value.has(m.p.key))}
             onChange=${(e) => {
               const keys = g.rows.filter((m) => m.behind.length).map((m) => m.p.key);
               const next = new Set(selectedApps.value);
               keys.forEach((k) => (e.currentTarget.checked ? next.add(k) : next.delete(k)));
               selectedApps.value = next;
-            }} /></label>
+            }} />` : null}</label>
           <span class=${'ulist-icon k-' + g.kind}><${Icon} name=${g.icon} /></span>
           <h2>${g.label}</h2>
           <span class="dim">${g.rows.some((m) => m.behind.length) ? `${plural(g.rows.reduce((c, m) => c + m.behind.length, 0), 'update')} · ` : ''}${plural(g.rows.length, 'app')}</span>
