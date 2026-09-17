@@ -1544,12 +1544,16 @@ function renderDeploy() {
       + `<tr><th>Machine</th><th>Software</th><th>Status</th><th>Time</th><th></th></tr>` +
       rows.slice(0, CAP).map((j) => {
         // Actions column: stop while running; log once finished. (Retry lives in the Status cell.)
-        const stop = active(j.status)
-          ? `<button class="link-btn danger" onclick="killJob(${j.id})" title="Stop this job">${icon('x')} stop</button>` : '';
+        const stopping = active(j.status) && j.cancel_requested_at;
+        const stop = active(j.status) && !stopping
+          ? `<button class="link-btn danger" onclick="killJob(${j.id})" title="Stop this job — kills the installer on the machine">${icon('x')} stop</button>` : '';
         const logBtn = !active(j.status) && j.log
           ? `<button class="link-btn" onclick="toggleLog(${j.id})">log</button>` : '';
         let statusCell;
-        if (j.status === 'downloading') {
+        if (stopping) {
+          // Stop sent; waiting for the machine to confirm it killed the installer.
+          statusCell = `<span class="badge inprogress blocked" title="Stop sent — waiting for ${esc(j.hostname)} to confirm it killed the installer.">${icon('spinner', 'spin')} stopping…</span>`;
+        } else if (j.status === 'downloading') {
           // Real LAN-transfer progress, measured by the server as it streams.
           const pct = typeof j.dl_pct === 'number' ? j.dl_pct : null;
           statusCell = `<span class="badge inprogress downloading">${icon('download')}
@@ -1629,8 +1633,11 @@ function renderDeploy() {
 }
 
 async function killJob(id) {
-  if (!await uiConfirm('Stop this job? It will be marked cancelled and the machine freed for another update.', { title: 'Stop job', confirmLabel: 'Stop job', danger: true })) return;
-  try { await api('POST', `/api/jobs/${id}/kill`); } catch (e) { toast(e.message, 'error'); }
+  if (!await uiConfirm('Stop this job? A running installer is killed on the machine, and the machine is freed for the next update.', { title: 'Stop job', confirmLabel: 'Stop job', danger: true })) return;
+  try {
+    const r = await api('POST', `/api/jobs/${id}/kill`);
+    if (r.result === 'stopping') toast('Stopping — the machine kills the installer on its next check-in (within a minute).', 'success');
+  } catch (e) { toast(e.message, 'error'); }
   refresh();
 }
 
@@ -1643,7 +1650,7 @@ async function stopAllJobs() {
   if (!await uiConfirm('Stop ALL queued and running updates, farm-wide?', { title: 'Stop everything', confirmLabel: 'Stop all', danger: true })) return;
   try {
     const r = await api('POST', '/api/jobs/kill-all');
-    toast(`Stopped ${r.stopped} job(s).`, 'success');
+    toast(r.stopping ? `Cancelled ${r.cancelled} queued job(s); stopping ${r.stopping} running installer(s) on their machines.` : `Stopped ${r.stopped} job(s).`, 'success');
   } catch {
     // Older server without kill-all: stop each active job individually.
     const act = state.jobs.filter((j) => ['pending', 'downloading', 'installing'].includes(j.status));

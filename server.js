@@ -13,6 +13,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
+const commands = require('./lib/commands');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -36,15 +37,8 @@ const DL_PROGRESS = new Map();
 const INSTALL_EMA = new Map();
 
 let LATEST_AGENT_VERSION = readAgentVersion();
-// Node IDs with a pending agent-side reboot — used as a fallback when Deadline's
-// RemoteControl can't reach a machine (Launcher down / port 17000 blocked) but the
-// tracker agent is still checking in. The flag is handed to the agent on its next
-// check-in (which then reboots itself) and cleared.
-const pendingAgentReboot = new Set();
-// Node IDs with a pending agent-side SHUTDOWN (full power-off). Agent-only — Deadline
-// can't power a box off cleanly — so this requires the agent to be online + new enough
-// to understand the directive (>= 2.28.0). Handed to the agent on its next check-in.
-const pendingAgentShutdown = new Set();
+// Agent-side reboot / shutdown / wake-relay instructions are durable rows in
+// node_commands (lib/commands.js), handed out on the node's next check-in.
 // Re-read periodically so dropping in a new render_agent.py rolls out with no restart.
 setInterval(() => { LATEST_AGENT_VERSION = readAgentVersion() || LATEST_AGENT_VERSION; }, 60 * 1000);
 
@@ -1049,8 +1043,6 @@ function wakeOnLan(macs, nodeIp) {
 const WAKE_TIMEOUT_MS = 5 * 60 * 1000;   // cold boot + BIOS + agent start can take ~3 min
 const WAKE_RESULT_KEEP_MS = 15 * 60 * 1000;
 const WAKE_RELAYS = 3;
-const wakeState = new Map();        // node id -> { state, requestedAt, doneAt, secs, relays, reason }
-const pendingRelayWake = new Map(); // relay node id -> [{ hostname, macs, ip }]
 
 // MACs worth waking: the wired adapters the agent reported (2.29.0+), else everything known.
 function wakeMacsFor(node) {
@@ -1091,13 +1083,9 @@ function startWake(node) {
     .filter((r) => net && String(r.ip || '').replace(/^::ffff:/, '').startsWith(net))
     .sort((a, b) => (a.os === 'windows' ? 0 : 1) - (b.os === 'windows' ? 0 : 1) || b.last_seen - a.last_seen)
     .slice(0, WAKE_RELAYS);
-  for (const r of relays) {
-    const q = pendingRelayWake.get(r.id) || [];
-    q.push({ hostname: node.hostname, macs, ip: node.ip });
-    pendingRelayWake.set(r.id, q);
-  }
+  for (const r of relays) commands.queue(r.id, 'wake_relay', { hostname: node.hostname, macs, ip: node.ip });
   for (const delay of [0, 5000, 15000, 30000, 60000]) setTimeout(() => wakeOnLan(macs, node.ip), delay);
-  wakeState.set(node.id, { state: 'waking', requestedAt: now, relays: relays.map((r) => r.hostname) });
+  commands.startWakeRow(node.id, relays.map((r) => r.hostname));
   logEvent('node', `Waking ${node.hostname} — Wake-on-LAN to ${macs.length} MAC${macs.length === 1 ? '' : 's'} from the server`
     + (relays.length ? ` and via ${relays.map((r) => r.hostname).join(', ')}` : ''));
   return { macs: macs.length, relays: relays.map((r) => r.hostname) };
@@ -1105,28 +1093,71 @@ function startWake(node) {
 
 // Called on every check-in: a waking node that checks in has woken up.
 function noteWakeCheckin(node, now) {
-  const w = wakeState.get(node.id);
+  const w = commands.getWake(node.id);
   if (!w || w.state !== 'waking') return;
   const secs = Math.round((now - w.requestedAt) / 1000);
-  wakeState.set(node.id, { ...w, state: 'woke', doneAt: now, secs });
+  commands.finishWake(node.id, 'woke', { secs });
   logEvent('node', `${node.hostname} woke up — online ${secs}s after Wake-on-LAN`);
 }
 
 // Time out wakes that never produced a check-in; expire old results.
 setInterval(() => {
   const now = Date.now();
-  for (const [id, w] of wakeState) {
+  for (const [id, w] of commands.allWakes()) {
     if (w.state === 'waking' && now - w.requestedAt > WAKE_TIMEOUT_MS) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(id);
-      if (!node) { wakeState.delete(id); continue; }
+      if (!node) { commands.deleteWake(id); continue; }
       const reason = wakeFailReason(node);
-      wakeState.set(id, { ...w, state: 'failed', doneAt: now, reason });
+      commands.finishWake(id, 'failed', { reason });
       logEvent('node', `${node.hostname} did not wake within ${Math.round(WAKE_TIMEOUT_MS / 60000)} min. ${reason}`);
     } else if (w.state !== 'waking' && now - w.doneAt > WAKE_RESULT_KEEP_MS) {
-      wakeState.delete(id);
+      commands.deleteWake(id);
     }
   }
+  commands.sweep();
+  expireUnconfirmedStops(now);
 }, 10000);
+
+// A stop sent to a machine that never confirms (offline, or the agent died) must not leave
+// the job "stopping…" forever. After STOP_CONFIRM_MS, record it as stopped and say why.
+const STOP_CONFIRM_MS = 10 * 60 * 1000;
+function expireUnconfirmedStops(now) {
+  const stale = db.prepare(
+    `SELECT j.id, n.hostname FROM jobs j JOIN nodes n ON n.id = j.node_id
+      WHERE j.cancel_requested_at IS NOT NULL AND j.cancel_requested_at < ?
+        AND j.status IN ('downloading','installing')`
+  ).all(now - STOP_CONFIRM_MS);
+  for (const j of stale) {
+    db.prepare("UPDATE jobs SET status = 'cancelled', log = COALESCE(log,'') || ?, updated_at = ? WHERE id = ?")
+      .run(`\n[stop requested, but ${j.hostname} didn't confirm within ${STOP_CONFIRM_MS / 60000} min — it may be offline; the installer could still be running there]`, now, j.id);
+    logEvent('job', `Job #${j.id} marked stopped — ${j.hostname} never confirmed the stop`);
+  }
+}
+
+// Agents from this version on report their running job and kill it on request.
+const AGENT_CAN_CANCEL = '2.30.0';
+const agentCanCancel = (node) => node && node.agent_version && cmpVersionServer(node.agent_version, AGENT_CAN_CANCEL) >= 0;
+
+// Stop one job. Queued → cancelled immediately. Running on a capable agent → "stopping…"
+// until the machine confirms it killed the installer. Running on an older agent → cancelled
+// in the tracker, with an honest note that the installer may keep running on the machine.
+function requestStop(job, reason) {
+  const now = Date.now();
+  if (job.status === 'pending') {
+    db.prepare("UPDATE jobs SET status = 'cancelled', log = COALESCE(log,'') || ?, updated_at = ? WHERE id = ?")
+      .run(`\n[${reason}]`, now, job.id);
+    return 'cancelled';
+  }
+  const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(job.node_id);
+  if (agentCanCancel(node)) {
+    db.prepare('UPDATE jobs SET cancel_requested_at = COALESCE(cancel_requested_at, ?), log = COALESCE(log,\'\') || ? WHERE id = ?')
+      .run(now, `\n[${reason} — stopping on the machine…]`, job.id);
+    return 'stopping';
+  }
+  db.prepare("UPDATE jobs SET status = 'cancelled', log = COALESCE(log,'') || ?, updated_at = ? WHERE id = ?")
+    .run(`\n[${reason} — this machine's agent (${(node && node.agent_version) || 'unknown'}) can't stop a running installer, so it may still finish on the machine]`, now, job.id);
+  return 'cancelled';
+}
 
 // One-time ELEVATED setup (Windows): re-install the agent as a Scheduled Task
 // running as the logged-on user with HIGHEST privileges — elevated (no UAC on
@@ -1389,12 +1420,13 @@ function fullState() {
   // Hide infra hosts (e.g. the box running an agent ONLY to report Adobe RUM
   // latest) from the dashboard — config.hiddenNodes (short hostname, any case).
   const _hidden = (config.hiddenNodes || []).map((h) => String(h).split('.')[0].toUpperCase());
+  const wakesNow = commands.allWakes();
   const nodes = db.prepare('SELECT * FROM nodes ORDER BY hostname').all()
     .filter((n) => !_hidden.includes(String(n.hostname || '').split('.')[0].toUpperCase()))
     .map((n) => ({
     ...n,
     online: n.last_seen != null && now - n.last_seen < offlineMs,
-    wake: wakeState.get(n.id) || null,
+    wake: wakesNow.get(n.id) || null,
     software: db
       .prepare('SELECT product_key, version, install_path, detected_at FROM software WHERE node_id = ?')
       .all(n.id),
@@ -1506,6 +1538,38 @@ function reconcileFailedJobs(node, software, now) {
     clearRolloutHaltFlag(j.product_key, j.version);
     logEvent('job', `Job #${j.id} corrected to success: ${j.product_key} ${j.version} is installed on ${node.hostname} (${have})`);
   }
+}
+
+// Keep the tracker's idea of "running" honest against what the machine says it's running
+// (agents 2.30.0+ report their current job id on every check-in). Returns job ids to stop:
+//  • jobs with a stop requested that haven't confirmed yet (re-sent until they do);
+//  • jobs the machine is running that the tracker no longer considers active — cleared,
+//    deleted, or already cancelled while the installer kept going.
+// And a job the tracker shows as running that the machine is NOT running (agent restarted
+// or crashed mid-install) is marked failed instead of spinning forever.
+const LOST_JOB_GRACE_MS = 2 * 60 * 1000;
+function reconcileRunning(node, body, now) {
+  const stop = new Set(db.prepare(
+    "SELECT id FROM jobs WHERE node_id = ? AND cancel_requested_at IS NOT NULL AND status IN ('downloading','installing')"
+  ).all(node.id).map((j) => j.id));
+  if (!Array.isArray(body.running)) return [...stop];
+  const running = body.running.map(Number).filter(Number.isFinite);
+  for (const id of running) {
+    const j = db.prepare('SELECT status FROM jobs WHERE id = ?').get(id);
+    if (!j || !['pending', 'downloading', 'installing'].includes(j.status)) {
+      if (!stop.has(id)) logEvent('job', `Stopping job #${id} on ${node.hostname} — it was still running there after being ${j ? j.status : 'removed'} in the tracker`);
+      stop.add(id);
+    }
+  }
+  const lost = db.prepare(
+    "SELECT id, updated_at FROM jobs WHERE node_id = ? AND status IN ('downloading','installing')"
+  ).all(node.id).filter((j) => !running.includes(j.id) && now - j.updated_at > LOST_JOB_GRACE_MS);
+  for (const j of lost) {
+    db.prepare("UPDATE jobs SET status = 'failed', log = COALESCE(log,'') || ?, updated_at = ?, cancel_requested_at = NULL WHERE id = ?")
+      .run(`\n[${node.hostname}'s agent is no longer running this job — it restarted or crashed mid-install, so the result is unknown. Retry it; if the software actually installed, the job corrects itself to success on the next check-in.]`, now, j.id);
+    logEvent('job', `Job #${j.id} failed: ${node.hostname}'s agent stopped running it (restart/crash mid-install)`);
+  }
+  return [...stop];
 }
 
 function handleCheckin(body) {
@@ -1669,6 +1733,10 @@ function handleCheckin(body) {
   const av = body.agentVersion || node.agent_version;
   const selfUpdateOk = av && cmpVersionServer(av, SAFE_SELFUPDATE_FROM) >= 0;
 
+  // Instructions waiting for this machine, and which jobs it must stop.
+  const cmds = commands.take(node.id);
+  const stopIds = reconcileRunning(node, body, now);
+
   return {
     nodeId: node.id,
     active: true, // monitoring is always on (no master toggle)
@@ -1677,11 +1745,13 @@ function handleCheckin(body) {
     pollSeconds: Math.max(15, Math.floor(config.offlineAfterSeconds / 3)),
     jobs,
     // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
-    reboot: pendingAgentReboot.delete(node.id) ? true : undefined,
+    reboot: cmds.some((c) => c.kind === 'reboot') || undefined,
     // Wake-on-LAN relay: broadcast magic packets for these neighbours from this node.
-    wake: (() => { const q = pendingRelayWake.get(node.id); pendingRelayWake.delete(node.id); return q; })(),
+    wake: cmds.filter((c) => c.kind === 'wake_relay').map((c) => c.payload),
+    // Jobs to stop on this machine (re-sent every check-in until the agent confirms).
+    cancel: stopIds.length ? stopIds : undefined,
     // Agent-side full power-off (requested from the Fleet ⏻ menu → Shut down).
-    shutdown: pendingAgentShutdown.delete(node.id) ? true : undefined,
+    shutdown: cmds.some((c) => c.kind === 'shutdown') || undefined,
     // One-time fleet migration to a new tracker server (gated by config.rehome).
     rehome: rehomeFor(hostname),
     // User-added (custom) products + their detection patterns, so the agent can detect them
@@ -1774,7 +1844,7 @@ const server = http.createServer(async (req, res) => {
         if (!job) return sendJson(res, 404, { error: 'no such job' });
         // 'pending' lets an agent defer its own job (node is rendering — retry next
         // check-in) without it counting as a failure.
-        const ok = ['pending', 'downloading', 'installing', 'success', 'failed'];
+        const ok = ['pending', 'downloading', 'installing', 'success', 'failed', 'cancelled'];
         if (!ok.includes(body.status)) return sendJson(res, 400, { error: 'bad status' });
         // Stamp when the job first starts running (leaves the queue) — drives the timer.
         if (!job.started_at && (body.status === 'downloading' || body.status === 'installing')) {
@@ -1799,6 +1869,10 @@ const server = http.createServer(async (req, res) => {
           // Keep the (hidden) Maxon App current as a ride-along on Maxon updates.
           const donePkg = db.prepare('SELECT product_key FROM packages WHERE id = ?').get(job.package_id);
           if (donePkg) maybeRideAlongMaxonApp(job.node_id, donePkg.product_key);
+        }
+        if (body.status === 'cancelled') {
+          const who = db.prepare('SELECT n.hostname FROM jobs j JOIN nodes n ON n.id = j.node_id WHERE j.id = ?').get(id);
+          logEvent('job', `Job #${id} stopped on ${who ? who.hostname : 'the machine'} — installer killed`);
         }
         if (body.status === 'success' || body.status === 'failed') {
           const info = db.prepare(
@@ -2086,6 +2160,15 @@ const server = http.createServer(async (req, res) => {
       const prod = db.prepare('SELECT * FROM products WHERE key = ?').get(productDel[1]);
       if (!prod) return sendJson(res, 404, { error: 'no such product' });
       if (!prod.custom) return sendJson(res, 400, { error: 'built-in products cannot be deleted' });
+      // Never delete jobs that are running on a machine — the installer would keep going
+      // with nothing tracking it. Ask to stop them first.
+      const runningHere = db.prepare(
+        `SELECT n.hostname FROM jobs j JOIN packages p ON p.id = j.package_id JOIN nodes n ON n.id = j.node_id
+          WHERE p.product_key = ? AND j.status IN ('downloading','installing')`
+      ).all(prod.key).map((r) => r.hostname);
+      if (runningHere.length) {
+        return sendJson(res, 409, { error: `${prod.name} is installing on ${runningHere.join(', ')} right now — stop those jobs first, then delete.`, running: runningHere });
+      }
       const pkgIds = db.prepare('SELECT id FROM packages WHERE product_key = ?').all(prod.key).map((r) => r.id);
       for (const pid of pkgIds) db.prepare('DELETE FROM jobs WHERE package_id = ?').run(pid);
       db.prepare('DELETE FROM packages WHERE product_key = ?').run(prod.key);
@@ -2270,18 +2353,17 @@ const server = http.createServer(async (req, res) => {
       if (!['pending', 'downloading', 'installing'].includes(job.status)) {
         return sendJson(res, 400, { error: `job is already ${job.status}` });
       }
-      db.prepare("UPDATE jobs SET status = 'cancelled', log = COALESCE(log,'')||?, updated_at = ? WHERE id = ?")
-        .run('\n[stopped by user]', Date.now(), id);
-      return sendJson(res, 200, { ok: true });
+      const result = requestStop(job, 'stopped by user');
+      return sendJson(res, 200, { ok: true, result });
     }
 
     // Stop everything — cancels every queued and in-flight job at once.
     if (req.method === 'POST' && p === '/api/jobs/kill-all') {
-      const n = db.prepare(
-        "UPDATE jobs SET status = 'cancelled', log = COALESCE(log,'')||?, updated_at = ? WHERE status IN ('pending','downloading','installing')"
-      ).run('\n[stopped by user — stop all]', Date.now()).changes;
-      if (n) logEvent('deploy', `Stop all: ${n} job(s) cancelled`);
-      return sendJson(res, 200, { ok: true, stopped: n });
+      const active = db.prepare("SELECT * FROM jobs WHERE status IN ('pending','downloading','installing')").all();
+      const tally = { cancelled: 0, stopping: 0 };
+      for (const job of active) tally[requestStop(job, 'stopped by user — stop all')]++;
+      if (active.length) logEvent('deploy', `Stop all: ${tally.cancelled} cancelled, ${tally.stopping} being stopped on their machines`);
+      return sendJson(res, 200, { ok: true, stopped: active.length, ...tally });
     }
 
     // Clear finished activity — remove done/failed/stopped jobs, leaving only in-progress.
@@ -2322,7 +2404,7 @@ const server = http.createServer(async (req, res) => {
       const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
       const agentCapable = online && node.agent_version && cmpVersionServer(node.agent_version, '2.17.3') >= 0;
       if (agentCapable) {
-        pendingAgentReboot.add(node.id);
+        commands.queue(node.id, 'reboot');
         logEvent('node', `Reboot requested for ${node.hostname} via the tracker agent`);
         return sendJson(res, 200, { ok: true, hostname: node.hostname, confirmed: false, via: 'agent' });
       }
@@ -2362,7 +2444,7 @@ const server = http.createServer(async (req, res) => {
           : `${node.hostname}'s agent (${node.agent_version || 'unknown'}) is too old to shut down. Agents self-update to ${minAgent}+ within a few minutes — try again shortly.`;
         return sendJson(res, 400, { error: why });
       }
-      pendingAgentShutdown.add(node.id);
+      commands.queue(node.id, 'shutdown');
       const macNote = node.os === 'macos' ? ' (Mac: put to sleep, so Wake can bring it back)' : '';
       logEvent('node', `Shut down requested for ${node.hostname} via the tracker agent${macNote}`);
       return sendJson(res, 200, { ok: true, hostname: node.hostname, via: 'agent',

@@ -31,6 +31,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -40,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.29.0"
+AGENT_VERSION = "2.30.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -979,10 +980,18 @@ def _windows_reboot_pending():
 # Server communication
 # --------------------------------------------------------------------------
 
+class JobCancelled(Exception):
+    """Raised inside a job when the server asked us to stop it."""
+
+
 class Server:
     def __init__(self, base_url, key):
         self.base = base_url.rstrip("/")
         self.key = key
+        # Called with EVERY check-in response. The install thread checks in too (right after
+        # a job), so directives — stop a job, reboot, wake a neighbour — must be handled
+        # wherever the response lands, not only in the main loop.
+        self.on_response = None
 
     def _request(self, method, path, body=None, timeout=30):
         data = json.dumps(body).encode() if body is not None else None
@@ -1009,7 +1018,17 @@ class Server:
             payload["latest"] = latest
         if health:
             payload["health"] = health
-        return self._request("POST", "/api/agent/checkin", payload)
+        # The job this machine is executing right now — lets the server stop it, and spot
+        # a job it no longer knows about (deleted/cleared while running) and stop that too.
+        running = _JOB["id"]
+        payload["running"] = [running] if running else []
+        resp = self._request("POST", "/api/agent/checkin", payload)
+        if self.on_response:
+            try:
+                self.on_response(resp)
+            except Exception as e:
+                print("  ! directive handling failed: %s" % e)
+        return resp
 
     def get_agent_code(self):
         req = urllib.request.Request(self.base + "/agent", headers={"X-Agent-Key": self.key})
@@ -1023,13 +1042,15 @@ class Server:
         except Exception as e:
             print("  ! failed to report job status: %s" % e)
 
-    def download(self, package_id, dest_path):
+    def download(self, package_id, dest_path, cancel=None):
         req = urllib.request.Request(
             self.base + "/api/agent/download/%d" % package_id,
             headers={"X-Agent-Key": self.key},
         )
         with urllib.request.urlopen(req, timeout=120) as resp, open(dest_path, "wb") as out:
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise JobCancelled()
                 chunk = resp.read(1024 * 1024)
                 if not chunk:
                     break
@@ -1041,6 +1062,88 @@ class Server:
 # --------------------------------------------------------------------------
 
 INSTALL_TIMEOUT = 3600  # seconds
+
+# The job executing on this machine right now. The server learns its id from every
+# check-in; a "cancel" directive for that id sets the event and kills the process tree.
+_JOB = {"id": None, "proc": None, "cancel": threading.Event()}
+_JOB_LOCK = threading.Lock()
+_PENDING = {"reboot": False, "shutdown": False}
+
+
+def _kill_tree(proc):
+    """Kill an installer AND everything it spawned. Killing only the shell (what
+    subprocess.run's timeout does) leaves the real installer running in the background."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=30)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def cancel_job(job_id):
+    """Stop the running job if it's this id. Returns True if it was ours."""
+    with _JOB_LOCK:
+        if _JOB["id"] != job_id:
+            return False
+        _JOB["cancel"].set()
+        proc = _JOB["proc"]
+    _kill_tree(proc)
+    return True
+
+
+def handle_directives(resp):
+    """Act on server instructions carried by any check-in response."""
+    for jid in resp.get("cancel") or []:
+        try:
+            if cancel_job(int(jid)):
+                print("  ■ job #%s stopped by the server" % jid)
+        except (TypeError, ValueError):
+            pass
+    # Help wake machines on our network segment (Wake-on-LAN relay).
+    for w in resp.get("wake") or []:
+        threading.Thread(target=send_magic_packets, args=(w.get("macs"), w.get("ip")),
+                         daemon=True).start()
+        print("  ⏻ sending Wake-on-LAN for %s" % w.get("hostname"))
+    if resp.get("reboot"):
+        _PENDING["reboot"] = True
+    if resp.get("shutdown"):
+        _PENDING["shutdown"] = True
+
+
+def _run_cancellable(cmd, timeout):
+    """Run a shell command in its own process group so the whole tree can be killed on
+    timeout or cancel. Returns (returncode, stdout, stderr)."""
+    kw = {"shell": True, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+          "text": True, "errors": "replace"}
+    if IS_WINDOWS:
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    with _JOB_LOCK:
+        if _JOB["cancel"].is_set():
+            raise JobCancelled()
+        proc = subprocess.Popen(cmd, **kw)
+        _JOB["proc"] = proc
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        proc.communicate()
+        raise
+    finally:
+        with _JOB_LOCK:
+            _JOB["proc"] = None
+    if _JOB["cancel"].is_set():
+        raise JobCancelled()
+    return proc.returncode, out, err
 
 
 def _installed_version(product_key):
@@ -1204,6 +1307,23 @@ def _shutdown_machine():
 
 
 def run_job(server, job):
+    with _JOB_LOCK:
+        _JOB["id"] = job["id"]
+        _JOB["proc"] = None
+        _JOB["cancel"] = threading.Event()
+    try:
+        _run_job(server, job)
+    except JobCancelled:
+        server.report(job["id"], "cancelled",
+                      "Stopped from the tracker — the installer and everything it started were killed on the machine.")
+        print("  ■ job #%d cancelled" % job["id"])
+    finally:
+        with _JOB_LOCK:
+            _JOB["id"] = None
+            _JOB["proc"] = None
+
+
+def _run_job(server, job):
     job_id = job["id"]
     kind = job.get("kind", "installer")
     print("Job #%d: %s %s (%s) — starting" % (job_id, job["product_key"], job["version"], kind))
@@ -1240,7 +1360,9 @@ def run_job(server, job):
         installer = os.path.join(work_dir, os.path.basename(job["filename"]))
         server.report(job_id, "downloading", "Downloading %s" % job["filename"])
         try:
-            server.download(job["package_id"], installer)
+            server.download(job["package_id"], installer, cancel=_JOB["cancel"])
+        except JobCancelled:
+            raise
         except Exception as e:
             server.report(job_id, "failed", "Download failed: %s" % e)
             print("  ! download failed: %s" % e)
@@ -1271,15 +1393,8 @@ def run_job(server, job):
     # of tying it up for the full hour. Everything else keeps the long default.
     job_timeout = 1800 if job["product_key"] in ("aftereffects", "creativecloud") else INSTALL_TIMEOUT
     try:
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=job_timeout,
-        )
-        tail = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()[-4000:]
-        rc = proc.returncode
+        rc, out, err = _run_cancellable(cmd, job_timeout)
+        tail = ((out or "") + "\n" + (err or "")).strip()[-4000:]
         # The exit code is NOT the verdict — what's actually installed afterwards is. Some
         # installers exit non-zero after a successful install (the NVIDIA driver returns 1
         # on a benign warning), and a downloader that installs nothing still exits 0. So
@@ -1375,6 +1490,8 @@ def run_job(server, job):
             print("  ✗ failed (%s; %s)" % (exit_note, still))
     except subprocess.TimeoutExpired:
         server.report(job_id, "failed", "Command timed out after %ds (no progress — the agent aborted it to free the machine)" % job_timeout)
+    except JobCancelled:
+        raise
     except Exception as e:
         server.report(job_id, "failed", "Execution error: %s" % e)
     finally:
@@ -1698,6 +1815,7 @@ def main():
         return
 
     server = Server(server_url, key)
+    server.on_response = handle_directives
     print("Tracker agent %s on %s (%s) -> %s"
           % (AGENT_VERSION, socket.gethostname(), platform.system(), server_url))
 
@@ -1735,17 +1853,14 @@ def main():
             # Lightweight heartbeat first — learn whether monitoring is switched on.
             resp = server.checkin(None)
             # Server asked us to reboot (fallback when Deadline RemoteControl can't reach us).
-            if resp.get("reboot"):
+            if _PENDING["reboot"]:
+                _PENDING["reboot"] = False
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
                 continue
-            # Server asked us to help WAKE machines on our network segment (Wake-on-LAN relay).
-            for w in resp.get("wake") or []:
-                threading.Thread(target=send_magic_packets, args=(w.get("macs"), w.get("ip")),
-                                 daemon=True).start()
-                print("  ⏻ sending Wake-on-LAN for %s" % w.get("hostname"))
             # Server asked us to SHUT DOWN — full power-off (recover via Wake-on-LAN).
-            if resp.get("shutdown"):
+            if _PENDING["shutdown"]:
+                _PENDING["shutdown"] = False
                 _shutdown_machine()
                 time.sleep(30)   # let the OS begin powering off; the process dies with it
                 continue
