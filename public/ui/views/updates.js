@@ -64,12 +64,13 @@ function MachineState({ n }) {
   return null;
 }
 
+// Only shown when the installer needs attention — "ready" is the normal case and says nothing.
 function Installers({ m }) {
   const bad = m.installers.filter((i) => !i.ok);
   const dl = m.installers.filter((i) => i.ok && i.download);
   if (bad.length) return html`<span class="ur-inst bad" title=${bad.map((i) => `${i.os === 'macos' ? 'Mac' : 'Windows'}: ${i.label}`).join('\n')}><${Icon} name="alert" />${bad.length === m.installers.length ? 'No installer yet' : `No ${bad[0].os === 'macos' ? 'Mac' : 'Windows'} installer`}</span>`;
   if (dl.length) return html`<span class="ur-inst info" title="The tracker downloads it to the share first"><${Icon} name="download" />Downloads first</span>`;
-  return html`<span class="ur-inst ok"><${Icon} name="check" />Ready</span>`;
+  return null;
 }
 
 function AppRow({ m, s }) {
@@ -99,7 +100,7 @@ function AppRow({ m, s }) {
       <${ProductLogo} product=${p} size=${34} />
       <div class="ur-name">
         <b>${p.name}</b>
-        <span class="ur-ver">${m.from.length ? html`<span class="mono dim">${m.from.length > 2 ? `${m.from[0]} … ${m.from[m.from.length - 1]}` : m.from.join(', ')}</span><${Icon} name="chevron" /><span class="mono">${m.targets.join(' / ')}</span>` : html`<span class="mono">${m.targets.join(' / ') || p.latest_version || ''}</span>`}</span>
+        <span class="ur-ver">${m.from.length ? html`<span class="mono dim">${m.from.length > 2 ? `${m.from[0]} … ${m.from[m.from.length - 1]}` : m.from.join(', ')}</span><${Icon} name="chevron" /><span class="mono">${m.targets.join(' / ')}</span>` : html`<span class="mono">${m.targets.join(' / ') || p.latest_version || ''}</span>`}<${Installers} m=${m} /></span>
       </div>
       <div class="ur-cov" title=${`${m.current.length} of ${m.installed.length} current${m.updating.length ? ` · ${m.updating.length} updating` : ''}`}>
         <${StackBar} height=${6} total=${total} parts=${[
@@ -109,7 +110,6 @@ function AppRow({ m, s }) {
         ]} />
         <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}</span>
       </div>
-      <${Installers} m=${m} />
       <div class="ur-actions" onClick=${(e) => e.stopPropagation()}>
         <button class="btn primary" disabled=${!chosen.length || blocked} title=${blocked ? 'Add the installer to the share first (Apps)' : !chosen.length && m.behind.length ? 'No machines picked' : ''}
           onClick=${() => openUpdate([{ product: p, nodes: chosen }])}>
@@ -296,17 +296,15 @@ export function UpdatesView() {
           <span class="ur-check"></span><${ProductLogo} product=${m.p} size=${34} />
           <div class="ur-name"><b>${m.p.name}</b><span class="ur-ver"><span class="mono">${m.targets.join(' / ')}</span></span></div>
           <div class="ur-cov"><span>${plural(m.majors.length, 'machine')} on an older major</span></div>
-          <${Installers} m=${{ ...m, installers: [...new Set(m.majors.map((n) => n.os))].map((os) => ({ os, ...installerState(m.p, os) })) }} />
           <div class="ur-actions"><button class="btn" onClick=${() => openUpdate([{ product: m.p, nodes: m.majors }], { title: `Install ${m.p.name} ${m.targets[0] || ''}`, subtitle: 'New major version — installs next to the current one' })}><${Icon} name="up" />Install on ${m.majors.length}</button></div>
         </div></div>`)}
       </section>` : null}
 
-      ${current.length ? html`<section>
-        <h2 class="section-h">Up to date</h2>
-        <div class="current-list">${current.map((m) => html`<span key=${m.p.key} class="current-chip" title=${`${m.current.length}/${m.installed.length} machines`}><${ProductLogo} product=${m.p} size=${18} />${m.p.name}<span class="mono dim">${m.targets.join(' / ') || m.p.latest_version || ''}</span><${Icon} name="check" /></span>`)}</div>
-      </section>` : null}
-
-      ${selfManaged.length ? html`<p class="dim" style="margin:0;font-size:.82rem">${selfManaged.map((m) => m.p.name).join(', ')} ${selfManaged.length === 1 ? 'updates itself or is' : 'update themselves or are'} tracked only — shown on each machine, not updated from here.</p>` : null}
+      ${current.length || selfManaged.length ? html`<details class="quiet">
+        <summary><${Icon} name="check" />${plural(current.length + selfManaged.length, 'app')} up to date${available.length ? '' : ' across the farm'}</summary>
+        <div class="current-list">${[...current, ...selfManaged].map((m) => html`<span key=${m.p.key} class="current-chip" title=${`${m.current.length}/${m.installed.length} machines`}><${ProductLogo} product=${m.p} size=${18} />${m.p.name}<span class="mono dim">${m.targets.join(' / ') || m.p.latest_version || ''}</span></span>`)}</div>
+        ${selfManaged.length ? html`<p class="dim" style="margin:8px 0 0;font-size:.82rem">${selfManaged.map((m) => m.p.name).join(', ')} ${selfManaged.length === 1 ? 'updates itself or is' : 'update themselves or are'} tracked only — shown on each machine, not updated from here.</p>` : null}
+      </details>` : null}
     </div>
 
     ${sel.length ? html`<div class="bulkbar" role="toolbar" aria-label="Update selected apps">

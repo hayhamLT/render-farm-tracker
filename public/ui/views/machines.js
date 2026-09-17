@@ -68,6 +68,16 @@ const matchesQuick = (m, q) => {
     default: return true;
   }
 };
+// Rows are grouped by what you'd act on: problems first, healthy machines folded away.
+const GROUPS = [
+  { key: 'attention', label: 'Needs attention', hint: 'failed installs or machines that can\'t update', open: true, match: (m) => m.failed.length || blockedReason(m.node) },
+  { key: 'updating', label: 'Updating now', hint: '', open: true, match: (m) => ['installing', 'downloading', 'queued'].includes(m.activity.key) },
+  { key: 'behind', label: 'Needs updates', hint: '', open: true, match: (m) => m.behind.length > 0 },
+  { key: 'current', label: 'Up to date', hint: '', open: false, match: () => true },
+];
+const groupOf = (m) => GROUPS.find((g) => g.match(m)).key;
+const openGroups = pref('machines.groups', {});
+
 const SORTS = {
   name: (a, b) => a.node.hostname.localeCompare(b.node.hostname, undefined, { numeric: true }),
   behind: (a, b) => b.behind.length - a.behind.length || SORTS.name(a, b),
@@ -145,14 +155,11 @@ function rowState(m) {
 // ---------------------------------------------------------------- table
 const toggleSel = (id) => { const next = new Set(selected.value); if (next.has(id)) next.delete(id); else next.add(id); selected.value = next; };
 
-function MachineTable({ rows, model }) {
-  const allSel = rows.length && rows.every((m) => selected.value.has(m.node.id));
-  return html`<div class="card table-wrap"><table class="table mtable">
-    <thead><tr>
-      <th style="width:36px"><input type="checkbox" aria-label="Select all shown" checked=${allSel}
-        onClick=${() => { selected.value = allSel ? new Set() : new Set(rows.map((m) => m.node.id)); }} /></th>
-      <th>Machine</th><th>Status</th><th>Updates</th><th>Last update</th><th class="hide-sm">${AGENT_NAME}</th><th></th>
-    </tr></thead>
+function MachineTable({ rows, model, head = true }) {
+  return html`<div class="table-wrap"><table class="table mtable">
+    ${head ? html`<thead><tr>
+      <th style="width:36px"></th><th>Machine</th><th>Status</th><th>Updates</th><th>Last update</th><th></th>
+    </tr></thead>` : null}
     <tbody>${rows.map((m) => {
       const { node: n, dl } = m;
       const sel = selected.value.has(n.id);
@@ -161,8 +168,7 @@ function MachineTable({ rows, model }) {
         <td class="nowrap"><span class="row" style="gap:10px;flex-wrap:nowrap"><${OsStatus} node=${n} /><b>${n.hostname}</b></span></td>
         <td><${StatusCell} m=${m} /></td>
         <td><${BehindCell} m=${m} model=${model} /></td>
-        <td class="nowrap dim">${m.lastOk ? ago(m.lastOk, model.s.now) : '—'}</td>
-        <td class="hide-sm mono" style=${agentOutdated(model.s, n) ? 'color:var(--warn)' : 'color:var(--text-3)'} title=${agentOutdated(model.s, n) ? `Updates itself to ${model.s.latestAgentVersion}` : ''}>${n.agent_version || '—'}</td>
+        <td class="nowrap dim">${m.lastOk ? ago(m.lastOk, model.s.now) : '—'}${agentOutdated(model.s, n) ? html` <span class="tag muted" title=${`Agent ${n.agent_version} — updates itself to ${model.s.latestAgentVersion}`}>old agent</span>` : ''}</td>
         <td class="right nowrap" onClick=${(e) => e.stopPropagation()}>
           ${m.behind.length && !blockedReason(n) ? html`<button class="btn sm" onClick=${() => updateMachines(model, [n])}><${Icon} name="download" />Update</button>` : null}
           <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => openMenu(e.currentTarget, machineMenuItems(n, dl))}><${Icon} name="more" /></button>
@@ -170,6 +176,28 @@ function MachineTable({ rows, model }) {
       </tr>`;
     })}</tbody>
   </table></div>`;
+}
+
+function GroupedMachines({ rows, model }) {
+  const groups = GROUPS.map((g) => ({ ...g, rows: rows.filter((m) => groupOf(m) === g.key) })).filter((g) => g.rows.length);
+  if (groups.length === 1) return html`<div class="card">${html`<${MachineTable} rows=${groups[0].rows} model=${model} />`}</div>`;
+  return html`<div class="stack" style="gap:12px">${groups.map((g) => {
+    const shown = openGroups.value[g.key] ?? g.open;
+    const ids = g.rows.map((m) => m.node.id);
+    const allSel = ids.every((id) => selected.value.has(id));
+    return html`<section key=${g.key} class=${'card mgroup g-' + g.key}>
+      <header>
+        <button class="mg-head" onClick=${() => { openGroups.value = { ...openGroups.value, [g.key]: !shown }; }} aria-expanded=${shown}>
+          <${Icon} name="chevronDown" cls=${shown ? '' : 'flip-back'} />
+          <b>${g.label}</b><span class="mg-count">${g.rows.length}</span>
+          ${g.hint ? html`<span class="dim">${g.hint}</span>` : null}
+        </button>
+        <span class="grow"></span>
+        <button class="btn ghost sm" onClick=${() => { const next = new Set(selected.value); ids.forEach((id) => (allSel ? next.delete(id) : next.add(id))); selected.value = next; }}>${allSel ? 'Deselect' : 'Select all'}</button>
+      </header>
+      ${shown ? html`<${MachineTable} rows=${g.rows} model=${model} head=${false} />` : null}
+    </section>`;
+  })}</div>`;
 }
 
 // ---------------------------------------------------------------- hidden machines
@@ -356,15 +384,16 @@ export function MachinesView() {
       <div class="seg" role="group" aria-label="Operating system">
         ${[['all', 'All'], ['windows', 'Windows'], ['macos', 'Mac']].map(([k, l]) => html`<button key=${k} class=${osFilter.value === k ? 'on' : ''} onClick=${() => { osFilter.value = k; }}>${l}</button>`)}
       </div>
-      <select class="field" aria-label="Sort" value=${sortBy.value} onChange=${(e) => { sortBy.value = e.currentTarget.value; }}>
-        <option value="name">Name</option><option value="behind">Most updates</option><option value="updated">Recently updated</option><option value="os">OS</option>
-      </select>
+      <button class="btn ghost sm" title="Sort" onClick=${(e) => openMenu(e.currentTarget, [
+        ['name', 'Name'], ['behind', 'Most updates'], ['updated', 'Recently updated'], ['os', 'OS'],
+      ].map(([k, l]) => ({ label: l, icon: sortBy.value === k ? 'check' : 'dot', onSelect: () => { sortBy.value = k; } })))}><${Icon} name="list" />Sort</button>
       <${HiddenMachines} />
     </div>
 
     ${!nodes.length ? html`<${Empty}>No machines yet — enroll one from Settings → Enroll a machine.<//>`
       : !rows.length ? html`<${Empty}>No machines match these filters.<//>`
-      : html`<${MachineTable} rows=${rows} model=${model} />`}
+      : quick.value === 'all' ? html`<${GroupedMachines} rows=${rows} model=${model} />`
+      : html`<div class="card"><${MachineTable} rows=${rows} model=${model} /></div>`}
 
     <${BulkBar} model=${model} />
     ${drawerHost && html`<${MachineDrawer} hostname=${drawerHost} model=${model} />`}

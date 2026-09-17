@@ -4,7 +4,7 @@ import { html } from '../lib/html.js';
 import { useState } from 'preact/hooks';
 import { farm, refresh } from '../lib/store.js';
 import { post, put, del } from '../lib/api.js';
-import { pref, toast, confirm, openSheet } from '../lib/ui.js';
+import { pref, toast, confirm, openSheet, openMenu } from '../lib/ui.js';
 import { ago, plural } from '../lib/format.js';
 import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
@@ -13,7 +13,8 @@ import { PageHeader } from '../components/page.js';
 import { StackBar, Ring } from '../components/viz.js';
 import { InstallerLibrary } from './installers.js';
 
-const tab = pref('catalog.tab', 'app');
+const tab = pref('catalog.tab', 'catalog');
+const SECTIONS = [['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts']];
 const catOf = (p) => (p.category === 'plugin' || p.category === 'script' ? p.category : 'app');
 const LABEL = { app: 'app', plugin: 'plug-in', script: 'script' };
 
@@ -179,7 +180,7 @@ export function CatalogView() {
   if (!s) return html`<div class="page"><${Empty}>Loading…<//></div>`;
   const products = normalizeProducts(s);
   const count = (c) => products.filter((p) => catOf(p) === c).length;
-  const rows = tab.value === 'installers' ? [] : products.filter((p) => catOf(p) === tab.value);
+  const sections = SECTIONS.map(([k, label]) => ({ k, label, rows: products.filter((p) => catOf(p) === k) }));
   const setTrack = async (p, shown) => {
     try { await put(`/api/products/${p.key}`, { dashboard_hidden: shown ? 0 : 1 }); toast(`${p.name} ${shown ? 'is tracked on the dashboard' : 'is no longer tracked'}.`, shown ? 'success' : 'info'); } catch (e) { toast(e.message, 'error'); }
     refresh();
@@ -197,45 +198,48 @@ export function CatalogView() {
   return html`<div class="page stack">
     <${PageHeader} title="Apps" subtitle="What the tracker keeps updated, where new versions come from, and the installers on the share.">
       <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
-      ${tab.value !== 'installers' ? html`<button class="btn primary" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button>` : null}
+      ${tab.value !== 'installers' ? html`<button class="btn primary" onClick=${(e) => openMenu(e.currentTarget, SECTIONS.map(([k, l]) => ({ label: `Add ${LABEL[k]}`, icon: 'plus', onSelect: () => addProduct(k) })))}><${Icon} name="plus" />Add…</button>` : null}
     </${PageHeader}>
-    <div class="pills">${[['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts'], ['installers', 'Installers']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}${k !== 'installers' ? html`<span class="n">${count(k)}</span>` : null}</button>`)}</div>
+    <div class="pills">${[['catalog', 'Tracked apps'], ['installers', 'Installers on the share']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}${k === 'catalog' ? html`<span class="n">${products.length}</span>` : null}</button>`)}</div>
     ${tab.value === 'installers' ? html`<section class="card card-pad"><${InstallerLibrary} /></section>`
-      : !rows.length ? html`<section class="card"><div class="empty-inline"><${Icon} name="package" /><div><b>No ${LABEL[tab.value]}s yet</b><p class="muted">Add one to track its version across the farm.</p></div><button class="btn primary" style="margin-left:auto" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button></div></section>`
-      : html`<div class="appgrid">${rows.map((p) => {
-        const cv = coverage(p);
-        const tracked = p.dashboard_hidden !== 1;
-        const pct = cv.have ? Math.round((cv.current / cv.have) * 100) : null;
-        return html`<article key=${p.key} class=${'card acard' + (tracked ? '' : ' off')}>
-          <header>
-            <${ProductLogo} product=${p} size=${34} />
-            <div class="ac-name"><b>${p.name}</b><span class="dim">${p.custom ? 'Custom' : 'Built in'}${p.check_url ? ' · checks a web page' : ''}</span></div>
-            <${Ring} size=${52} stroke=${6} total=${Math.max(1, cv.have)} label=${cv.have ? `${cv.current} of ${cv.have} machines current` : 'not installed anywhere'}
-              segments=${[{ value: cv.current, color: 'var(--ok)' }, { value: cv.have - cv.current, color: 'var(--info)' }]}>
-              <span class="ac-pct">${pct == null ? '–' : pct}${pct == null ? '' : html`<small>%</small>`}</span>
-            <//>
-          </header>
-          <div class="ac-ver">
-            <span class="l">Latest</span>
-            <span class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</span>
-            ${p.updated_at ? html`<span class="dim">checked ${ago(p.updated_at, s.now)}</span>` : null}
-          </div>
-          <div class="ac-cov">
-            ${cv.have ? html`<${StackBar} height=${6} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} />
-              <span class="dim">${cv.current} of ${cv.have} current · installed on ${cv.have}/${cv.total} machines</span>` : html`<span class="dim">Not installed on any machine yet</span>`}
-          </div>
-          <footer>
-            <label class="ac-toggle"><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /><span>Track</span></label>
-            ${SELF_MANAGED.has(p.key)
-              ? html`<span class="dim" title="Updates itself or rides along with other installs">self-managed</span>`
-              : html`<label class="ac-toggle"><${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} /><span title="Install new versions everywhere automatically, testing on 3 machines first">Auto</span></label>`}
-            <span class="grow"></span>
-            ${p.custom ? html`
-              <button class="btn sm ghost icon" title="Edit" aria-label=${`Edit ${p.name}`} onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
-              <button class="btn sm ghost icon" title="Uninstall from machines" aria-label=${`Uninstall ${p.name}`} onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
-              <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}
-          </footer>
-        </article>`;
-      })}</div>`}
+      : sections.filter((sec) => sec.rows.length).map((sec) => html`<section key=${sec.k} class="stack" style="gap:10px">
+        <div class="row"><h2 class="section-h" style="margin:0">${sec.label}</h2><span class="dim">${sec.rows.length}</span><span class="grow"></span>
+          <button class="btn ghost sm" onClick=${() => addProduct(sec.k)}><${Icon} name="plus" />Add ${LABEL[sec.k]}</button></div>
+        <div class="appgrid">${sec.rows.map((p) => {
+          const cv = coverage(p);
+          const tracked = p.dashboard_hidden !== 1;
+          const pct = cv.have ? Math.round((cv.current / cv.have) * 100) : null;
+          return html`<article key=${p.key} class=${'card acard' + (tracked ? '' : ' off')}>
+            <header>
+              <${ProductLogo} product=${p} size=${34} />
+              <div class="ac-name"><b>${p.name}</b><span class="dim">${p.custom ? 'Custom' : 'Built in'}${p.check_url ? ' · checks a web page' : ''}</span></div>
+              <${Ring} size=${52} stroke=${6} total=${Math.max(1, cv.have)} label=${cv.have ? `${cv.current} of ${cv.have} machines current` : 'not installed anywhere'}
+                segments=${[{ value: cv.current, color: 'var(--ok)' }, { value: cv.have - cv.current, color: 'var(--info)' }]}>
+                <span class="ac-pct">${pct == null ? '–' : pct}${pct == null ? '' : html`<small>%</small>`}</span>
+              <//>
+            </header>
+            <div class="ac-ver">
+              <span class="l">Latest</span>
+              <span class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</span>
+              ${p.updated_at ? html`<span class="dim">checked ${ago(p.updated_at, s.now)}</span>` : null}
+            </div>
+            <div class="ac-cov">
+              ${cv.have ? html`<${StackBar} height=${6} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} />
+                <span class="dim">${cv.current} of ${cv.have} current · installed on ${cv.have}/${cv.total} machines</span>` : html`<span class="dim">Not installed on any machine yet</span>`}
+            </div>
+            <footer>
+              <label class="ac-toggle"><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /><span>Track</span></label>
+              ${SELF_MANAGED.has(p.key)
+                ? html`<span class="dim" title="Updates itself or rides along with other installs">self-managed</span>`
+                : html`<label class="ac-toggle"><${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} /><span title="Install new versions everywhere automatically, testing on 3 machines first">Auto</span></label>`}
+              <span class="grow"></span>
+              ${p.custom ? html`
+                <button class="btn sm ghost icon" title="Edit" aria-label=${`Edit ${p.name}`} onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
+                <button class="btn sm ghost icon" title="Uninstall from machines" aria-label=${`Uninstall ${p.name}`} onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
+                <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}
+            </footer>
+          </article>`;
+        })}</div>
+      </section>`)}
   </div>`;
 }
