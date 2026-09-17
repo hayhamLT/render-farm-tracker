@@ -1404,6 +1404,10 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
 function serveStatic(res, relPath) {
@@ -1842,7 +1846,8 @@ const server = http.createServer(async (req, res) => {
       }
       return serveStatic(res, 'index.html');
     }
-    if (req.method === 'GET' && !p.startsWith('/api/')) return serveStatic(res, p.slice(1));
+    // A directory URL serves its index.html (the dashboard lives at /ui/).
+    if (req.method === 'GET' && !p.startsWith('/api/')) return serveStatic(res, p.endsWith('/') ? p.slice(1) + 'index.html' : p.slice(1));
 
     // -------- agent endpoints (X-Agent-Key) --------
     if (p.startsWith('/api/agent/')) {
