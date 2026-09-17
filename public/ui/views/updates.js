@@ -29,15 +29,14 @@ const view = pref('updates.view', 'list');
 const RENDER_GPU = 20;
 const OSES = ['windows', 'macos'];
 
-// Apps are grouped by what they are, so a long list stays readable.
+// Apps, plug-ins and scripts are listed apart only because they're managed differently;
+// drivers are just apps.
 const KIND = {
-  driver: { label: 'Drivers', icon: 'gpu', hint: 'GPU drivers — in-place updates' },
   app: { label: 'Apps', icon: 'package', hint: '' },
   plugin: { label: 'Plug-ins', icon: 'zap', hint: '' },
   script: { label: 'Scripts', icon: 'file', hint: '' },
 };
-const DRIVERS = new Set(['nvidia']);
-const kindOf = (p) => (DRIVERS.has(p.key) ? 'driver' : ['plugin', 'script'].includes(p.category) ? p.category : 'app');
+const kindOf = (p) => (['plugin', 'script'].includes(p.category) ? p.category : 'app');
 
 function appModel(s, p) {
   const applicable = s.nodes.filter((n) => appliesToOS(p, n.os) && productStatus(n, p).status !== 'na');
@@ -289,7 +288,7 @@ export function UpdatesView() {
   const updateAll = () => openUpdate(available.filter((m) => m.behind.length && !m.installers.every((i) => !i.ok)).map((m) => ({ product: m.p, nodes: m.behind })),
     { title: 'Update everything', subtitle: `${plural(updateCount, 'update')} across ${plural(behindMachines.size, 'machine')}` });
 
-  const groups = ['driver', 'app', 'plugin', 'script']
+  const groups = ['app', 'plugin', 'script']
     .map((kind) => ({ kind, ...KIND[kind], rows: available.filter((m) => kindOf(m.p) === kind) }))
     .filter((g) => g.rows.length);
 
