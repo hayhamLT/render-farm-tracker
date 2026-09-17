@@ -11,7 +11,7 @@ import { Icon, OsStatus, ProductLogo } from './common.js';
 export const paletteOpen = signal(false);
 
 const SECTIONS = [
-  ['overview', 'Overview', 'gauge'], ['machines', 'Machines', 'server'], ['updates', 'Updates', 'download'],
+  ['overview', 'Overview', 'gauge'], ['machines', 'Machines', 'server'], ['timeline', 'Timeline', 'clock'], ['updates', 'Updates', 'download'],
   ['activity', 'Activity', 'activity'], ['catalog', 'Catalog', 'package'], ['settings', 'Settings', 'sliders'], ['help', 'Help', 'help'],
 ];
 

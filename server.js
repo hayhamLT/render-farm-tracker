@@ -16,6 +16,7 @@ const { db, logEvent } = require('./lib/db');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
+const timeline = require('./lib/timeline');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
@@ -1097,6 +1098,7 @@ function startWake(node) {
   for (const r of relays) commands.queue(r.id, 'wake_relay', { hostname: node.hostname, macs, ip: node.ip });
   for (const delay of [0, 5000, 15000, 30000, 60000]) setTimeout(() => wakeOnLan(macs, node.ip), delay);
   commands.startWakeRow(node.id, relays.map((r) => r.hostname));
+  timeline.note(node.id, 'power', 'wake', { relays: relays.map((r) => r.hostname) });
   logEvent('node', `Waking ${node.hostname} — Wake-on-LAN to ${macs.length} MAC${macs.length === 1 ? '' : 's'} from the server`
     + (relays.length ? ` and via ${relays.map((r) => r.hostname).join(', ')}` : ''));
   return { macs: macs.length, relays: relays.map((r) => r.hostname) };
@@ -1109,6 +1111,7 @@ function noteWakeCheckin(node, now) {
   const secs = Math.round((now - w.requestedAt) / 1000);
   commands.finishWake(node.id, 'woke', { secs });
   logEvent('node', `${node.hostname} woke up — online ${secs}s after Wake-on-LAN`);
+  timeline.note(node.id, 'power', 'woke', { secs });
 }
 
 // Time out wakes that never produced a check-in; expire old results.
@@ -1120,6 +1123,7 @@ setInterval(() => {
       if (!node) { commands.deleteWake(id); continue; }
       const reason = wakeFailReason(node);
       commands.finishWake(id, 'failed', { reason });
+      timeline.note(id, 'power', 'nowake', { reason });
       logEvent('node', `${node.hostname} did not wake within ${Math.round(WAKE_TIMEOUT_MS / 60000)} min. ${reason}`);
     } else if (w.state !== 'waking' && now - w.doneAt > WAKE_RESULT_KEEP_MS) {
       commands.deleteWake(id);
@@ -1659,6 +1663,7 @@ function handleCheckin(body) {
       const fx = { ok: !!hh.deadlineFix.ok, message: String(hh.deadlineFix.message || '').slice(0, 500), at: now };
       db.prepare('UPDATE nodes SET deadline_fix = ? WHERE id = ?').run(JSON.stringify(fx), node.id);
       logEvent('node', `Deadline startup fix on ${node.hostname}: ${fx.ok ? 'done' : 'failed'} — ${fx.message}`);
+      timeline.note(node.id, 'fix', fx.ok ? 'ok' : 'failed', { message: fx.message });
     }
     if (hh.wol && typeof hh.wol === 'object') {
       db.prepare('UPDATE nodes SET wol_ready = ?, wol_info = ? WHERE id = ?').run(
@@ -1809,6 +1814,7 @@ function handleCheckin(body) {
 // ----------------------------------------------------------------- router --
 const live = createLive({ buildState: () => fullState() });
 metrics.startSampling({ offlineAfterMs: (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
+timeline.start({ offlineAfterMs: (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -1980,6 +1986,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/live') return live.handle(req, res);
     // Trend history for charts (sampled every minute): farm totals + per-machine GPU load.
     if (req.method === 'GET' && p === '/api/metrics') return sendJson(res, 200, metrics.query(url.searchParams.get('hours')));
+    if (req.method === 'GET' && p === '/api/timeline') return sendJson(res, 200, timeline.query(url.searchParams.get('hours'), url.searchParams.get('node')));
 
     // Dashboard visibility — toggle a node's hidden state (persisted globally in
     // config.hiddenNodes, which fullState() filters out). GET lists the hidden
@@ -2464,12 +2471,14 @@ const server = http.createServer(async (req, res) => {
       if (agentCapable) {
         commands.queue(node.id, 'reboot');
         logEvent('node', `Reboot requested for ${node.hostname} via the tracker agent`);
+        timeline.note(node.id, 'power', 'restart', { via: 'agent' });
         return sendJson(res, 200, { ok: true, hostname: node.hostname, confirmed: false, via: 'agent' });
       }
       // Agent can't do it (offline, or too old) — try Deadline if it's present.
       try {
         const r = await rebootViaDeadline(node.hostname);
         logEvent('node', `Reboot ${r.confirmed ? 'sent' : 'sent (unconfirmed)'} to ${node.hostname} (via Deadline RemoteControl)`);
+        timeline.note(node.id, 'power', 'restart', { via: 'deadline' });
         return sendJson(res, 200, { ok: true, hostname: node.hostname, confirmed: r.confirmed, via: 'deadline' });
       } catch (e) {
         const hint = node.macs
@@ -2505,6 +2514,7 @@ const server = http.createServer(async (req, res) => {
       commands.queue(node.id, 'shutdown');
       const macNote = node.os === 'macos' ? ' (Mac: put to sleep, so Wake can bring it back)' : '';
       logEvent('node', `Shut down requested for ${node.hostname} via the tracker agent${macNote}`);
+      timeline.note(node.id, 'power', node.os === 'macos' ? 'sleep' : 'shutdown', { via: 'agent' });
       return sendJson(res, 200, { ok: true, hostname: node.hostname, via: 'agent',
         note: node.os === 'macos' ? 'Macs are put to sleep instead of shut down — a shut-down Mac can\'t be woken over the network.' : undefined });
     }

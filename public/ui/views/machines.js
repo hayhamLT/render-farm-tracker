@@ -15,6 +15,7 @@ import {
 import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
+import { MachineTimeline } from './timeline.js';
 import { Sparkline, AreaChart, StackBar, Num, useMetrics, metrics, STATE_COLOR } from '../components/viz.js';
 
 const view = pref('machines.view', 'grid');
@@ -323,6 +324,8 @@ function MachineDrawer({ hostname, model }) {
         <${AreaChart} rows=${((metrics.value && metrics.value.nodes && metrics.value.nodes[n.id]) || []).map((p) => ({ ts: p[0], gpu: p[1] ?? 0 }))} height=${120} max=${100}
           series=${[{ key: 'gpu', label: 'GPU load', color: '#a78bfa' }]} format=${(v) => `${Math.round(v)}%`} />
       </section>
+
+      <${MachineTimeline} node=${n} />
 
       <section>
         <h3 class="section-title">Machine</h3>

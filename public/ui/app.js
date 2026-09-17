@@ -13,6 +13,7 @@ import { MachinesView } from './views/machines.js';
 import { OverviewView } from './views/overview.js';
 import { UpdatesView } from './views/updates.js';
 import { ActivityView } from './views/activity.js';
+import { TimelineView } from './views/timeline.js';
 import { CatalogView } from './views/catalog.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
@@ -23,6 +24,7 @@ const ACTIVE = ['pending', 'downloading', 'installing'];
 const ROUTES = [
   { name: 'overview', label: 'Overview', icon: 'gauge', key: 'o', view: () => html`<${OverviewView} />` },
   { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
+  { name: 'timeline', label: 'Timeline', icon: 'clock', key: 't', view: () => html`<${TimelineView} />` },
   { name: 'updates', label: 'Updates', icon: 'download', key: 'u', view: () => html`<${UpdatesView} />` },
   { name: 'activity', label: 'Activity', icon: 'activity', key: 'a', view: () => html`<${ActivityView} />` },
   { name: 'catalog', label: 'Catalog', icon: 'package', key: 'c', view: () => html`<${CatalogView} />` },
