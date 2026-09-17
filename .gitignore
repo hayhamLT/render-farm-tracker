@@ -3,8 +3,9 @@
 config.json
 # node-side agent config (server URL + agent key)
 agent_config.json
-# local Claude Code settings (may embed the agent key)
-.claude/
+# local Claude Code settings (may embed the agent key) — only the preview config is shared
+.claude/*
+!.claude/launch.json
 
 # Database / runtime state
 tracker.db
