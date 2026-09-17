@@ -7,7 +7,7 @@ import { signal } from '@preact/signals-core';
 import { farm } from '../lib/store.js';
 import { go } from '../lib/router.js';
 import { openMenu } from '../lib/ui.js';
-import { plural, cmpVersion } from '../lib/format.js';
+import { ago, plural, cmpVersion } from '../lib/format.js';
 import {
   normalizeProducts, isTracked, appliesToOS, productStatus, inProgressNodes, latestForOS, nodesByKind, nvidiaTarget, SELF_UPDATING,
 } from '../lib/domain.js';
@@ -15,10 +15,11 @@ import * as act from '../lib/actions.js';
 import { canUpdate, installerState, updateTargets } from '../lib/updater.js';
 import { Icon, OsStatus, ProductLogo } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
-import { StackBar } from '../components/viz.js';
+import { StackBar, Donut, Num } from '../components/viz.js';
 import { RolloutList } from '../components/rollouts.js';
 import { openUpdate } from '../components/update-sheet.js';
 import { openRollout } from './deploy.js';
+import { showMachines } from './machines.js';
 
 const selectedApps = signal(new Set());   // product keys ticked for a batch update
 const expanded = signal(null);            // product key whose machines are shown
@@ -26,6 +27,16 @@ const picks = signal({});                 // product key -> Set(node ids) chosen
 
 const RENDER_GPU = 20;
 const OSES = ['windows', 'macos'];
+
+// Apps are grouped by what they are, so a long list stays readable.
+const KIND = {
+  driver: { label: 'Drivers', icon: 'gpu', hint: 'GPU drivers — in-place updates' },
+  app: { label: 'Apps', icon: 'package', hint: '' },
+  plugin: { label: 'Plug-ins', icon: 'zap', hint: '' },
+  script: { label: 'Scripts', icon: 'file', hint: '' },
+};
+const DRIVERS = new Set(['nvidia']);
+const kindOf = (p) => (DRIVERS.has(p.key) ? 'driver' : ['plugin', 'script'].includes(p.category) ? p.category : 'app');
 
 function appModel(s, p) {
   const applicable = s.nodes.filter((n) => appliesToOS(p, n.os) && productStatus(n, p).status !== 'na');
@@ -153,6 +164,42 @@ function Attention({ s, models }) {
   </div>`)}</div>`;
 }
 
+// Farm coverage at a glance — each slice filters the Machines page.
+function Hero({ s, models, updateCount, updateAll, appsBehind }) {
+  const updating = new Set(s.jobs.filter((j) => ['pending', 'downloading', 'installing'].includes(j.status)).map((j) => j.hostname));
+  const behindHosts = new Set(models.flatMap((m) => m.behind.map((n) => n.hostname)));
+  const buckets = { current: 0, updating: 0, behind: 0, offline: 0 };
+  for (const n of s.nodes) {
+    if (updating.has(n.hostname)) buckets.updating++;
+    else if (!n.online) buckets.offline++;
+    else if (behindHosts.has(n.hostname)) buckets.behind++;
+    else buckets.current++;
+  }
+  const total = Math.max(1, s.nodes.length);
+  const pct = Math.round((buckets.current / total) * 100);
+  const checked = Math.max(0, ...s.products.map((p) => p.updated_at || 0));
+  const segments = [
+    { key: 'current', label: 'Up to date', value: buckets.current, color: 'var(--ok)', onClick: () => showMachines('all') },
+    { key: 'updating', label: 'Updating now', value: buckets.updating, color: 'var(--accent)', onClick: () => showMachines('updating') },
+    { key: 'behind', label: 'Needs updates', value: buckets.behind, color: 'var(--info)', onClick: () => showMachines('behind') },
+    { key: 'offline', label: 'Offline', value: buckets.offline, color: 'var(--text-3)', onClick: () => showMachines('blocked') },
+  ];
+  return html`<section class="card card-pad hero">
+    <${Donut} segments=${segments} size=${138} stroke=${15} center=${`${pct}%`} sub="up to date" label=${`${buckets.current} of ${s.nodes.length} machines up to date`} />
+    <div class="hero-side">
+      <div class="hero-kpis">
+        <div class=${'hero-kpi' + (updateCount ? ' hot' : '')}><span class="l">Updates waiting</span><b><${Num} value=${updateCount} /></b><span class="s">${appsBehind ? `across ${plural(appsBehind, 'app')}` : 'nothing to install'}</span></div>
+        <div class="hero-kpi"><span class="l">Machines behind</span><b><${Num} value=${buckets.behind} /></b><span class="s">${buckets.offline ? `${buckets.offline} offline too` : `of ${s.nodes.length}`}</span></div>
+        <div class="hero-kpi"><span class="l">Last version check</span><b class="small">${checked ? ago(checked, s.now) : '—'}</b><span class="s">${plural(s.products.filter((p) => isTracked(p)).length, 'app')} watched</span></div>
+      </div>
+      <div class="row" style="gap:8px">
+        <button class="btn primary" disabled=${!updateCount} onClick=${updateAll}><${Icon} name="download" />${updateCount ? `Update all (${updateCount})` : 'Everything is up to date'}</button>
+        <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
+      </div>
+    </div>
+  </section>`;
+}
+
 export function UpdatesView() {
   const s = farm.value;
   const models = useMemo(() => {
@@ -176,14 +223,17 @@ export function UpdatesView() {
   const updateAll = () => openUpdate(available.filter((m) => m.behind.length && !m.installers.every((i) => !i.ok)).map((m) => ({ product: m.p, nodes: m.behind })),
     { title: 'Update everything', subtitle: `${plural(updateCount, 'update')} across ${plural(behindMachines.size, 'machine')}` });
 
+  const groups = ['driver', 'app', 'plugin', 'script']
+    .map((kind) => ({ kind, ...KIND[kind], rows: available.filter((m) => kindOf(m.p) === kind) }))
+    .filter((g) => g.rows.length);
+
   return html`<div class="page updates-page">
-    <${PageHeader} title="Updates" subtitle=${updateCount ? `${plural(updateCount, 'update')} for ${plural(behindMachines.size, 'machine')} across ${plural(available.filter((m) => m.behind.length).length, 'app')}` : 'Every machine is up to date'}>
-      <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
+    <${PageHeader} title="Updates" subtitle=${updateCount ? `${plural(updateCount, 'update')} for ${plural(behindMachines.size, 'machine')}` : 'Every machine is up to date'}>
       <button class="btn" onClick=${() => openRollout({})}><${Icon} name="package" />Install a specific version…</button>
-      <button class="btn primary" disabled=${!updateCount} onClick=${updateAll}><${Icon} name="download" />Update all</button>
     </${PageHeader}>
 
     <div class="stack">
+      <${Hero} s=${s} models=${models} updateCount=${updateCount} appsBehind=${available.filter((m) => m.behind.length).length} updateAll=${updateAll} />
       <${Attention} s=${s} models=${models} />
 
       ${openRollouts.length ? html`<section class="card card-pad">
@@ -191,18 +241,24 @@ export function UpdatesView() {
         <${RolloutList} s=${s} limitDone=${0} />
       </section>` : null}
 
-      <section class="card ulist">
+      ${available.length ? groups.map((g) => html`<section key=${g.kind} class="card ulist">
         <div class="ulist-head">
-          <label class="ur-check"><input type="checkbox" aria-label="Select all apps with updates"
-            disabled=${!available.some((m) => m.behind.length)}
-            checked=${available.some((m) => m.behind.length) && available.filter((m) => m.behind.length).every((m) => selectedApps.value.has(m.p.key))}
-            onChange=${(e) => { selectedApps.value = e.currentTarget.checked ? new Set(available.filter((m) => m.behind.length).map((m) => m.p.key)) : new Set(); }} /></label>
-          <h2>Available updates</h2>
-          <span class="dim">${plural(available.length, 'app')}</span>
+          <label class="ur-check"><input type="checkbox" aria-label=${`Select all ${g.label.toLowerCase()} with updates`}
+            disabled=${!g.rows.some((m) => m.behind.length)}
+            checked=${g.rows.some((m) => m.behind.length) && g.rows.filter((m) => m.behind.length).every((m) => selectedApps.value.has(m.p.key))}
+            onChange=${(e) => {
+              const keys = g.rows.filter((m) => m.behind.length).map((m) => m.p.key);
+              const next = new Set(selectedApps.value);
+              keys.forEach((k) => (e.currentTarget.checked ? next.add(k) : next.delete(k)));
+              selectedApps.value = next;
+            }} /></label>
+          <span class=${'ulist-icon k-' + g.kind}><${Icon} name=${g.icon} /></span>
+          <h2>${g.label}</h2>
+          <span class="dim">${plural(g.rows.reduce((c, m) => c + m.behind.length, 0), 'update')} · ${plural(g.rows.length, 'app')}</span>
+          ${g.hint ? html`<span class="grow"></span><span class="dim" style="font-size:.8rem">${g.hint}</span>` : null}
         </div>
-        ${available.length ? available.map((m) => html`<${AppRow} key=${m.p.key} m=${m} s=${s} />`)
-          : html`<div class="empty-inline"><${Icon} name="check" /><div><b>Everything is up to date</b><p class="muted">New versions are checked automatically every few hours — or check now.</p></div></div>`}
-      </section>
+        ${g.rows.map((m) => html`<${AppRow} key=${m.p.key} m=${m} s=${s} />`)}
+      </section>`) : html`<section class="card"><div class="empty-inline"><${Icon} name="check" /><div><b>Everything is up to date</b><p class="muted">New versions are checked automatically every few hours — or check now.</p></div></div></section>`}
 
       ${majors.length ? html`<section class="card ulist">
         <div class="ulist-head"><h2>New major versions</h2><span class="dim">install next to the current version — opt in per app</span></div>

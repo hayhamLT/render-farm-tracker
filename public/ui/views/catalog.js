@@ -10,7 +10,7 @@ import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS } from '../
 import * as act from '../lib/actions.js';
 import { Icon, ProductLogo, Badge, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
-import { StackBar } from '../components/viz.js';
+import { StackBar, Ring } from '../components/viz.js';
 import { InstallerLibrary } from './installers.js';
 
 const tab = pref('catalog.tab', 'app');
@@ -200,26 +200,42 @@ export function CatalogView() {
       ${tab.value !== 'installers' ? html`<button class="btn primary" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button>` : null}
     </${PageHeader}>
     <div class="pills">${[['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts'], ['installers', 'Installers']].map(([k, l]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}${k !== 'installers' ? html`<span class="n">${count(k)}</span>` : null}</button>`)}</div>
-    ${tab.value === 'installers' ? html`<section class="card card-pad"><${InstallerLibrary} /></section>` : html`<section class="card table-wrap">
-      ${!rows.length ? html`<div class="empty-inline"><${Icon} name="package" /><div><b>No ${LABEL[tab.value]}s yet</b><p class="muted">Add one to track its version across the farm.</p></div><button class="btn primary" style="margin-left:auto" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button></div>` : html`<table class="table cat-table">
-        <thead><tr><th>Name</th><th>Latest</th><th style="width:220px">On the farm</th><th>Track</th><th>Auto-deploy</th><th></th></tr></thead>
-        <tbody>${rows.map((p) => {
-          const cv = coverage(p);
-          const tracked = p.dashboard_hidden !== 1;
-          return html`<tr key=${p.key} style=${tracked ? '' : 'opacity:.62'}>
-            <td><span class="row" style="flex-wrap:nowrap;gap:12px"><${ProductLogo} product=${p} size=${30} /><span style="display:flex;flex-direction:column"><b>${p.name}</b><span class="dim" style="font-size:.76rem">${p.custom ? 'Custom' : 'Built in'}${p.check_url ? ' · checks a web page' : ''}</span></span></span></td>
-            <td><span class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? html`Win ${p.latest_win}<br />Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</span><div class="dim" style="font-size:.74rem">${p.updated_at ? `checked ${ago(p.updated_at, s.now)}` : ''}</div></td>
-            <td>${cv.have ? html`<div class="row" style="flex-wrap:nowrap;gap:10px"><${StackBar} height=${7} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} /><span class="mono nowrap" style="font-size:.8rem">${cv.current}/${cv.have}</span></div>
-              <div class="dim" style="font-size:.74rem">installed on ${cv.have} of ${cv.total}</div>` : html`<span class="dim">not installed anywhere</span>`}</td>
-            <td><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /></td>
-            <td>${SELF_MANAGED.has(p.key) ? html`<span class="dim" title="Updates itself or rides along with other installs">self-managed</span>` : html`<${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} />`}</td>
-            <td class="right nowrap">${p.custom ? html`
+    ${tab.value === 'installers' ? html`<section class="card card-pad"><${InstallerLibrary} /></section>`
+      : !rows.length ? html`<section class="card"><div class="empty-inline"><${Icon} name="package" /><div><b>No ${LABEL[tab.value]}s yet</b><p class="muted">Add one to track its version across the farm.</p></div><button class="btn primary" style="margin-left:auto" onClick=${() => addProduct(tab.value)}><${Icon} name="plus" />Add ${LABEL[tab.value]}</button></div></section>`
+      : html`<div class="appgrid">${rows.map((p) => {
+        const cv = coverage(p);
+        const tracked = p.dashboard_hidden !== 1;
+        const pct = cv.have ? Math.round((cv.current / cv.have) * 100) : null;
+        return html`<article key=${p.key} class=${'card acard' + (tracked ? '' : ' off')}>
+          <header>
+            <${ProductLogo} product=${p} size=${34} />
+            <div class="ac-name"><b>${p.name}</b><span class="dim">${p.custom ? 'Custom' : 'Built in'}${p.check_url ? ' · checks a web page' : ''}</span></div>
+            <${Ring} size=${52} stroke=${6} total=${Math.max(1, cv.have)} label=${cv.have ? `${cv.current} of ${cv.have} machines current` : 'not installed anywhere'}
+              segments=${[{ value: cv.current, color: 'var(--ok)' }, { value: cv.have - cv.current, color: 'var(--info)' }]}>
+              <span class="ac-pct">${pct == null ? '–' : pct}${pct == null ? '' : html`<small>%</small>`}</span>
+            <//>
+          </header>
+          <div class="ac-ver">
+            <span class="l">Latest</span>
+            <span class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</span>
+            ${p.updated_at ? html`<span class="dim">checked ${ago(p.updated_at, s.now)}</span>` : null}
+          </div>
+          <div class="ac-cov">
+            ${cv.have ? html`<${StackBar} height=${6} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} />
+              <span class="dim">${cv.current} of ${cv.have} current · installed on ${cv.have}/${cv.total} machines</span>` : html`<span class="dim">Not installed on any machine yet</span>`}
+          </div>
+          <footer>
+            <label class="ac-toggle"><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /><span>Track</span></label>
+            ${SELF_MANAGED.has(p.key)
+              ? html`<span class="dim" title="Updates itself or rides along with other installs">self-managed</span>`
+              : html`<label class="ac-toggle"><${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} /><span title="Install new versions everywhere automatically, testing on 3 machines first">Auto</span></label>`}
+            <span class="grow"></span>
+            ${p.custom ? html`
               <button class="btn sm ghost icon" title="Edit" aria-label=${`Edit ${p.name}`} onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
               <button class="btn sm ghost icon" title="Uninstall from machines" aria-label=${`Uninstall ${p.name}`} onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
-              <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}</td>
-          </tr>`;
-        })}</tbody>
-      </table>`}
-    </section>`}
+              <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}
+          </footer>
+        </article>`;
+      })}</div>`}
   </div>`;
 }

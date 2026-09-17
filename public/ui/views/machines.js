@@ -18,6 +18,7 @@ import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
 import { Icon, OsStatus, ProductLogo, Badge, Empty } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
 import { waitingRollout, whenLabel } from '../components/rollouts.js';
+import { Donut } from '../components/viz.js';
 import { openUpdate } from '../components/update-sheet.js';
 import { askAbout } from '../components/ask.js';
 import { Jobs } from './history.js';
@@ -129,6 +130,18 @@ function BehindCell({ m, model }) {
   </span>`;
 }
 
+// The one state a row is coloured by.
+function rowState(m) {
+  const { node: n, activity: a } = m;
+  if (!n.online) return 'offline';
+  if (['installing', 'downloading'].includes(a.key)) return 'updating';
+  if (a.key === 'queued') return 'queued';
+  if (m.failed.length) return 'failed';
+  if (m.behind.length) return 'behind';
+  if (a.key === 'rendering') return 'rendering';
+  return 'current';
+}
+
 // ---------------------------------------------------------------- table
 const toggleSel = (id) => { const next = new Set(selected.value); if (next.has(id)) next.delete(id); else next.add(id); selected.value = next; };
 
@@ -143,7 +156,7 @@ function MachineTable({ rows, model }) {
     <tbody>${rows.map((m) => {
       const { node: n, dl } = m;
       const sel = selected.value.has(n.id);
-      return html`<tr key=${n.id} class=${sel ? 'selected' : ''} onClick=${() => go('machines', n.hostname)}>
+      return html`<tr key=${n.id} class=${`s-${rowState(m)}${sel ? ' selected' : ''}`} onClick=${() => go('machines', n.hostname)}>
         <td onClick=${(e) => e.stopPropagation()}><input type="checkbox" aria-label=${`Select ${n.hostname}`} checked=${sel} onClick=${() => toggleSel(n.id)} /></td>
         <td class="nowrap"><span class="row" style="gap:10px;flex-wrap:nowrap"><${OsStatus} node=${n} /><b>${n.hostname}</b></span></td>
         <td><${StatusCell} m=${m} /></td>
@@ -318,6 +331,22 @@ export function MachinesView() {
       <label class="search"><${Icon} name="search" /><input id="machine-search" class="field" placeholder="Search machines   /" value=${search.value} onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:240px" /></label>
     </${PageHeader}>
 
+    <section class="card card-pad fleet">
+      <${Donut} size=${118} stroke=${13} segments=${[
+        { key: 'current', label: 'Up to date', value: nodes.filter((m) => rowState(m) === 'current' || rowState(m) === 'rendering').length, color: 'var(--ok)', onClick: () => { quick.value = 'all'; }, active: quick.value === 'all' },
+        { key: 'updating', label: 'Updating', value: counts.updating, color: 'var(--accent)', onClick: () => { quick.value = 'updating'; }, active: quick.value === 'updating' },
+        { key: 'behind', label: 'Needs updates', value: counts.behind, color: 'var(--info)', onClick: () => { quick.value = 'behind'; }, active: quick.value === 'behind' },
+        { key: 'failed', label: 'Failed installs', value: counts.failed, color: 'var(--bad)', onClick: () => { quick.value = 'failed'; }, active: quick.value === 'failed' },
+        { key: 'blocked', label: "Can't update", value: counts.blocked, color: 'var(--text-3)', onClick: () => { quick.value = 'blocked'; }, active: quick.value === 'blocked' },
+      ]} center=${`${online}/${nodes.length}`} sub="online" label=${`${online} of ${nodes.length} machines online`} />
+      <div class="fleet-facts">
+        <div><span class="l">Updates waiting</span><b>${nodes.reduce((c, m) => c + m.behind.length, 0)}</b></div>
+        <div><span class="l">Rendering now</span><b>${nodes.filter((m) => m.activity.key === 'rendering').length}</b></div>
+        <div><span class="l">Restart pending</span><b>${nodes.filter((m) => m.node.online && m.node.pending_reboot).length}</b></div>
+        <div><span class="l">Out of Deadline</span><b class=${nodes.filter((m) => m.dl && m.dl.state === 'down').length ? 'bad' : ''}>${nodes.filter((m) => m.dl && m.dl.state === 'down').length}</b></div>
+      </div>
+    </section>
+
     <div class="filterbar">
       <div class="pills" role="tablist" aria-label="Filter machines">
         ${QUICK.map(([k, label]) => html`<button key=${k} role="tab" aria-selected=${quick.value === k} class=${'pill' + (quick.value === k ? ' on' : '')} onClick=${() => { quick.value = quick.value === k ? 'all' : k; }} disabled=${k !== 'all' && !counts[k]}>
@@ -343,3 +372,9 @@ export function MachinesView() {
 }
 
 export { selected as selectedMachines };
+
+// Open Machines with a filter applied (the Updates donut links here).
+export function showMachines(filter = 'all') {
+  quick.value = filter;
+  go('machines');
+}

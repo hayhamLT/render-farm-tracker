@@ -165,3 +165,41 @@ export const STATE_COLOR = {
   offline: 'var(--text-3)',
   deadline: 'var(--bad)',
 };
+
+// ---- donut with a clickable legend (filters the view it belongs to) ----
+// segments: [{ key, label, value, color, onClick?, active? }]
+export function Donut({ segments, size = 132, stroke = 14, center, sub, label }) {
+  const shown = segments.filter((s) => s.value > 0);
+  const total = shown.reduce((s, x) => s + x.value, 0);
+  return html`<div class="donut">
+    <${Ring} segments=${shown.map((s) => ({ value: s.value, color: s.color }))} total=${total || 1} size=${size} stroke=${stroke} label=${label}>
+      <span class="donut-center">${center}</span>${sub && html`<span class="donut-sub">${sub}</span>`}
+    <//>
+    <ul class="donut-legend">${segments.map((s) => html`<li key=${s.key}>
+      <button type="button" class=${'dl-row' + (s.active ? ' on' : '') + (s.onClick && s.value ? '' : ' flat')} disabled=${!s.onClick || !s.value} onClick=${s.onClick}
+        title=${s.onClick && s.value ? `Show ${s.label.toLowerCase()}` : ''}>
+        <i style=${`background:${s.color}`}></i><span class="dl-label">${s.label}</span><b>${s.value}</b>
+      </button></li>`)}</ul>
+  </div>`;
+}
+
+// ---- day bars (installs per day, hover for the detail) ----
+// days: [{ label, title, parts: [{ value, color }] }]
+export function DayBars({ days, height = 92, unit = '' }) {
+  const [hover, setHover] = useState(null);
+  const max = Math.max(1, ...days.map((d) => d.parts.reduce((s, p) => s + p.value, 0)));
+  return html`<div class="daybars" style=${`--h:${height}px`}>
+    ${days.map((d, i) => {
+      const total = d.parts.reduce((s, p) => s + p.value, 0);
+      return html`<div key=${i} class=${'db-col' + (hover === i ? ' on' : '')} onMouseEnter=${() => setHover(i)} onMouseLeave=${() => setHover(null)}>
+        <div class="db-stack" style=${`height:${(total / max) * 100}%`} aria-label=${d.title}>
+          ${d.parts.filter((p) => p.value > 0).map((p, k) => html`<i key=${k} style=${`flex:${p.value};background:${p.color}`}></i>`)}
+        </div>
+        <span class="db-x">${d.label}</span>
+        ${hover === i && total > 0 ? html`<span class="db-tip">${d.title}</span>` : null}
+        ${total === 0 ? html`<span class="db-zero"></span>` : null}
+      </div>`;
+    })}
+    ${unit ? html`<span class="db-unit">${max} ${unit}</span>` : null}
+  </div>`;
+}
