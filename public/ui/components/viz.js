@@ -172,9 +172,12 @@ export function Donut({ segments, size = 132, stroke = 14, center, sub, label })
   const shown = segments.filter((s) => s.value > 0);
   const total = shown.reduce((s, x) => s + x.value, 0);
   return html`<div class="donut">
-    <${Ring} segments=${shown.map((s) => ({ value: s.value, color: s.color }))} total=${total || 1} size=${size} stroke=${stroke} label=${label}>
-      <span class="donut-center">${center}</span>${sub && html`<span class="donut-sub">${sub}</span>`}
-    <//>
+    <div class="donut-main">
+      <${Ring} segments=${shown.map((s) => ({ value: s.value, color: s.color }))} total=${total || 1} size=${size} stroke=${stroke} label=${label}>
+        <span class="donut-center">${center}</span>
+      <//>
+      ${sub && html`<span class="donut-sub">${sub}</span>`}
+    </div>
     <ul class="donut-legend">${segments.map((s) => html`<li key=${s.key}>
       <button type="button" class=${'dl-row' + (s.active ? ' on' : '') + (s.onClick && s.value ? '' : ' flat')} disabled=${!s.onClick || !s.value} onClick=${s.onClick}
         title=${s.onClick && s.value ? `Show ${s.label.toLowerCase()}` : ''}>
