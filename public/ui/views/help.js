@@ -25,12 +25,12 @@ const QA = ({ q, children }) => html`<details class="qa"><summary>${q}</summary>
 const CONTENT = {
   start: () => html`<${GettingStarted} />`,
   updates: () => html`
-    <p>New versions are found automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and anything you add with a version check). <b>Farm → Updates</b> lists every app that's behind, its version jump, how many machines are current, and whether its installer is ready.</p>
+    <p>New versions are found automatically (Maxon, Adobe, Blender, FFmpeg, NotchLC, NVIDIA, and anything you add with a version check). <b>Updates</b> lists every app that's behind, its version jump, how many machines are current, and whether its installer is ready.</p>
     <ul>
       <li><b>Update all</b> — every app on every machine that's behind.</li>
       <li><b>A few apps</b> — tick their checkboxes and press <b>Update selected</b>.</li>
       <li><b>Chosen machines</b> — click an app to open its machine list and pick exactly which get it (shortcuts: all, online &amp; idle only, none).</li>
-      <li><b>One machine</b> — switch to <b>Machines</b> (same page, second lens), select machines and press <b>Update everything</b>, or open a machine and use the Update button next to a single app.</li>
+      <li><b>One machine</b> — on <b>Machines</b>, select machines and press <b>Update everything</b>, or open a machine and use the Update button next to a single app.</li>
     </ul>
     <p>Every one of those opens the same review step: what installs where, anything that will make it wait, and when it runs.</p>
     <ul>
@@ -76,7 +76,7 @@ const CONTENT = {
       <li>Downloads always land on the share, never on the tracker's own disk. If the share isn't mounted, downloads stop with a message instead.</li>
     </ul>`,
   machines: () => html`
-    <p><b>Farm → Machines</b> shows each machine from the update point of view: what it's behind on, when it last updated, and a status — but only what matters for updating.</p>
+    <p><b>Machines</b> shows each machine from the update point of view: what it's behind on, when it last updated, and a status — but only what matters for updating.</p>
     <ul>
       <li><span class="tag bad">Offline</span> — no check-in for ~3 minutes; its updates wait until it's back.</li>
       <li><span class="tag violet">Rendering</span> — installs wait until it's idle.</li>
@@ -104,16 +104,16 @@ const CONTENT = {
   keys: () => html`
     <table class="table" style="max-width:520px"><tbody>
       ${[['⌘K / Ctrl K', 'Search machines, apps and actions'], ['⌘J / Ctrl J', 'Ask the farm'], ['/', 'Search machines'],
-        ['g then u', 'Farm → Updates'], ['g then m', 'Farm → Machines'], ['g then h', 'Farm → History'], ['g then a', 'Apps'], ['g then s', 'Settings'],
+        ['g then u', 'Updates'], ['g then m', 'Machines'], ['g then h', 'History'], ['g then a', 'Apps'], ['g then s', 'Settings'],
         ['Esc', 'Close panel · clear selection']]
         .map(([k, d]) => html`<tr key=${k}><td class="nowrap"><span class="kbd">${k}</span></td><td>${d}</td></tr>`)}
     </tbody></table>`,
   trouble: () => html`
     <${QA} q="A machine shows offline">"Offline" means no check-in for ~3 minutes. The tracker also probes it: if the machine still answers on the network it says <span class="tag warn">On, agent silent</span> instead — the machine is up but its agent isn't reporting (it didn't come back after a restart, or its scheduled task was removed). Fix it by running the one-click installer on that machine again; it reinstalls and starts the agent in one go. If nothing answers, it's really off — use Wake.<//>
     <${QA} q="An agent didn't come back after a restart">The Windows agent runs as a scheduled task (SYSTEM, at startup and every 5 minutes) and the Mac agent as a root LaunchDaemon, so it normally returns on its own. It won't if that task/daemon was removed, or its Python moved (a Deadline upgrade can do this). Running the one-click installer again restores it. A machine on Wi-Fi that logs in nobody can also have no network until someone logs in.<//>
-    <${QA} q="A job failed with “reboot needed”">Windows has updates waiting on a restart and the installer refuses to run. Restart the machine, then Retry (Farm → History → Installs, or the machine's details).<//>
+    <${QA} q="A job failed with “reboot needed”">Windows has updates waiting on a restart and the installer refuses to run. Restart the machine, then Retry (History → Installs, or the machine's details).<//>
     <${QA} q="A job says the machine stopped running it">The download or install ended without its result reaching the tracker (e.g. the agent restarted). Retry — if the software did install, the job corrects itself to success on the next check-in. Each agent keeps a log at C:\\ProgramData\\TrackerAgent\\agent.log.<//>
-    <${QA} q="An update never runs on a machine">Open Farm → History → Installs: the job says what it's waiting for — a render to finish, the machine to come back online, elevation, its own current install, or a scheduled start time.<//>
+    <${QA} q="An update never runs on a machine">Open History → Installs: the job says what it's waiting for — a render to finish, the machine to come back online, elevation, its own current install, or a scheduled start time.<//>
     <${QA} q="An app says “No installer yet”">Its installer isn't on the share for that OS. Add it in Apps (a link the tracker downloads once, or the file itself), then update again.<//>
     <${QA} q="Downloads fail / installers can't be found">The installer share isn't mounted on the tracker server. Settings → Installer downloads shows a warning when that's the case; installers are never written to the server's own disk.<//>
     <${QA} q="Restoring the database">Backups are in ~/tracker-backups (startup and nightly). Stop the tracker and run <code>./restore-db.sh</code> (newest) or <code>./restore-db.sh path/to/backup.db</code>.<//>`,

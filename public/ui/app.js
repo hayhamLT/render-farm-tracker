@@ -9,30 +9,28 @@ import { isTyping, pref } from './lib/ui.js';
 import { PageSkeleton } from './components/viz.js';
 import { ago } from './lib/format.js';
 import { Icon, ToastHost, DialogHost, MenuHost } from './components/common.js';
-import { FarmView } from './views/farm.js';
+import { MachinesView } from './views/machines.js';
+import { UpdatesView } from './views/updates.js';
+import { HistoryView } from './views/history.js';
 import { CatalogView } from './views/catalog.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
 import { Palette } from './components/palette.js';
 import { AskPanel, askOpen, askShortcut } from './components/ask.js';
 import { startAlerts } from './lib/alerts.js';
-import { updatesWaiting } from './lib/updater.js';
+import { normalizeProducts, isTracked } from './lib/domain.js';
+import { canUpdate, updateTargets } from './lib/updater.js';
 
 const ACTIVE = ['pending', 'downloading', 'installing'];
 
-// Updates, machines and history are one page (views/farm.js), not three. They keep their own
-// addresses so old links, bookmarks and the g-shortcuts still work — those now scroll to the
-// right part of the dashboard instead of loading a different page.
 const ROUTES = [
-  { name: 'updates', label: 'Updates', icon: 'download', key: 'u', nav: 'Farm', view: () => html`<${FarmView} />` },
-  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', lens: true, view: () => html`<${FarmView} />` },
-  { name: 'history', label: 'History', icon: 'activity', key: 'h', lens: true, view: () => html`<${FarmView} />` },
+  { name: 'updates', label: 'Updates', icon: 'download', key: 'u', view: () => html`<${UpdatesView} />` },
+  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
+  { name: 'history', label: 'History', icon: 'activity', key: 'h', view: () => html`<${HistoryView} />` },
   { name: 'catalog', label: 'Apps', icon: 'package', key: 'a', view: () => html`<${CatalogView} />` },
   { name: 'settings', label: 'Settings', icon: 'sliders', key: 's', view: () => html`<${SettingsView} />` },
   { name: 'help', label: 'Help', icon: 'help', key: '?', view: () => html`<${HelpView} />` },
 ];
-const FARM = ROUTES.filter((t) => t.nav === 'Farm' || t.lens).map((t) => t.name);
-const NAV = ROUTES.filter((t) => !t.lens);
 // Old addresses from before the updates-first layout.
 const MOVED = { overview: 'updates', timeline: 'machines', activity: 'history' };
 
@@ -56,30 +54,19 @@ function Sidebar() {
   const running = s ? s.jobs.filter((j) => ACTIVE.includes(j.status) && !(j.status === 'pending' && waiting.has(j.rollout_id))).length : 0;
   const failed = s ? s.jobs.filter((j) => j.status === 'failed' && j.updated_at > Date.now() - 24 * 3600 * 1000).length : 0;
   const offline = s ? s.nodes.filter((n) => !n.online).length : 0;
-  const available = updatesWaiting(s);
+  const available = s ? normalizeProducts(s).filter((p) => isTracked(p) && canUpdate(p)).reduce((c, p) => c + updateTargets(s, p).length, 0) : 0;
   const counts = {
     updates: running ? { n: running, cls: 'accent', title: `${running} updating or queued` } : available ? { n: available, cls: 'info', title: `${available} updates available` } : null,
+    machines: offline ? { n: offline, cls: 'bad', title: `${offline} offline` } : null,
+    history: failed ? { n: failed, cls: 'bad', title: `${failed} failed in the last 24 h` } : null,
   };
-  // The Farm item carries the update count; a red dot says something in there needs a look,
-  // so an offline machine or a failed install is still noticeable from any page.
-  const alert = offline || failed
-    ? [offline ? `${offline} offline` : '', failed ? `${failed} failed in the last 24 h` : ''].filter(Boolean).join(' · ')
-    : null;
   return html`<aside class="sidebar">
     <div class="brand"><span class="brand-mark"><${Icon} name="zap" /></span><div><b>deadline_farm</b><span>tracker</span></div></div>
     <nav class="nav" aria-label="Sections">
-      ${NAV.map((t) => {
-        const isFarm = t.nav === 'Farm';
-        const on = isFarm ? FARM.includes(r) : r === t.name;
-        const label = t.nav || t.label;
-        return html`<button key=${t.name} class=${'nav-item' + (on ? ' active' : '')} onClick=${() => go(t.name)}
-          title=${isFarm ? `Updates, machines and history  ·  g then u / m / h${alert ? `  ·  ${alert}` : ''}` : `${t.label}  ·  g then ${t.key}`}
-          aria-current=${on ? 'page' : null}>
-          <${Icon} name=${t.icon} /><span class="label">${label}</span>
-          ${isFarm && alert ? html`<span class="nav-alert" title=${alert}></span>` : null}
-          ${counts[t.name] && html`<span class=${'nav-count ' + counts[t.name].cls} title=${counts[t.name].title}>${counts[t.name].n}</span><span class="dotcount"></span>`}
-        </button>`;
-      })}
+      ${ROUTES.map((t) => html`<button key=${t.name} class=${'nav-item' + (r === t.name ? ' active' : '')} onClick=${() => go(t.name)} title=${`${t.label}  ·  g then ${t.key}`} aria-current=${r === t.name ? 'page' : null}>
+        <${Icon} name=${t.icon} /><span class="label">${t.label}</span>
+        ${counts[t.name] && html`<span class=${'nav-count ' + counts[t.name].cls} title=${counts[t.name].title}>${counts[t.name].n}</span><span class="dotcount"></span>`}
+      </button>`)}
     </nav>
     <div class="sidebar-foot">
       <button class=${'search-btn ask-btn' + (askOpen.value ? ' on' : '')} onClick=${() => { askOpen.value = !askOpen.value; }} title="Ask questions about the farm, answered by the local AI">
@@ -111,10 +98,9 @@ function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-  // Scroll to the top when changing section — except within the farm page, where the section
-  // itself scrolls into view (views/farm.js).
+  // Scroll to the top when changing section (not when opening a machine drawer).
   const name = route.value.name;
-  useEffect(() => { if (!FARM.includes(name)) window.scrollTo({ top: 0 }); }, [name]);
+  useEffect(() => { window.scrollTo({ top: 0 }); }, [name]);
   useEffect(() => { if (MOVED[name]) go(MOVED[name], ...route.value.params); }, [name]);
   const current = ROUTES.find((t) => t.name === name) || ROUTES[0];
   return html`<div class=${'shell' + (collapsed.value ? ' collapsed' : '') + (askOpen.value ? ' ask-open' : '')}>
