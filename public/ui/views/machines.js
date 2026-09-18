@@ -11,7 +11,7 @@ import { get } from '../lib/api.js';
 import { pref, openMenu, isTyping } from '../lib/ui.js';
 import { ago, plural, parseJSON } from '../lib/format.js';
 import {
-  normalizeProducts, productStatus, activeJobFor, nodeActivity, deadlineStatus, isTracked, agentOutdated, canShutdown, osVersionLabel, selfUpdateBehind, AGENT_NAME,
+  normalizeProducts, productStatus, activeJobFor, nodeActivity, deadlineStatus, isTracked, agentOutdated, canShutdown, osVersionLabel, selfUpdateBehind, nudgeWaiting, AGENT_NAME,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
@@ -290,7 +290,9 @@ function AppStatus({ s, node, p }) {
       title=${blockedReason(node) ? `Machine is ${blockedReason(node)}` : installerState(p, node.os).ok ? '' : installerState(p, node.os).label}
       onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Update ${p.name} on ${node.hostname}` })}><${Icon} name="download" />Update to ${st.target}</button>` : html`<span class="tag info">${st.target} available</span>`;
     case 'major': return canUpdate(p) ? html`<button class="btn sm ghost" onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Install ${p.name} ${st.target} on ${node.hostname}`, subtitle: 'New major — installs next to the current version' })}><${Icon} name="up" />Install ${String(st.target).split('.')[0]}</button>` : html`<span class="tag violet">new ${String(st.target).split('.')[0]}</span>`;
-    case 'selfupdate': return selfUpdateBehind(node, p)
+    case 'selfupdate': return selfUpdateBehind(node, p) && nudgeWaiting(s, node, p)
+      ? html`<span class="tag violet" title=${`Adobe's updater was restarted here ${ago(nudgeWaiting(s, node, p), s.now)} — it applies ${st.target} in the background, and the version shows up on a later check-in.`}><${Icon} name="clock" />Asked Adobe</span>`
+      : selfUpdateBehind(node, p)
       ? html`<button class="btn sm" disabled=${!!blockedReason(node)} title=${blockedReason(node) ? `Machine is ${blockedReason(node)}` : `Restarts Adobe's updater so it picks up ${st.target}`}
         onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Update ${p.name} on ${node.hostname}` })}><${Icon} name="refresh" />Update to ${st.target}</button>`
       : html`<span class="dim">Updates itself</span>`;

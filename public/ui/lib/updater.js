@@ -5,18 +5,17 @@
 import { get, post } from './api.js';
 import { ADOBE_RUM, presetCommand } from './presets.js';
 import {
-  appliesToOS, isDeployable, jobActiveFor, latestForOS, latestInstallerReady, nodesByKind, productStatus, savedSource,
-  selfUpdateBehind, stagedFor, SELF_UPDATING,
+  appliesToOS, isDeployable, jobActiveFor, latestForOS, latestInstallerReady, nodesByKind, nudgeWaiting, productStatus,
+  savedSource, selfUpdateBehind, stagedFor, SELF_UPDATING,
 } from './domain.js';
 
 // Creative Cloud has no installer to push per version: the tracker restarts Adobe's own updater
 // on the machine, which then pulls whatever Adobe has. Same buttons, different mechanism.
 const NUDGE_COMMAND = '__RESTART_CC__';
-
-// Machines that can take this app's update now (behind, or new major when asked), grouped for the UI.
 export function updateTargets(state, product, { majors = false } = {}) {
   if (SELF_UPDATING.has(product.key)) {
-    return state.nodes.filter((n) => !jobActiveFor(state, n, product.key) && selfUpdateBehind(n, product));
+    return state.nodes.filter((n) => !jobActiveFor(state, n, product.key)
+      && selfUpdateBehind(n, product) && !nudgeWaiting(state, n, product));
   }
   const kinds = majors ? ['patch', 'major'] : ['patch'];
   return nodesByKind(state, product, ['windows', 'macos'], kinds);
@@ -93,7 +92,7 @@ export async function queueUpdates(items, plan, { onProgress } = {}) {
 // Everything a machine is behind on (patches; majors only if asked).
 export function machineUpdates(state, products, node, { majors = false } = {}) {
   return products.filter((p) => canUpdate(p) && p.dashboard_hidden !== 1 && !jobActiveFor(state, node, p.key)).filter((p) => {
-    if (SELF_UPDATING.has(p.key)) return selfUpdateBehind(node, p);
+    if (SELF_UPDATING.has(p.key)) return selfUpdateBehind(node, p) && !nudgeWaiting(state, node, p);
     const st = productStatus(node, p).status;
     return st === 'patch' || (majors && st === 'major');
   });

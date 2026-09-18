@@ -63,7 +63,10 @@ function UpdateSheet({ items, close }) {
   const go = async () => {
     setBusy(true);
     try {
-      const name = items.length === 1 ? `${items[0].product.name} ${items[0].product.latest_version || ''}`.trim() : items.map((i) => i.product.name).join(', ');
+      // Name it after what these machines are actually getting, not the product's headline
+      // version — Creative Cloud's Windows and Mac builds are numbered differently.
+      const targetsOf = (it) => [...new Set(it.nodes.map((n) => (it.product.key === 'nvidia' ? nvidiaTarget(n, it.product) : latestForOS(it.product, n.os))).filter(Boolean))].join(' / ');
+      const name = items.length === 1 ? `${items[0].product.name} ${targetsOf(items[0])}`.trim() : items.map((i) => i.product.name).join(', ');
       const plan = rolloutPlan(name, s);
       const r = await queueUpdates(items, plan, { onProgress: setProgress });
       const later = r.rollout.status === 'scheduled';

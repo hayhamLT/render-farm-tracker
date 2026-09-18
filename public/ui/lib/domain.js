@@ -78,6 +78,25 @@ export function selfUpdateBehind(node, product) {
   return st.status === 'selfupdate' && !!st.version && !!st.target;
 }
 
+// ...and Adobe takes its time. The machine keeps reporting the OLD version until Adobe finishes,
+// so without this window it would still read "behind" and invite another pointless rollout (three
+// of them inside 20 minutes, Sep 2026). After the window it's offered again — by then the nudge
+// really didn't take, and the installer is the answer.
+const NUDGE_WAIT_MS = 12 * 60 * 60 * 1000;
+
+// When was this machine last asked to self-update this app, if it's still worth waiting on?
+export function nudgeWaiting(state, node, product) {
+  if (!SELF_UPDATING.has(product.key)) return null;
+  let at = 0;
+  for (const j of state.jobs || []) {
+    if (j.hostname !== node.hostname || j.product_key !== product.key || j.status !== 'success') continue;
+    if (j.updated_at && j.updated_at > at) at = j.updated_at;
+  }
+  return at && (state.now || Date.now()) - at < NUDGE_WAIT_MS ? at : null;
+}
+
+// Machines that can take this app's update now (behind, or new major when asked), grouped for the UI.
+
 export const ACTIVE = ['pending', 'downloading', 'installing'];
 export const jobActiveFor = (state, node, productKey) =>
   state.jobs.some((j) => j.hostname === node.hostname && j.product_key === productKey && ACTIVE.includes(j.status));
@@ -86,7 +105,8 @@ export const activeJobFor = (state, node, productKey) =>
 
 // Tracked apps behind on this machine that aren't already queued/installing.
 export function outdatedProducts(state, products, node) {
-  return products.filter((p) => isTracked(p) && (['patch', 'major'].includes(productStatus(node, p).status) || selfUpdateBehind(node, p)) && !jobActiveFor(state, node, p.key));
+  return products.filter((p) => isTracked(p) && (['patch', 'major'].includes(productStatus(node, p).status)
+    || (selfUpdateBehind(node, p) && !nudgeWaiting(state, node, p))) && !jobActiveFor(state, node, p.key));
 }
 
 export const stagedFor = (prod, os) => (os === 'windows' ? prod.staged_win : prod.staged_mac);

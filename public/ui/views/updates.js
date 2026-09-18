@@ -10,6 +10,7 @@ import { openMenu, pref } from '../lib/ui.js';
 import { ago, plural, cmpVersion } from '../lib/format.js';
 import {
   normalizeProducts, isTracked, appliesToOS, productStatus, inProgressNodes, latestForOS, nodesByKind, nvidiaTarget,
+  nudgeWaiting, selfUpdateBehind,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, installerState, updateTargets } from '../lib/updater.js';
@@ -41,15 +42,21 @@ const kindOf = (p) => (['plugin', 'script'].includes(p.category) ? p.category : 
 function appModel(s, p) {
   const applicable = s.nodes.filter((n) => appliesToOS(p, n.os) && productStatus(n, p).status !== 'na');
   const installed = applicable.filter((n) => (n.software || []).some((x) => x.product_key === p.key));
-  const current = installed.filter((n) => ['uptodate', 'selfupdate'].includes(productStatus(n, p).status));
+  // A self-updating app that's behind is NOT current, even though its status reads "selfupdate".
+  const current = installed.filter((n) => {
+    const st = productStatus(n, p).status;
+    return st === 'uptodate' || (st === 'selfupdate' && !selfUpdateBehind(n, p));
+  });
   const behind = updateTargets(s, p);
+  // Asked to self-update, Adobe hasn't finished: shown, but not offered again.
+  const waiting = installed.filter((n) => selfUpdateBehind(n, p) && nudgeWaiting(s, n, p));
   const majors = nodesByKind(s, p, OSES, ['major']);
   const updating = inProgressNodes(s, p, OSES);
   const from = [...new Set(behind.map((n) => productStatus(n, p).version).filter(Boolean))].sort((a, b) => cmpVersion(a, b));
   const targets = [...new Set(installed.map((n) => (p.key === 'nvidia' ? nvidiaTarget(n, p) : latestForOS(p, n.os))).filter(Boolean))];
   const oses = [...new Set(behind.map((n) => n.os))];
   const installers = oses.map((os) => ({ os, ...installerState(p, os) }));
-  return { p, installed, current, behind, majors, updating, from, targets, installers };
+  return { p, installed, current, behind, waiting, majors, updating, from, targets, installers };
 }
 
 const chosenFor = (m) => {
@@ -95,7 +102,7 @@ function AppRow({ m, s }) {
       { label: 'Show machines', icon: 'grid', onSelect: () => go('machines') },
     ]);
   };
-  const current = !m.behind.length && !m.updating.length;
+  const current = !m.behind.length && !m.updating.length && !m.waiting.length;
   return html`<div class=${'ur' + (open ? ' open' : '') + (sel ? ' sel' : '') + (current ? ' quiet-row' : '')}>
     <div class="ur-main" onClick=${() => { expanded.value = open ? null : p.key; }}>
       <label class="ur-check" onClick=${(e) => e.stopPropagation()}>${current ? null : html`<input type="checkbox" checked=${sel} onChange=${toggleSel} aria-label=${`Select ${p.name}`} />`}</label>
@@ -108,13 +115,16 @@ function AppRow({ m, s }) {
         <${StackBar} height=${6} total=${total} parts=${[
           { value: m.current.length, color: 'var(--ok)', label: 'current' },
           { value: m.updating.length, color: 'var(--accent)', label: 'updating' },
+          { value: m.waiting.length, color: 'var(--violet)', label: 'waiting on Adobe' },
           { value: m.behind.length, color: 'var(--info)', label: 'behind' },
         ]} />
-        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.p.updated_at ? html` · <span class="dim">checked ${ago(m.p.updated_at, s.now)}</span>` : ''}</span>
+        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.waiting.length ? html` · <span style="color:var(--violet)" title=${m.waiting.map((n) => n.hostname).join(', ')}>${m.waiting.length} waiting on Adobe</span>` : ''}${m.p.updated_at ? html` · <span class="dim">checked ${ago(m.p.updated_at, s.now)}</span>` : ''}</span>
       </div>
       <div class="ur-actions" onClick=${(e) => e.stopPropagation()}>
         ${current
           ? html`<span class="uptodate"><${Icon} name="check" />Current</span>`
+          : !m.behind.length && !m.updating.length && m.waiting.length
+          ? html`<span class="tag violet" title=${`Asked ${ago(Math.max(...m.waiting.map((n) => nudgeWaiting(s, n, m.p))), s.now)} — Adobe applies it in the background. The version changes on a later check-in; if it hasn't by tomorrow, the Update button comes back.`}><${Icon} name="clock" />Waiting on Adobe</span>`
           : html`<button class="btn primary" disabled=${!chosen.length || blocked} title=${blocked ? 'Add the installer to the share first (Apps)' : !chosen.length && m.behind.length ? 'No machines picked' : ''}
             onClick=${() => openUpdate([{ product: p, nodes: chosen }])}>
             ${m.behind.length ? html`<${Icon} name="download" />Update ${chosen.length !== m.behind.length ? `${chosen.length} of ${m.behind.length}` : m.behind.length}` : html`<${Icon} name="spinner" cls="spin" />Updating`}</button>`}
@@ -161,16 +171,17 @@ function AppCard({ m }) {
       <${ProductLogo} product=${p} size=${32} />
       <div class="uc3-name"><b>${p.name}</b><span class="ur-ver"><span class="mono dim">${m.from[0] || ''}</span>${m.from.length ? html`<${Icon} name="chevron" />` : null}<span class="mono">${m.targets.join(' / ')}</span></span></div>
       <${Ring} size=${46} stroke=${5} total=${Math.max(1, m.installed.length)} label=${`${m.current.length} of ${m.installed.length} current`}
-        segments=${[{ value: m.current.length, color: 'var(--ok)' }, { value: m.updating.length, color: 'var(--accent)' }, { value: m.behind.length, color: 'var(--info)' }]}>
+        segments=${[{ value: m.current.length, color: 'var(--ok)' }, { value: m.updating.length, color: 'var(--accent)' }, { value: m.waiting.length, color: 'var(--violet)' }, { value: m.behind.length, color: 'var(--info)' }]}>
         <span class="uc3-pct">${pct}<small>%</small></span>
       <//>
     </header>
-    <div class="uc3-meta"><${Installers} m=${m} />${m.updating.length ? html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${m.updating.length} updating</span>` : null}</div>
+    <div class="uc3-meta"><${Installers} m=${m} />${m.updating.length ? html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${m.updating.length} updating</span>` : null}${m.waiting.length ? html`<span class="tag violet" title=${m.waiting.map((n) => n.hostname).join(', ')}><${Icon} name="clock" />${m.waiting.length} waiting on Adobe</span>` : null}</div>
     <footer>
-      <span class="dim">${m.behind.length ? `${plural(m.behind.length, 'machine')} behind` : m.updating.length ? `${m.updating.length} updating` : `on ${plural(m.installed.length, 'machine')}`}</span>
+      <span class="dim">${m.behind.length ? `${plural(m.behind.length, 'machine')} behind` : m.updating.length ? `${m.updating.length} updating` : m.waiting.length ? `${plural(m.waiting.length, 'machine')} asked` : `on ${plural(m.installed.length, 'machine')}`}</span>
       <span class="grow"></span>
       ${m.behind.length ? html`<button class="btn sm" onClick=${() => { view.value = 'list'; expanded.value = p.key; }}>Choose…</button>
         <button class="btn sm primary" disabled=${!chosen.length || blocked} onClick=${() => openUpdate([{ product: p, nodes: chosen }])}><${Icon} name="download" />Update ${m.behind.length}</button>`
+        : m.waiting.length ? html`<span class="tag violet"><${Icon} name="clock" />Waiting on Adobe</span>`
         : html`<span class="uptodate"><${Icon} name="check" />Current</span>`}
     </footer>
   </article>`;
