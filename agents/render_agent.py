@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.35.0"
+AGENT_VERSION = "2.36.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1428,6 +1428,132 @@ def _run_cancellable(cmd, timeout):
     return proc.returncode, out, err
 
 
+# --------------------------------------------------------------------------
+# Vendor signature check. The SHA-256 above only proves the file didn't change between the
+# share and this machine — the tracker computes that hash itself, from whatever it downloaded.
+# This proves who MADE it: before anything runs as SYSTEM, the installer must carry a valid
+# signature from the vendor the server names for that app (Authenticode subject on Windows,
+# Apple Team ID on macOS). The expected signers were read off the farm's real installers
+# (Sep 2026), not guessed.
+# --------------------------------------------------------------------------
+_ARCHIVES = (".zip", ".7z", ".tar", ".gz", ".tgz", ".xz")
+
+
+def _sig_windows(path):
+    """(status, subject_cn) from Get-AuthenticodeSignature, e.g. ("Valid", "NVIDIA Corporation")."""
+    out = _ps("$s=Get-AuthenticodeSignature -LiteralPath '%s';"
+              "$c='';if($s.SignerCertificate){$c=($s.SignerCertificate.Subject -split ',')[0] -replace '^CN=',''};"
+              "$s.Status.ToString()+'|'+$c" % path.replace("'", "''"), timeout=900).strip()
+    # Windows reads the WHOLE file to verify it — minutes for a multi-GB installer on a slow disk.
+    # A timeout must never read as "unsigned": say what actually happened.
+    if out.startswith("ERR:") or "|" not in out:
+        return "CheckFailed", "signature check didn't finish (%s)" % (out[:120] or "no output")
+    status, _, cn = out.rpartition("\n")[2].partition("|")
+    return status.strip(), cn.strip().strip('"')
+
+
+def _team_of(text):
+    m = re.search(r"TeamIdentifier=([A-Z0-9]{10})", text) or re.search(r"\(([A-Z0-9]{10})\)", text)
+    return m.group(1) if m else ""
+
+
+def _sig_macos_item(path):
+    """(ok, team, label) for a .app or .pkg."""
+    if path.endswith(".pkg"):
+        out = subprocess.run(["pkgutil", "--check-signature", path], capture_output=True, text=True, timeout=120).stdout or ""
+        ok = "Status: signed" in out
+        first = next((l.strip() for l in out.splitlines() if l.strip().startswith("1.")), "")
+        return ok, _team_of(first), first[3:] if first else "not signed"
+    info = subprocess.run(["codesign", "-dv", "--verbose=2", path], capture_output=True, text=True, timeout=120)
+    text = (info.stdout or "") + (info.stderr or "")
+    if "not signed" in text:
+        return False, "", "not signed"
+    ok = subprocess.run(["codesign", "--verify", "--deep", "--strict", path], capture_output=True, timeout=300).returncode == 0
+    auth = next((l.split("=", 1)[1] for l in text.splitlines() if l.startswith("Authority=")), "")
+    return ok, _team_of(text), auth or "signed"
+
+
+def _sig_macos(path):
+    """(ok, team, label). A disk image is often unsigned while the installer INSIDE it is signed
+    (Cinema 4D, Redshift and Creative Cloud all ship that way), so an unsigned .dmg is judged by
+    the first .app or .pkg inside it."""
+    if not path.endswith(".dmg"):
+        return _sig_macos_item(path)
+    ok, team, label = _sig_macos_item(path)
+    if ok and team:
+        return ok, team, label
+    mnt = tempfile.mkdtemp(prefix="tracker_sig_")
+    try:
+        if subprocess.run(["hdiutil", "attach", path, "-nobrowse", "-readonly", "-mountpoint", mnt],
+                          capture_output=True, timeout=300).returncode != 0:
+            return False, "", "could not open the disk image to check what's inside"
+        inner = None
+        for root, dirs, files in os.walk(mnt):
+            if root[len(mnt):].count(os.sep) > 2:
+                continue
+            for d in list(dirs) + list(files):
+                if d.endswith((".app", ".pkg")):
+                    inner = os.path.join(root, d)
+                    break
+            if inner:
+                break
+        if not inner:
+            return False, "", "no installer found inside the disk image"
+        ok, team, label = _sig_macos_item(inner)
+        return ok, team, "%s (inside the disk image)" % label
+    finally:
+        subprocess.run(["hdiutil", "detach", mnt, "-force"], capture_output=True, timeout=120)
+        try:
+            os.rmdir(mnt)
+        except Exception:
+            pass
+
+
+def verify_vendor_signature(path, policy):
+    """Decide whether an installer may run. policy (from the server, per app):
+         {"signers": [...]}      → must be validly signed by one of these (Windows subject name
+                                   or macOS Team ID); anything else is refused
+         {"unsigned_ok": "why"}  → allowed unsigned, with the reason recorded (your own Adobe
+                                   Admin Console packages; archives whose vendor checksum the
+                                   server already verified)
+         None / {}               → no expectation (your own custom apps): record who signed it
+    Returns (ok, message)."""
+    policy = policy or {}
+    signers = [s for s in (policy.get("signers") or []) if s]
+    if path.lower().endswith(_ARCHIVES):
+        why = policy.get("unsigned_ok")
+        if signers and not why:
+            return False, "Refused: this is an archive, which can't carry a signature, and no vendor checksum was verified for it."
+        return True, "Archive — %s" % (why or "no signature possible; integrity from the SHA-256 above")
+    try:
+        if IS_WINDOWS:
+            status, who = _sig_windows(path)
+            valid = status == "Valid"
+            label = who or "not signed"
+            ident = who
+        elif IS_MACOS:
+            valid, ident, label = _sig_macos(path)
+            status = "Valid" if valid else "NotValid"
+        else:
+            return True, "Signature not checked on this OS"
+    except Exception as e:
+        valid, ident, label, status = False, "", "check failed (%s)" % e, "Error"
+    if signers:
+        if not valid:
+            if policy.get("unsigned_ok"):
+                return True, "Unsigned — allowed: %s" % policy["unsigned_ok"]
+            return False, ("Refused: %s is not validly signed (%s: %s). Expected a signature from %s."
+                           % (os.path.basename(path), status, label, " or ".join(signers)))
+        if not any(sg.lower() == (ident or "").lower() or sg.lower() in label.lower() for sg in signers):
+            return False, ("Refused: %s is signed by %s, not by %s — it did not come from the vendor."
+                           % (os.path.basename(path), label, " or ".join(signers)))
+        return True, "Signed by %s ✓" % label
+    if not valid and policy.get("unsigned_ok"):
+        return True, "Unsigned — allowed: %s" % policy["unsigned_ok"]
+    return True, ("Signed by %s (no expected vendor set for this app)" % label if valid
+                  else "Not signed (no expected vendor set for this app, so allowed)")
+
+
 def _installed_version(product_key):
     for s in detect_software():
         if s.get("product") == product_key:
@@ -1725,6 +1851,13 @@ def _run_job(server, job):
                 print("  ! sha256 mismatch — aborting")
                 return
             print("  sha256 verified")
+        sig_ok, sig_note = verify_vendor_signature(installer, job.get("signature"))
+        if not sig_ok:
+            server.report(job_id, "failed", sig_note)
+            print("  ! %s" % sig_note)
+            return
+        print("  %s" % sig_note)
+        server.report(job_id, "downloading", sig_note)
         if IS_MACOS:
             os.chmod(installer, 0o755)
         cmd = job["install_command"].replace("{file}", installer)
