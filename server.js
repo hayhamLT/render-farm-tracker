@@ -146,8 +146,9 @@ const MAXON_RIDE_ALONG = new Set(['cinema4d', 'redshift', 'redgiant']);
 function maybeRideAlongMaxonApp(nodeId, justInstalledKey) {
   if (!MAXON_RIDE_ALONG.has(justInstalledKey)) return;
   if (activeJobForProduct(nodeId, 'maxonapp')) return;            // already queued/running
-  const node = db.prepare('SELECT id, os FROM nodes WHERE id = ?').get(nodeId);
+  const node = db.prepare('SELECT id, os, hostname FROM nodes WHERE id = ?').get(nodeId);
   if (!node) return;
+  if (isHiddenHost(node.hostname)) return;                        // never install on infra hosts
   // Newest staged Maxon App installer for this OS whose file is actually present.
   let pkg = null;
   for (const p of db.prepare(
@@ -638,8 +639,14 @@ function runAutoDeploy() {
         "SELECT DISTINCT j.node_id FROM jobs j JOIN packages p ON p.id = j.package_id WHERE p.product_key = ? AND p.version = ? AND p.os = ? AND j.status = 'success'"
       ).all(prod.key, V, os).map((r) => r.node_id));
       const needs = (n) => (n.iv ? cmpVersionServer(n.iv, V) < 0 : missingCounts(n));
+      // Hidden infra hosts are never deploy targets — the tracker's own server and the
+      // GPU-less box are in config.hiddenNodes, and every MANUAL deploy path already
+      // refuses them. Auto-deploy didn't check, so switching it on for an app the farm
+      // has but they don't read as "missing here" and started installing Cinema 4D on
+      // the tracker server itself (Sep 2026).
       const eligible = nodes.filter((n) =>
-        needs(n) && gpuOk(n) && online(n) && !installed.has(n.id) && !activeJobForProduct(n.id, prod.key));
+        !isHiddenHost(n.hostname)
+        && needs(n) && gpuOk(n) && online(n) && !installed.has(n.id) && !activeJobForProduct(n.id, prod.key));
       if (!eligible.length) continue;
       // canary state for this product@version
       const vjobs = db.prepare(
