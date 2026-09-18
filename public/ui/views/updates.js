@@ -20,7 +20,7 @@ import { StackBar, Donut, Num, Ring } from '../components/viz.js';
 import { RolloutList } from '../components/rollouts.js';
 import { openUpdate } from '../components/update-sheet.js';
 import { openRollout } from './deploy.js';
-import { showMachines } from './machines.js';
+import { showMachines, useMachineModel, fleetSegments } from './machines.js';
 
 const selectedApps = signal(new Set());   // product keys ticked for a batch update
 const expanded = signal(null);            // product key whose machines are shown
@@ -115,16 +115,16 @@ function AppRow({ m, s }) {
         <${StackBar} height=${6} total=${total} parts=${[
           { value: m.current.length, color: 'var(--ok)', label: 'current' },
           { value: m.updating.length, color: 'var(--accent)', label: 'updating' },
-          { value: m.waiting.length, color: 'var(--violet)', label: 'waiting on Adobe' },
+          { value: m.waiting.length, color: 'var(--text-3)', label: 'waiting on Adobe' },
           { value: m.behind.length, color: 'var(--info)', label: 'behind' },
         ]} />
-        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.waiting.length ? html` · <span style="color:var(--violet)" title=${m.waiting.map((n) => n.hostname).join(', ')}>${m.waiting.length} waiting on Adobe</span>` : ''}${m.p.updated_at ? html` · <span class="dim">checked ${ago(m.p.updated_at, s.now)}</span>` : ''}</span>
+        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.waiting.length ? html` · <span class="dim" title=${m.waiting.map((n) => n.hostname).join(', ')}>${m.waiting.length} waiting on Adobe</span>` : ''}${m.p.updated_at ? html` · <span class="dim">checked ${ago(m.p.updated_at, s.now)}</span>` : ''}</span>
       </div>
       <div class="ur-actions" onClick=${(e) => e.stopPropagation()}>
         ${current
           ? html`<span class="uptodate"><${Icon} name="check" />Current</span>`
           : !m.behind.length && !m.updating.length && m.waiting.length
-          ? html`<span class="tag violet" title=${`Asked ${ago(Math.max(...m.waiting.map((n) => nudgeWaiting(s, n, m.p))), s.now)} — Adobe applies it in the background. The version changes on a later check-in; if it hasn't by tomorrow, the Update button comes back.`}><${Icon} name="clock" />Waiting on Adobe</span>`
+          ? html`<span class="tag pending" title=${`Asked ${ago(Math.max(...m.waiting.map((n) => nudgeWaiting(s, n, m.p))), s.now)} — Adobe applies it in the background. The version changes on a later check-in; if it hasn't by tomorrow, the Update button comes back.`}><${Icon} name="clock" />Waiting on Adobe</span>`
           : html`<button class="btn primary" disabled=${!chosen.length || blocked} title=${blocked ? 'Add the installer to the share first (Apps)' : !chosen.length && m.behind.length ? 'No machines picked' : ''}
             onClick=${() => openUpdate([{ product: p, nodes: chosen }])}>
             ${m.behind.length ? html`<${Icon} name="download" />Update ${chosen.length !== m.behind.length ? `${chosen.length} of ${m.behind.length}` : m.behind.length}` : html`<${Icon} name="spinner" cls="spin" />Updating`}</button>`}
@@ -171,17 +171,17 @@ function AppCard({ m }) {
       <${ProductLogo} product=${p} size=${32} />
       <div class="uc3-name"><b>${p.name}</b><span class="ur-ver"><span class="mono dim">${m.from[0] || ''}</span>${m.from.length ? html`<${Icon} name="chevron" />` : null}<span class="mono">${m.targets.join(' / ')}</span></span></div>
       <${Ring} size=${46} stroke=${5} total=${Math.max(1, m.installed.length)} label=${`${m.current.length} of ${m.installed.length} current`}
-        segments=${[{ value: m.current.length, color: 'var(--ok)' }, { value: m.updating.length, color: 'var(--accent)' }, { value: m.waiting.length, color: 'var(--violet)' }, { value: m.behind.length, color: 'var(--info)' }]}>
+        segments=${[{ value: m.current.length, color: 'var(--ok)' }, { value: m.updating.length, color: 'var(--accent)' }, { value: m.waiting.length, color: 'var(--text-3)' }, { value: m.behind.length, color: 'var(--info)' }]}>
         <span class="uc3-pct">${pct}<small>%</small></span>
       <//>
     </header>
-    <div class="uc3-meta"><${Installers} m=${m} />${m.updating.length ? html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${m.updating.length} updating</span>` : null}${m.waiting.length ? html`<span class="tag violet" title=${m.waiting.map((n) => n.hostname).join(', ')}><${Icon} name="clock" />${m.waiting.length} waiting on Adobe</span>` : null}</div>
+    <div class="uc3-meta"><${Installers} m=${m} />${m.updating.length ? html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />${m.updating.length} updating</span>` : null}${m.waiting.length ? html`<span class="tag pending" title=${m.waiting.map((n) => n.hostname).join(', ')}><${Icon} name="clock" />${m.waiting.length} waiting on Adobe</span>` : null}</div>
     <footer>
       <span class="dim">${m.behind.length ? `${plural(m.behind.length, 'machine')} behind` : m.updating.length ? `${m.updating.length} updating` : m.waiting.length ? `${plural(m.waiting.length, 'machine')} asked` : `on ${plural(m.installed.length, 'machine')}`}</span>
       <span class="grow"></span>
       ${m.behind.length ? html`<button class="btn sm" onClick=${() => { view.value = 'list'; expanded.value = p.key; }}>Choose…</button>
         <button class="btn sm primary" disabled=${!chosen.length || blocked} onClick=${() => openUpdate([{ product: p, nodes: chosen }])}><${Icon} name="download" />Update ${m.behind.length}</button>`
-        : m.waiting.length ? html`<span class="tag violet"><${Icon} name="clock" />Waiting on Adobe</span>`
+        : m.waiting.length ? html`<span class="tag pending"><${Icon} name="clock" />Waiting on Adobe</span>`
         : html`<span class="uptodate"><${Icon} name="check" />Current</span>`}
     </footer>
   </article>`;
@@ -209,26 +209,18 @@ function Attention({ s, models }) {
   </div>`)}</div>`;
 }
 
-// Farm coverage at a glance — each slice filters the Machines page.
+// Farm coverage at a glance — the SAME slices as the Machines page (fleetSegments), because it's
+// the same farm; each one opens Machines filtered to it.
 function Hero({ s, models, updateCount, updateAll, appsBehind }) {
-  const updating = new Set(s.jobs.filter((j) => ['pending', 'downloading', 'installing'].includes(j.status)).map((j) => j.hostname));
-  const behindHosts = new Set(models.flatMap((m) => m.behind.map((n) => n.hostname)));
-  const buckets = { current: 0, updating: 0, behind: 0, offline: 0 };
-  for (const n of s.nodes) {
-    if (updating.has(n.hostname)) buckets.updating++;
-    else if (!n.online) buckets.offline++;
-    else if (behindHosts.has(n.hostname)) buckets.behind++;
-    else buckets.current++;
-  }
+  const model = useMachineModel();
+  const segments = model ? fleetSegments(model).map((seg) => ({ ...seg, onClick: () => showMachines(seg.key) })) : [];
+  const upToDate = segments.length ? segments[0].value : 0;
+  const behindCount = segments.length ? segments.find((x) => x.key === 'behind').value : 0;
+  const offline = segments.length ? segments.find((x) => x.key === 'offline').value : 0;
   const total = Math.max(1, s.nodes.length);
-  const pct = Math.round((buckets.current / total) * 100);
+  const pct = Math.round((upToDate / total) * 100);
   const checked = Math.max(0, ...s.products.map((p) => p.updated_at || 0));
-  const segments = [
-    { key: 'current', label: 'Up to date', value: buckets.current, color: 'var(--ok)', onClick: () => showMachines('all') },
-    { key: 'updating', label: 'Updating now', value: buckets.updating, color: 'var(--accent)', onClick: () => showMachines('updating') },
-    { key: 'behind', label: 'Needs updates', value: buckets.behind, color: 'var(--info)', onClick: () => showMachines('behind') },
-    { key: 'offline', label: 'Offline', value: buckets.offline, color: 'var(--text-3)', onClick: () => showMachines('blocked') },
-  ];
+  const buckets = { current: upToDate, behind: behindCount, offline };
   return html`<section class="card card-pad hero">
     <${Donut} segments=${segments} size=${138} stroke=${15} center=${`${pct}%`} sub="up to date" label=${`${buckets.current} of ${s.nodes.length} machines up to date`} />
     <div class="hero-side">

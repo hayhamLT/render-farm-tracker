@@ -177,6 +177,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .badge.info { background: var(--info-soft); color: var(--info); }
 .badge.accent { background: var(--accent-soft); color: var(--accent); }
 .badge.violet { background: rgba(167, 139, 250, 0.14); color: var(--violet); }
+/* "Waiting on someone else" — not a problem, not done. Quiet on purpose: violet already
+   means "rendering" on the machine views, and both appear in the machine drawer. */
+.tag.pending { background: var(--surface-3); color: var(--text-2); }
 button.badge { cursor: pointer; font-family: inherit; }
 button.badge:hover { filter: brightness(1.2); }
 

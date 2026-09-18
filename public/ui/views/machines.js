@@ -60,6 +60,7 @@ const QUICK = [
   ['behind', 'Needs updates'],
   ['updating', 'Updating'],
   ['failed', 'Failed'],
+  ['offline', 'Offline'],
   ['blocked', "Can't update"],
 ];
 const matchesQuick = (m, q) => {
@@ -67,6 +68,7 @@ const matchesQuick = (m, q) => {
     case 'behind': return m.behind.length > 0;
     case 'updating': return ['installing', 'downloading', 'queued'].includes(m.activity.key);
     case 'failed': return m.failed.length > 0;
+    case 'offline': return !m.node.online;
     case 'blocked': return !!blockedReason(m.node);
     default: return true;
   }
@@ -146,7 +148,23 @@ function BehindCell({ m, model }) {
 }
 
 // The one state a row is coloured by.
-function rowState(m) {
+// ONE picture of the farm, shared by the Updates donut and the Machines donut. They used to
+// each invent their own slices — one had "Offline" but no failures, the other had "Can't update"
+// but no offline — so the same 28 machines added up two different ways depending on the page.
+// Rendering counts as up to date (it's current, just busy); "can't update" is an attribute, not
+// a state, so it stays a filter instead of a slice.
+export function fleetSegments(model) {
+  const by = (k) => model.nodes.filter((m) => rowState(m) === k).length;
+  return [
+    { key: 'all', label: 'Up to date', value: by('current') + by('rendering'), color: 'var(--ok)' },
+    { key: 'updating', label: 'Updating', value: by('updating') + by('queued'), color: 'var(--accent)' },
+    { key: 'behind', label: 'Needs updates', value: by('behind'), color: 'var(--info)' },
+    { key: 'failed', label: 'Failed', value: by('failed'), color: 'var(--bad)' },
+    { key: 'offline', label: 'Offline', value: by('offline'), color: 'var(--text-3)' },
+  ];
+}
+
+export function rowState(m) {
   const { node: n, activity: a } = m;
   if (!n.online) return 'offline';
   if (['installing', 'downloading'].includes(a.key)) return 'updating';
@@ -291,7 +309,7 @@ function AppStatus({ s, node, p }) {
       onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Update ${p.name} on ${node.hostname}` })}><${Icon} name="download" />Update to ${st.target}</button>` : html`<span class="tag info">${st.target} available</span>`;
     case 'major': return canUpdate(p) ? html`<button class="btn sm ghost" onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Install ${p.name} ${st.target} on ${node.hostname}`, subtitle: 'New major — installs next to the current version' })}><${Icon} name="up" />Install ${String(st.target).split('.')[0]}</button>` : html`<span class="tag violet">new ${String(st.target).split('.')[0]}</span>`;
     case 'selfupdate': return selfUpdateBehind(node, p) && nudgeWaiting(s, node, p)
-      ? html`<span class="tag violet" title=${`Adobe's updater was restarted here ${ago(nudgeWaiting(s, node, p), s.now)} — it applies ${st.target} in the background, and the version shows up on a later check-in.`}><${Icon} name="clock" />Asked Adobe</span>`
+      ? html`<span class="tag pending" title=${`Adobe's updater was restarted here ${ago(nudgeWaiting(s, node, p), s.now)} — it applies ${st.target} in the background, and the version shows up on a later check-in.`}><${Icon} name="clock" />Asked Adobe</span>`
       : selfUpdateBehind(node, p)
       ? html`<button class="btn sm" disabled=${!!blockedReason(node)} title=${blockedReason(node) ? `Machine is ${blockedReason(node)}` : `Restarts Adobe's updater so it picks up ${st.target}`}
         onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Update ${p.name} on ${node.hostname}` })}><${Icon} name="refresh" />Update to ${st.target}</button>`
@@ -402,14 +420,12 @@ export function MachinesView() {
     </${PageHeader}>
 
     <section class="card card-pad fleet">
-      <${Donut} size=${118} stroke=${13} segments=${[
-        { key: 'current', label: 'Up to date', value: nodes.filter((m) => rowState(m) === 'current' || rowState(m) === 'rendering').length, color: 'var(--ok)', onClick: () => { quick.value = 'all'; }, active: quick.value === 'all' },
-        { key: 'updating', label: 'Updating', value: counts.updating, color: 'var(--accent)', onClick: () => { quick.value = 'updating'; }, active: quick.value === 'updating' },
-        { key: 'behind', label: 'Needs updates', value: counts.behind, color: 'var(--info)', onClick: () => { quick.value = 'behind'; }, active: quick.value === 'behind' },
-        { key: 'failed', label: 'Failed installs', value: counts.failed, color: 'var(--bad)', onClick: () => { quick.value = 'failed'; }, active: quick.value === 'failed' },
-        { key: 'blocked', label: "Can't update", value: counts.blocked, color: 'var(--text-3)', onClick: () => { quick.value = 'blocked'; }, active: quick.value === 'blocked' },
-      ]} center=${`${online}/${nodes.length}`} sub="online" label=${`${online} of ${nodes.length} machines online`} />
+      <${Donut} size=${118} stroke=${13} segments=${fleetSegments(model).map((seg) => ({
+        ...seg, onClick: () => { quick.value = seg.key; }, active: quick.value === seg.key,
+      }))} center=${`${fleetSegments(model)[0].value}/${nodes.length}`} sub="up to date"
+        label=${`${fleetSegments(model)[0].value} of ${nodes.length} machines up to date`} />
       <div class="fleet-facts">
+        <div><span class="l">Online</span><b class=${online < nodes.length ? 'warn' : ''}>${online}/${nodes.length}</b></div>
         <div><span class="l">Updates waiting</span><b>${nodes.reduce((c, m) => c + m.behind.length, 0)}</b></div>
         <div><span class="l">Rendering now</span><b>${nodes.filter((m) => m.activity.key === 'rendering').length}</b></div>
         <div><span class="l">Restart pending</span><b>${nodes.filter((m) => m.node.online && m.node.pending_reboot).length}</b></div>
