@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.38.0"
+AGENT_VERSION = "2.39.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1540,21 +1540,52 @@ def _parse_mx1_user(text):
 # `mx1 license list` is a fixed-width table; long descriptions are cut by mx1 itself
 # ("Red Giant Complete (render only"), so columns are read by the header's offsets and known
 # licenses get their proper names.
-_LIC_NAMES = {
+_LIC_NAMES = {   # Maxon's own names, as the Maxon App shows them — used only if mx1 gives none
     "bundle_maxonone-release~commercial": "Maxon One",
-    "cinema4d-release~commandline-floating": "Cinema 4D Commandline (floating)",
-    "teamrenderclient~commercial-floating": "Team Render Client (floating)",
-    "teamrender-release~commercial": "Team Render Server",
+    "cinema4d-release~commandline-floating": "C4D Commandline Floating",
+    "teamrenderclient~commercial-floating": "TeamRender Client (Floating)",
+    "teamrender-release~commercial": "TeamRender Commercial",
     "redshift~commercial": "Redshift",
-    "fx.bundle_complete-renderonly": "Red Giant Complete (render-only)",
+    "fx.bundle_complete-renderonly": "Red Giant Complete (render only)",
     "fx.complete~commercial": "Red Giant Complete",
-    "zpad~commercial": "ZBrush for iPad",
+    "zpad~commercial": "ZBrush iPad",
     "zbrush~commercial": "ZBrush",
-    "autograph~lite": "Autograph Lite",
+    "autograph~lite": "Autograph",
     "autograph~commandline": "Autograph Commandline",
     "cinema4d-release~commercial": "Cinema 4D",
 }
 _LIC_RANGE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})\s+(\S+)\s*(.*)$")
+
+
+_MX1_STATE = {1: "licensed", 7: "deactivated"}
+_MX1_METHOD = {3: "floating", 4: "subscription", 6: "perpetual"}
+
+
+def _parse_mx1_licenses_json(raw):
+    """`mx1 license list -j`: one entry per license pool the account owns, with a stable rowId.
+    (Pool SIZES and assignments to other devices live on Maxon's servers, not here.)"""
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    rows = []
+    for e in data:
+        if not isinstance(e, dict) or not str(e.get("name", "")).startswith("net.maxon."):
+            continue
+        lid = e["name"]
+        key = lid.split("license.app.", 1)[-1]
+        st = e.get("state")
+        rows.append({
+            "rowId": e.get("rowId"), "id": lid, "version": e.get("version") or "",
+            "name": e.get("description") or _LIC_NAMES.get(key) or key, "description": e.get("description") or "",
+            "source": e.get("licenseSource") or "", "activated": st == 1, "expired": bool(e.get("hasExpired")),
+            "state": _MX1_STATE.get(st, "state %s" % st), "method": _MX1_METHOD.get(e.get("method"), "method %s" % e.get("method")),
+            "start": (e.get("validFrom") or "")[:10] or None, "end": (e.get("validUntil") or "")[:10] or None,
+            "includes": list(e.get("children") or []), "needsActivation": bool(e.get("needsActivation")),
+        })   # the entry's "jwt" is deliberately never copied
+    return rows
 
 
 def _parse_mx1_licenses(text):
@@ -1603,6 +1634,7 @@ $mx1 = 'C:\Program Files\Maxon\Tools\mx1.exe'
 if (Test-Path $mx1) {
   $r.mx1User = (& $mx1 user info 2>&1 | Out-String)
   $r.mx1Licenses = (& $mx1 license list 2>&1 | Out-String)
+  $r.mx1LicensesJson = (& $mx1 license list -j 2>$null | Out-String)
 }
 '@@JSON@@' + ($r | ConvertTo-Json -Compress -Depth 4)
 """
@@ -1612,7 +1644,7 @@ docs="$HOME/Documents"; mx1='/Library/Application Support/Maxon/Tools/mx1'
 echo "@@DOCS@@$docs"
 [ -f "$docs/ae_render_only_node.txt" ] && echo "@@AERO@@yes" || echo "@@AERO@@no"
 ls "$HOME/Library/Application Support/Adobe/OOBE" 2>/dev/null | sed -n 's/^com\.adobe\.acc\.container\.\(.*\)\.prefs$/@@ADOBEID@@\1/p'
-if [ -x "$mx1" ]; then echo "@@MX1USER@@"; "$mx1" user info 2>&1; echo "@@MX1LIC@@"; "$mx1" license list 2>&1; echo "@@END@@"; fi
+if [ -x "$mx1" ]; then echo "@@MX1USER@@"; "$mx1" user info 2>&1; echo "@@MX1LIC@@"; "$mx1" license list 2>&1; echo "@@MX1JSON@@"; "$mx1" license list -j 2>/dev/null; echo "@@END@@"; fi
 """
 
 
@@ -1655,7 +1687,9 @@ def collect_licenses():
                 info["adobe"] = {"renderOnly": bool(d.get("aeRenderOnly")), "accounts": d.get("adobeIds") or [],
                                  "documents": d.get("documents")}
                 if d.get("mx1User") is not None:
-                    info["maxon"] = {"user": _parse_mx1_user(d.get("mx1User")), "licenses": _parse_mx1_licenses(d.get("mx1Licenses"))}
+                    lic = _parse_mx1_licenses_json(d.get("mx1LicensesJson") or "")
+                    info["maxon"] = {"user": _parse_mx1_user(d.get("mx1User")),
+                                     "licenses": lic if lic is not None else _parse_mx1_licenses(d.get("mx1Licenses"))}
             else:
                 info["userContext"] = out[:200] if not ok else "no data"
         elif IS_MACOS:
@@ -1671,8 +1705,11 @@ def collect_licenses():
                                  "documents": docs.group(1).strip() if docs else None}
                 if "@@MX1USER@@" in out:
                     u = out.split("@@MX1USER@@", 1)[1].split("@@MX1LIC@@", 1)
+                    rest = u[1] if len(u) > 1 else ""
+                    table, _, js = rest.partition("@@MX1JSON@@")
+                    lic = _parse_mx1_licenses_json(js.split("@@END@@", 1)[0].strip())
                     info["maxon"] = {"user": _parse_mx1_user(u[0]),
-                                     "licenses": _parse_mx1_licenses(u[1].split("@@END@@", 1)[0] if len(u) > 1 else "")}
+                                     "licenses": lic if lic is not None else _parse_mx1_licenses(table.split("@@END@@", 1)[0])}
             else:
                 info["userContext"] = out[:200]
     except Exception as e:

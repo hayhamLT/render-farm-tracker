@@ -1133,3 +1133,12 @@ details.quiet[open] > summary { margin-bottom: 10px; }
 .lic-result .icon { width: 13px; height: 13px; flex: none; }
 .lic-result.ok { color: var(--ok); }
 .lic-result.bad { color: var(--bad-text); }
+/* A license pool's holders — each machine a chip with its own actions. */
+.lic-holders { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.lic-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 4px 0 10px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); font-size: 0.86rem; }
+.lic-chip b { font-weight: 600; }
+.lic-chip-more { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 6px; background: none; color: var(--text-3); cursor: pointer; }
+.lic-chip-more:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+.lic-chip-more .icon { width: 14px; height: 14px; }
+.lic-note { font-size: 0.8rem; }
+.lic-note a { color: var(--accent); }

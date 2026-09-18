@@ -64,36 +64,30 @@ function build(s) {
   const counts = new Map();
   for (const m of machines) if (m.account) counts.set(m.account, (counts.get(m.account) || 0) + 1);
   const company = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-  // The seat pool: every seat any machine signed in to the company account can see, once.
-  // A seat is (license id, validity range); whoever has it activated is holding it.
-  const seats = new Map();
+  // The account's license pools, as the farm's machines report them. Each entry (Maxon's rowId)
+  // is one POOL — Maxon One "2/2", Redshift "4/4", Team Render Client "0/10" — and every tracked
+  // machine that has it activated is one of its holders. Pool SIZES and devices without the
+  // tracker exist only on Maxon's servers, so nothing here invents a "free" seat.
+  const entries = new Map();
   for (const m of machines.filter((x) => x.account === company)) {
     for (const l of m.lic) {
-      const k = `${l.id}|${l.start}|${l.end}`;
-      const seat = seats.get(k) || { key: k, ...l, holders: [], seenOn: 0, copies: 0 };
-      seat.seenOn++;
-      if (l.activated) seat.holders.push(m);
-      seats.set(k, seat);
+      const k = l.rowId != null ? `r${l.rowId}` : `${l.id}|${l.start}|${l.end}`;
+      const e = entries.get(k) || { key: k, ...l, holders: [] };
+      if (l.activated && !e.holders.includes(m)) e.holders.push(m);
+      entries.set(k, e);
     }
   }
-  // Identical seats (same id and dates) listed twice on every machine are really two seats.
-  const perMachine = new Map();
-  for (const m of machines.filter((x) => x.account === company)) {
-    const c = new Map();
-    for (const l of m.lic) { const k = `${l.id}|${l.start}|${l.end}`; c.set(k, (c.get(k) || 0) + 1); }
-    for (const [k, v] of c) perMachine.set(k, Math.max(perMachine.get(k) || 0, v));
-  }
-  const pool = [];
-  for (const seat of seats.values()) for (let i = 0; i < (perMachine.get(seat.key) || 1); i++) {
-    pool.push({ ...seat, copy: i, holder: seat.holders[i] || null, days: seat.end ? daysLeft(seat.end, now) : null });
-  }
+  // Floating = checked out on demand, not assigned: the Maxon App files "Red Giant Complete
+  // (render only)" under Floating Licenses even though mx1 calls its method "subscription".
+  const pool = [...entries.values()].map((e) => ({ ...e, floating: /float/i.test(e.method || '') || /renderonly/i.test(e.id || ''), days: e.end && !e.end.startsWith('2099') ? daysLeft(e.end, now) : null }));
   const groups = new Map();
-  for (const seat of pool) {
-    const g = groups.get(seat.name) || { name: seat.name, method: seat.method, seats: [] };
-    g.seats.push(seat); groups.set(seat.name, g);
+  for (const e of pool) {
+    const g = groups.get(e.name) || { name: e.name, entries: [] };
+    g.entries.push(e); groups.set(e.name, g);
   }
-  for (const g of groups.values()) g.seats.sort((a, b) => (a.end || '').localeCompare(b.end || ''));
-  return { machines, company, pool, groups: [...groups.values()].sort((a, b) => b.seats.length - a.seats.length || a.name.localeCompare(b.name)), now };
+  for (const g of groups.values()) g.entries.sort((a, b) => (a.end || '').localeCompare(b.end || ''));
+  const held = (g) => g.entries.reduce((c, e) => c + e.holders.length, 0);
+  return { machines, company, pool, groups: [...groups.values()].sort((a, b) => held(b) - held(a) || a.name.localeCompare(b.name)), now };
 }
 
 // ------------------------------------------------------------------ actions
@@ -106,18 +100,16 @@ async function act(m, action, extra = {}) {
 }
 const seatArg = (seat) => ({ license: { name: seat.id, version: seat.version || '' } });
 
-async function releaseSeat(seat) {
-  const m = seat.holder;
+async function releaseSeat(seat, m) {
   if (!await confirm(`Release the ${seat.name} seat on ${m.n.hostname}? It becomes free for any other machine — anything on ${m.n.hostname} that needs it stops working until it takes a seat again.`,
     { title: 'Release seat', confirmLabel: 'Release', danger: true })) return;
   act(m, 'maxon_release', seatArg(seat));
 }
 
-function MachinePicker({ seat, model, close }) {
+function MachinePicker({ seat, from, model, close }) {
   const [q, setQ] = useState('');
-  const from = seat.holder;
   const options = model.machines
-    .filter((m) => m.account === model.company && m !== from)
+    .filter((m) => m.account === model.company && m !== from && !seat.holders.includes(m))
     .filter((m) => !q || m.n.hostname.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => (b.canSeat - a.canSeat) || a.n.hostname.localeCompare(b.n.hostname));
   const pick = async (m) => {
@@ -128,17 +120,17 @@ function MachinePicker({ seat, model, close }) {
     } catch (e) { toast(e.message, 'error', 8000); }
   };
   return html`<div class="stack" style="gap:12px">
-    <p class="dim" style="margin:0">${from ? html`Released on <b>${from.n.hostname}</b> first; the new machine takes it once that's confirmed.` : 'The machine you pick takes this free seat.'}</p>
+    <p class="dim" style="margin:0">${from ? html`Released on <b>${from.n.hostname}</b> first; the machine you pick takes it once that's confirmed.` : html`The machine you pick takes a seat from this license. If every seat is already assigned (the Maxon App shows how many there are), Maxon refuses and you'll see why here.`}</p>
     <label class="search"><${Icon} name="search" /><input class="field" autofocus placeholder="Find a machine" value=${q} onInput=${(e) => setQ(e.currentTarget.value)} /></label>
     <div class="lic-pick">${options.map((m) => html`<button key=${m.n.id} class="lic-pick-row" disabled=${!m.canSeat} onClick=${() => pick(m)}>
       <${OsStatus} node=${m.n} /><b>${m.n.hostname}</b>
       <span class="grow"></span>
-      <span class="dim">${!m.n.online ? 'offline' : !m.canSeat ? 'agent updating' : m.held.length ? `holds ${m.held.map((l) => l.name).join(', ')}` : 'holds nothing'}</span>
+      <span class="dim">${!m.n.online ? 'offline' : !m.canSeat ? 'agent updating' : m.held.length ? `holds ${[...new Set(m.held.map((l) => l.name))].join(', ')}` : 'holds nothing'}</span>
     </button>`)}</div>
   </div>`;
 }
-const openPicker = (seat, model) => openSheet((close) => html`<${MachinePicker} seat=${seat} model=${model} close=${close} />`,
-  { title: seat.holder ? `Move ${seat.name}` : `Assign ${seat.name}`, subtitle: seat.end ? `Seat valid until ${fmtDate(seat.end)}` : '', width: 520 });
+const openPicker = (seat, model, from = null) => openSheet((close) => html`<${MachinePicker} seat=${seat} from=${from} model=${model} close=${close} />`,
+  { title: from ? `Move ${seat.name} from ${from.n.hostname}` : `Give ${seat.name} to a machine`, subtitle: seat.end && !seat.end.startsWith('2099') ? `License valid until ${fmtDate(seat.end)}` : '', width: 520 });
 
 function TokenSheet({ m, close }) {
   const [token, setToken] = useState('');
@@ -160,11 +152,11 @@ function TokenSheet({ m, close }) {
 }
 
 function machineMenu(e, m, model) {
-  const free = model.pool.filter((s) => !s.holder);
+  const takeable = model.pool.filter((e) => !e.floating && !e.holders.includes(m));
   openMenu(e.currentTarget, [
-    { label: 'Take a free seat…', icon: 'plus', disabled: !m.canSeat || m.account !== model.company || !free.length, onSelect: () => openMenu(e.currentTarget,
-      [...new Map(free.map((s) => [s.name, s])).values()].map((s) => ({ label: s.name, icon: 'key', onSelect: () => act(m, 'maxon_assign', seatArg(s)) }))) },
-    ...m.held.map((l) => ({ label: `Release ${l.name}`, icon: 'x', disabled: !m.canSeat, onSelect: () => releaseSeat({ ...l, holder: m }) })),
+    { label: 'Take a seat…', icon: 'plus', disabled: !m.canSeat || m.account !== model.company || !takeable.length, onSelect: () => openMenu(e.currentTarget,
+      takeable.map((x) => ({ label: `${x.name}${x.end && !x.end.startsWith('2099') ? ` · until ${fmtDate(x.end)}` : ''}`, icon: 'key', onSelect: () => act(m, 'maxon_assign', seatArg(x)) }))) },
+    ...m.held.map((l) => ({ label: `Release ${l.name}`, icon: 'x', disabled: !m.canSeat, onSelect: () => releaseSeat(l, m) })),
     '-',
     { label: 'Refresh Maxon account', icon: 'refresh', disabled: !m.canAct, onSelect: () => act(m, 'maxon_refresh') },
     { label: 'Sign in with a token…', icon: 'key', disabled: !m.canAct, onSelect: () => openSheet((close) => html`<${TokenSheet} m=${m} close=${close} />`, { title: 'Sign in to Maxon', width: 480 }) },
@@ -193,13 +185,12 @@ function Attention({ model }) {
   const { machines, company, pool, now } = model;
   const reported = machines.filter((m) => m.li);
   const items = [];
-  const ending = pool.filter((s) => s.days != null && s.days <= SOON);
+  const ending = pool.filter((e) => e.days != null && e.days <= SOON);
   if (ending.length) {
-    const byDate = new Map(); for (const s of ending) byDate.set(s.end, (byDate.get(s.end) || 0) + 1);
-    const [first] = [...byDate].sort();
-    items.push({ tone: ending.some((s) => s.days <= 14) ? 'bad' : 'warn', icon: 'clock',
-      text: `${plural(ending.length, 'Maxon seat')} end${ending.length === 1 ? 's' : ''} ${fmtDate(first[0])} — in ${plural(daysLeft(first[0], now), 'day')}`,
-      detail: [...new Set(ending.map((s) => s.name))].join(', '), link: ['Maxon account', 'https://my.maxon.net'] });
+    const first = ending.map((e) => e.end).sort()[0];
+    items.push({ tone: ending.some((e) => e.days <= 14) ? 'bad' : 'warn', icon: 'clock',
+      text: `${plural(ending.length, 'Maxon license')} end${ending.length === 1 ? 's' : ''} ${fmtDate(first)} — in ${plural(daysLeft(first, now), 'day')}`,
+      detail: `${[...new Set(ending.map((e) => e.name))].join(', ')} — unless they renew, every seat on them stops`, link: ['Maxon account', 'https://my.maxon.net'] });
   }
   const others = reported.filter((m) => m.account && m.account !== company);
   if (others.length) items.push({ tone: 'warn', icon: 'user', text: `${plural(others.length, 'machine')} signed in with a different Maxon account`,
@@ -224,36 +215,44 @@ function Attention({ model }) {
 }
 
 // ------------------------------------------------------------------ seats view
+function HolderChip({ e, m, model }) {
+  return html`<span class="lic-chip">
+    <${OsStatus} node=${m.n} /><b>${m.n.hostname}</b>
+    <button class="lic-chip-more" aria-label=${`${e.name} on ${m.n.hostname}`} disabled=${!m.canSeat} onClick=${(ev) => openMenu(ev.currentTarget, [
+      { label: 'Move to another machine…', icon: 'send', onSelect: () => openPicker(e, model, m) },
+      { label: `Release from ${m.n.hostname}`, icon: 'x', danger: true, onSelect: () => releaseSeat(e, m) },
+      '-',
+      { label: `Lock to ${m.n.hostname}`, icon: 'shieldOk', onSelect: () => act(m, 'maxon_lock', seatArg(e)) },
+      { label: 'Unlock', icon: 'shieldOff', onSelect: () => act(m, 'maxon_unlock', seatArg(e)) },
+      { label: `Don't auto-activate on ${m.n.hostname}`, icon: 'stop', onSelect: () => act(m, 'maxon_block', seatArg(e)) },
+      { label: 'Allow auto-activation again', icon: 'play', onSelect: () => act(m, 'maxon_unblock', seatArg(e)) },
+    ])}><${Icon} name="chevronDown" /></button>
+  </span>`;
+}
+
 function SeatsView({ model, q }) {
   if (!model.company) return html`<${Empty}>No machine has reported a Maxon sign-in yet.<//>`;
-  const inUse = model.pool.filter((s) => s.holder).length;
-  const groups = model.groups.map((g) => ({ ...g, seats: g.seats.filter((s) => !q || g.name.toLowerCase().includes(q) || (s.holder && s.holder.n.hostname.toLowerCase().includes(q))) }))
-    .filter((g) => g.seats.length);
+  const tracked = model.machines.filter((m) => m.account === model.company).length;
+  const groups = model.groups
+    .map((g) => ({ ...g, entries: g.entries.filter((e) => !q || g.name.toLowerCase().includes(q) || e.holders.some((m) => m.n.hostname.toLowerCase().includes(q))) }))
+    .filter((g) => g.entries.length);
   return html`<div class="stack" style="gap:12px">
     <div class="lic-account"><${Icon} name="key" /><b class="mono">${model.company}</b>
-      <span class="dim">${plural(model.pool.length, 'seat')} · ${inUse} in use · ${plural(model.machines.filter((m) => m.account === model.company).length, 'machine')} signed in</span></div>
-    ${groups.map((g) => { const used = g.seats.filter((s) => s.holder).length; return html`<section key=${g.name} class="card lic-group">
-      <header><b>${g.name}</b><span class="dim">${g.method}</span><span class="grow"></span>
-        <span class="lic-meter" title=${`${used} of ${g.seats.length} in use`}>${g.seats.map((s, i) => html`<i key=${i} class=${s.holder ? 'on' : ''}></i>`)}</span>
-        <span class="dim nowrap">${used}/${g.seats.length} in use</span></header>
-      ${g.seats.map((s) => html`<div key=${s.key + s.copy} class="lic-seat">
-        <span class=${'lic-ends ' + (s.days != null && s.days <= 14 ? 'bad' : s.days != null && s.days <= SOON ? 'warn' : '')}>
-          ${s.end && s.end.startsWith('2099') ? 'Perpetual' : s.end ? `Until ${fmtDate(s.end)}` : '—'}${s.days != null && s.days <= SOON ? html` <small>· ${plural(s.days, 'day')}</small>` : null}</span>
-        <span class="lic-holder">${s.holder ? html`<${OsStatus} node=${s.holder.n} /><b>${s.holder.n.hostname}</b>` : html`<span class="dim">Free</span>`}</span>
-        <span class="grow"></span>
-        ${s.holder
-          ? html`<button class="btn sm" disabled=${!s.holder.canSeat} onClick=${() => openPicker(s, model)}>Move to…</button>
-                 <button class="btn sm ghost" disabled=${!s.holder.canSeat} onClick=${() => releaseSeat(s)}>Release</button>
-                 <button class="btn sm ghost icon" aria-label="More" disabled=${!s.holder.canSeat} onClick=${(e) => openMenu(e.currentTarget, [
-                   { label: `Lock to ${s.holder.n.hostname}`, icon: 'shieldOk', onSelect: () => act(s.holder, 'maxon_lock', seatArg(s)) },
-                   { label: 'Unlock', icon: 'shieldOff', onSelect: () => act(s.holder, 'maxon_unlock', seatArg(s)) },
-                   { label: `Don't auto-activate on ${s.holder.n.hostname}`, icon: 'stop', onSelect: () => act(s.holder, 'maxon_block', seatArg(s)) },
-                   { label: 'Allow auto-activation again', icon: 'play', onSelect: () => act(s.holder, 'maxon_unblock', seatArg(s)) },
-                 ])}><${Icon} name="more" /></button>`
-          : html`<button class="btn sm" onClick=${() => openPicker(s, model)}>Assign to…</button>`}
+      <span class="dim">${plural(model.pool.length, 'license')} · signed in on ${plural(tracked, 'machine')}</span>
+      <span class="grow"></span>
+      <span class="dim lic-note" title="mx1 on each machine only knows what that machine holds">Seat totals and devices without the tracker are in the <a href="https://my.maxon.net" target="_blank" rel="noopener">Maxon App</a></span></div>
+    ${groups.map((g) => html`<section key=${g.name} class="card lic-group">
+      <header><b>${g.name}</b><span class="dim">${[...new Set(g.entries.map((e) => e.method))].join(' · ')}</span><span class="grow"></span>
+        <span class="dim nowrap">${plural(g.entries.reduce((c, e) => c + e.holders.length, 0), 'tracked machine')} holding</span></header>
+      ${g.entries.map((e) => html`<div key=${e.key} class="lic-seat">
+        <span class=${'lic-ends ' + (e.days != null && e.days <= 14 ? 'bad' : e.days != null && e.days <= SOON ? 'warn' : '')}>
+          ${!e.end ? '—' : e.end.startsWith('2099') ? 'Perpetual' : `Until ${fmtDate(e.end)}`}${e.days != null && e.days <= SOON ? html` <small>· ${plural(e.days, 'day')}</small>` : null}</span>
+        <span class="lic-holders">${e.holders.length ? e.holders.map((m) => html`<${HolderChip} key=${m.n.id} e=${e} m=${m} model=${model} />`)
+          : html`<span class="dim">${e.floating ? 'Floating — taken automatically while a render needs it' : 'Not held by any tracked machine'}</span>`}</span>
+        ${e.floating ? null : html`<button class="btn sm" onClick=${() => openPicker(e, model)}><${Icon} name="plus" />Give to…</button>`}
       </div>`)}
-    </section>`; })}
-    ${!groups.length ? html`<${Empty}>No seats match.<//>` : null}
+    </section>`)}
+    ${!groups.length ? html`<${Empty}>No licenses match.<//>` : null}
   </div>`;
 }
 
@@ -273,7 +272,7 @@ function MachinesView({ model, q }) {
         : !m.account ? html`<span class="warn-text">not signed in</span>`
         : m.account === model.company ? html`<span class="dim">company account</span>`
         : html`<span class="warn-text mono" title="Not the account the rest of the farm uses">${m.account}</span>`}</td>
-      <td>${m.held.length ? m.held.map((l) => html`<span key=${l.id + l.end} class="tag">${l.name}</span> `) : html`<span class="dim">—</span>`}</td>
+      <td>${m.held.length ? [...new Set(m.held.map((l) => l.name))].map((nm) => html`<span key=${nm} class="tag">${nm}</span> `) : html`<span class="dim">—</span>`}</td>
       <td class="nowrap">${m.renderOnly == null ? html`<span class="dim">—</span>` : m.renderOnly ? html`<span class="dim">render-only</span>` : html`<span class="warn-text">uses a seat</span>`}</td>
       <td class="right"><button class="btn sm ghost icon" aria-label=${`Actions for ${m.n.hostname}`} onClick=${(e) => machineMenu(e, m, model)}><${Icon} name="more" /></button></td>
     </tr>`)}</tbody>
