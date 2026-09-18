@@ -19,6 +19,8 @@ const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
 const reachability = require('./lib/reachability');
 const sourceHealth = require('./lib/source_health');
+const { createAdobe } = require('./lib/adobe_umapi');
+const adobe = createAdobe(() => config);
 sourceHealth.init(db);
 const { createRollouts } = require('./lib/rollouts');
 const { createAsk } = require('./lib/ask');
@@ -266,7 +268,9 @@ if (!config.downloadDir || path.resolve(config.downloadDir) === path.resolve(INS
 }
 
 function saveConfig() {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+  // mode 600: config.json can hold the Adobe API secret, so only this account may read it.
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* best effort */ }
 }
 if (configDirty) saveConfig();
 
@@ -3050,6 +3054,33 @@ const server = http.createServer(async (req, res) => {
       outstandingLicense.set(id, { nodeId: node.id, action, arg, tries: 1, sentAt: Date.now() });
       logEvent('node', `Licenses: ${LICENSE_ACTIONS[action]}${arg ? ` (${arg.name.split('license.app.').pop()})` : ''} requested for ${node.hostname}`);
       return sendJson(res, 200, { ok: true, id, hostname: node.hostname });
+    }
+
+    // Adobe Admin Console connection (official User Management API). The secret is write-only:
+    // it goes into config.json (mode 600) and is never included in any response.
+    if (req.method === 'GET' && p === '/api/adobe') return sendJson(res, 200, adobe.status());
+    if (req.method === 'POST' && p === '/api/adobe/credentials') {
+      const b = await readBody(req);
+      const orgId = String(b.orgId || '').trim(), clientId = String(b.clientId || '').trim();
+      const clientSecret = String(b.clientSecret || '').trim(), scopes = String(b.scopes || '').trim();
+      if (!/^[A-F0-9]{24}@AdobeOrg$/i.test(orgId)) return sendJson(res, 400, { error: 'The Organization ID looks like 24 letters/digits followed by @AdobeOrg.' });
+      if (!/^[A-Za-z0-9]{16,64}$/.test(clientId)) return sendJson(res, 400, { error: "That doesn't look like a Client ID." });
+      if (clientSecret.length < 16 || /\s/.test(clientSecret)) return sendJson(res, 400, { error: "That doesn't look like a Client Secret." });
+      if (scopes && !/^[A-Za-z0-9_.,\s-]+$/.test(scopes)) return sendJson(res, 400, { error: 'Scopes: copy them exactly as the Developer Console lists them, comma-separated.' });
+      config.adobe = { orgId, clientId, clientSecret, scopes: scopes.replace(/\s+/g, '') || undefined };
+      saveConfig();
+      adobe.forget();
+      logEvent('settings', `Adobe Admin Console connection saved (org ${orgId})`);
+      return sendJson(res, 200, { ok: true, test: await adobe.test(), status: adobe.status() });
+    }
+    if (req.method === 'POST' && p === '/api/adobe/test') {
+      if (!adobe.configured()) return sendJson(res, 400, { error: 'Not connected yet.' });
+      return sendJson(res, 200, { ok: true, test: await adobe.test(), status: adobe.status() });
+    }
+    if (req.method === 'DELETE' && p === '/api/adobe/credentials') {
+      delete config.adobe; saveConfig(); adobe.forget();
+      logEvent('settings', 'Adobe Admin Console connection removed');
+      return sendJson(res, 200, { ok: true, status: adobe.status() });
     }
 
     // Move a Maxon seat between machines: release it where it is, then take it on the target.

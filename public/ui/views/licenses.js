@@ -11,10 +11,10 @@
 // never stores or sends passwords; a Maxon login token lives in server memory only until the
 // machine collects it. Adobe seats for people are assigned in Adobe's Admin Console — linked.
 import { html } from '../lib/html.js';
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
 import { signal } from '@preact/signals-core';
 import { farm, refresh } from '../lib/store.js';
-import { post } from '../lib/api.js';
+import { get, post, del } from '../lib/api.js';
 import { go } from '../lib/router.js';
 import { openMenu, openSheet, confirm, toast, pref } from '../lib/ui.js';
 import { ago, plural, parseJSON } from '../lib/format.js';
@@ -47,7 +47,7 @@ function build(s) {
     const sessions = (li && li.sessions) || [];
     return {
       n, li, lic, now,
-      last: (parseJSON(n.license_action) || []).slice(-1)[0] || null,
+      last: cleanResult((parseJSON(n.license_action) || []).slice(-1)[0]),
       account: (mx && mx.user && mx.user.account) || null,
       hasMaxon: !!mx,
       held: lic.filter((l) => l.activated),
@@ -289,6 +289,72 @@ function MachinesView({ model, q }) {
   </table></div>`;
 }
 
+// Results saved before the agent stripped it can still carry PowerShell's hidden progress data ("#< CLIXML <Objs…").
+function cleanResult(r) {
+  if (!r) return null;
+  return { ...r, message: String(r.message || '').split('#< CLIXML')[0].replace(/\s+/g, ' ').trim() };
+}
+
+// ------------------------------------------------------------------ adobe view
+// Adobe licenses belong to people (named users) and are handed out in the Admin Console. Adobe's
+// official User Management API reads and changes exactly that — so this connects to it. Only the
+// connection exists so far; seat views get built against your organization's real answers.
+function AdobeView({ model }) {
+  const [st, setSt] = useState(null);
+  const [f, setF] = useState({ orgId: '', clientId: '', clientSecret: '', scopes: 'openid,AdobeID,user_management_sdk' });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { get('/api/adobe').then(setSt).catch(() => setSt({ configured: false })); }, []);
+  const set = (k) => (e) => setF({ ...f, [k]: e.currentTarget.value });
+  const connect = async () => {
+    setBusy(true);
+    try { const r = await post('/api/adobe/credentials', f); setSt(r.status); setF({ ...f, clientSecret: '' });
+      toast(r.test.ok ? 'Connected to your Adobe Admin Console.' : `Saved, but Adobe said: ${r.test.message}`, r.test.ok ? 'success' : 'error', 9000); }
+    catch (e) { toast(e.message, 'error', 9000); }
+    setBusy(false);
+  };
+  const retest = async () => { setBusy(true); try { const r = await post('/api/adobe/test'); setSt(r.status); } catch (e) { toast(e.message, 'error', 8000); } setBusy(false); };
+  const forget = async () => {
+    if (!await confirm('Remove the Adobe connection from the tracker? The secret is deleted from the server. (To revoke it at Adobe too, delete the credential in Admin Console → Users → API credentials.)',
+      { title: 'Disconnect Adobe', confirmLabel: 'Disconnect', danger: true })) return;
+    const r = await del('/api/adobe/credentials'); setSt(r.status);
+  };
+  const ae = model.machines.filter((m) => m.renderOnly != null);
+  const aeOnly = ae.filter((m) => m.renderOnly);
+  const t = st && st.lastTest;
+  return html`<div class="stack" style="gap:12px">
+    ${ae.length ? html`<section class="card card-pad stack" style="gap:10px">
+      <div class="row" style="gap:10px"><${Icon} name="film" /><b>After Effects on the farm</b></div>
+      <p class="dim" style="margin:0">${aeOnly.length} of ${ae.length} reporting machines are render-only nodes (they render without an Adobe sign-in). The others run After Effects in normal mode, which needs someone signed in with an Adobe license — which person, and which license, is exactly what the Admin Console connection below will show.</p>
+    </section>` : null}
+    ${!st ? html`<${Empty}>Checking…<//>` : st.configured ? html`<section class="card card-pad stack" style="gap:12px">
+      <div class="row" style="gap:10px"><span class=${'lic-dot ' + (t && t.ok ? 'on' : '')}></span><b>Adobe Admin Console connected</b>
+        <span class="dim mono" style="font-size:.84rem">${st.orgId} · Client ${st.clientId}</span><span class="grow"></span>
+        <button class="btn sm" disabled=${busy} onClick=${retest}><${Icon} name=${busy ? 'spinner' : 'refresh'} cls=${busy ? 'spin' : ''} />Test again</button>
+        <button class="btn sm ghost" onClick=${forget}>Disconnect</button></div>
+      ${t ? html`<div class=${'lic-result ' + (t.ok ? 'ok' : 'bad')} style="max-width:none;font-size:.88rem"><${Icon} name=${t.ok ? 'check' : 'alert'} />
+        ${t.ok ? `Adobe answered: ${t.users}${t.usersMore ? '+' : ''} users and ${t.productProfiles} product profiles (${t.groups}${t.groupsMore ? '+' : ''} groups in total) on the first page.` : t.message}
+        <span class="dim"> · ${ago(t.at, model.now)}</span></div>` : null}
+      <p class="dim" style="margin:0;font-size:.84rem">Next: who holds which Adobe license, license counts per product profile, and moving a license between people — built on these real answers.</p>
+    </section>` : html`<section class="card card-pad stack" style="gap:14px">
+      <b>Connect your Adobe Admin Console</b>
+      <ol class="lic-steps">
+        <li>You need to be a <b>System Admin</b> in the <a href="https://adminconsole.adobe.com" target="_blank" rel="noopener">Adobe Admin Console</a>.</li>
+        <li>In the <a href="https://developer.adobe.com/console" target="_blank" rel="noopener">Adobe Developer Console</a>: <b>Create new project</b> → <b>Add API</b> → <b>User Management API</b> → <b>OAuth Server-to-Server</b>.</li>
+        <li>On the credential's page, copy the <b>Client ID</b>, <b>Client Secret</b>, <b>Organization ID</b> and <b>Scopes</b> into the fields below.</li>
+      </ol>
+      <div class="lic-form">
+        <label>Organization ID<input class="field mono" placeholder="…@AdobeOrg" value=${f.orgId} onInput=${set('orgId')} /></label>
+        <label>Client ID<input class="field mono" autocomplete="off" value=${f.clientId} onInput=${set('clientId')} /></label>
+        <label>Client Secret<input class="field mono" type="password" autocomplete="new-password" value=${f.clientSecret} onInput=${set('clientSecret')} /></label>
+        <label>Scopes<input class="field mono" value=${f.scopes} onInput=${set('scopes')} /></label>
+      </div>
+      <p class="dim" style="margin:0;font-size:.82rem">The secret stays on the tracker server (in its private config, readable only by the tracker's account) and is never shown again or sent to any browser. You can revoke it any time in Admin Console → Users → API credentials.</p>
+      <div class="row" style="justify-content:flex-end"><button class="btn primary" disabled=${busy || !f.orgId || !f.clientId || !f.clientSecret} onClick=${connect}>
+        <${Icon} name=${busy ? 'spinner' : 'key'} cls=${busy ? 'spin' : ''} />Connect and test</button></div>
+    </section>`}
+  </div>`;
+}
+
 // ------------------------------------------------------------------ page
 export function LicensesView() {
   const s = farm.value;
@@ -304,12 +370,12 @@ export function LicensesView() {
     <${Attention} model=${model} />
     <div class="row lic-bar">
       <div class="seg" role="tablist" aria-label="View">
-        ${[['seats', 'Maxon seats'], ['machines', 'Machines']].map(([k, l]) => html`<button key=${k} role="tab" aria-selected=${view.value === k} class=${view.value === k ? 'on' : ''} onClick=${() => { view.value = k; }}>${l}</button>`)}
+        ${[['seats', 'Maxon seats'], ['adobe', 'Adobe'], ['machines', 'Machines']].map(([k, l]) => html`<button key=${k} role="tab" aria-selected=${view.value === k} class=${view.value === k ? 'on' : ''} onClick=${() => { view.value = k; }}>${l}</button>`)}
       </div>
       <span class="grow"></span>
       ${waiting ? html`<span class="dim" style="font-size:.84rem">${plural(waiting, 'machine')} still reporting…</span>` : null}
       <label class="search"><${Icon} name="search" /><input class="field" placeholder=${view.value === 'seats' ? 'Product or machine' : 'Machine or account'} value=${search.value} onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:220px" /></label>
     </div>
-    ${view.value === 'seats' ? html`<${SeatsView} model=${model} q=${q} />` : html`<${MachinesView} model=${model} q=${q} />`}
+    ${view.value === 'seats' ? html`<${SeatsView} model=${model} q=${q} />` : view.value === 'adobe' ? html`<${AdobeView} model=${model} />` : html`<${MachinesView} model=${model} q=${q} />`}
   </div>`;
 }
