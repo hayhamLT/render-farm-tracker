@@ -118,7 +118,7 @@ function AppRow({ m, s }) {
           { value: m.waiting.length, color: 'var(--text-3)', label: 'waiting on Adobe' },
           { value: m.behind.length, color: 'var(--info)', label: 'behind' },
         ]} />
-        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.waiting.length ? html` · <span class="dim" title=${m.waiting.map((n) => n.hostname).join(', ')}>${m.waiting.length} waiting on Adobe</span>` : ''}${m.p.updated_at ? html` · <span class="dim">checked ${ago(m.p.updated_at, s.now)}</span>` : ''}</span>
+        <span><b>${m.current.length}</b>/${m.installed.length} current${m.updating.length ? html` · <span style="color:var(--accent)">${m.updating.length} updating</span>` : ''}${m.waiting.length ? html` · <span class="dim" title=${m.waiting.map((n) => n.hostname).join(', ')}>${m.waiting.length} waiting on Adobe</span>` : ''}${s.lastVersionCheck ? html` · <span class="dim">checked ${ago(s.lastVersionCheck, s.now)}</span>` : ''}</span>
       </div>
       <div class="ur-actions" onClick=${(e) => e.stopPropagation()}>
         ${current
@@ -219,7 +219,7 @@ function Hero({ s, models, updateCount, updateAll, appsBehind }) {
   const offline = segments.length ? segments.find((x) => x.key === 'offline').value : 0;
   const total = Math.max(1, s.nodes.length);
   const pct = Math.round((upToDate / total) * 100);
-  const checked = Math.max(0, ...s.products.map((p) => p.updated_at || 0));
+  const checked = s.lastVersionCheck || 0;
   const buckets = { current: upToDate, behind: behindCount, offline };
   return html`<section class="card card-pad hero">
     <${Donut} segments=${segments} size=${138} stroke=${15} center=${`${pct}%`} sub="up to date" label=${`${buckets.current} of ${s.nodes.length} machines up to date`} />

@@ -289,7 +289,7 @@ export function CatalogView() {
             <div class="ac-ver">
               <span class="l">Latest</span>
               <span class="mono"><${Latest} p=${p} /></span>
-              ${p.updated_at ? html`<span class="dim">checked ${ago(p.updated_at, s.now)}</span>` : null}
+              ${s.lastVersionCheck ? html`<span class="dim">checked ${ago(s.lastVersionCheck, s.now)}</span>` : null}
             </div>
             <div class="ac-cov">
               ${cv.have ? html`<${StackBar} height=${6} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} />

@@ -532,6 +532,10 @@ async function checkCustomVersions() {
   return { bumped, fetched };
 }
 
+// When the version check last ran to completion — shown as "last version check". Products'
+// updated_at only moves when a version is bumped OR the app's settings are edited, so it
+// was a poor stand-in: turning auto-deploy on reset it and made the checks look 11 h stale.
+let lastVersionCheck = null;
 function runMaxonVersionCheck() {
   checkMaxonVersions(db, logEvent, config)
     .then((bumped) => {
@@ -547,6 +551,7 @@ function runMaxonVersionCheck() {
     .then((r) => {
       if (r.bumped.length || r.fetched.length) console.log('Custom products:', JSON.stringify(r));
       if (r.bumped.length) notifySlack(`🆕 New version detected: ${r.bumped.join(', ')}`);
+      lastVersionCheck = Date.now();
     })
     .catch((e) => console.error('version/installer check failed:', e.message));
 }
@@ -1651,6 +1656,7 @@ function fullState() {
     now,
     monitoring: { active: config.monitoringActive },
     latestAgentVersion: LATEST_AGENT_VERSION,   // newest Beacon the server serves — flags out-of-date agents
+    lastVersionCheck,                            // when the version check last completed (null until the first run)
     maxConcurrentInstalls: config.maxConcurrentInstalls || 4,
     slackWebhook: config.slackWebhook || '',
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
