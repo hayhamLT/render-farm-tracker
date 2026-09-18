@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.31.2"
+AGENT_VERSION = "2.32.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -175,6 +175,12 @@ def ensure_task_watchdog():
     StartWhenAvailable) that fires regardless of how the machine powered on, plus the
     AtStartup trigger. The single-instance mutex makes a re-fire a no-op when the agent
     is already alive. Idempotent (re-set on each agent start); best-effort, never raises.
+
+    Also opens the task so a non-admin user can START it (it still RUNS as SYSTEM, and a
+    standard user still can't change or delete it). A task registered by SYSTEM is
+    admin-only by default and isn't even visible to other users, so remote repair — a
+    Deadline job, which runs as whoever is logged in — died on "Access is denied" and a
+    machine whose agent had stopped could only be revived by hand (RAZER-01, Sep 2026).
     """
     if not IS_WINDOWS:
         return
@@ -184,7 +190,10 @@ def ensure_task_watchdog():
         "$boot=New-ScheduledTaskTrigger -AtStartup;"
         "$beat=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1) "
         "-RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650);"
-        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger @($boot,$beat) | Out-Null}"
+        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger @($boot,$beat) | Out-Null;"
+        "try{$svc=New-Object -ComObject Schedule.Service;$svc.Connect();"
+        "$svc.GetFolder('\\').GetTask('TrackerAgentElevated')"
+        ".SetSecurityDescriptor('D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;GRGX;;;AU)',0)}catch{}}"
     )
     try:
         import base64

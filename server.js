@@ -1263,6 +1263,16 @@ Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manag
   -Name HiberbootEnabled -Value 0 -Type DWord -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName "TrackerAgentElevated" -Action $act -Trigger @($boot,$beat) \`
   -Principal $prin -Settings $set -Force | Out-Null
+# Let any logged-in user START this task (it still RUNS as SYSTEM). Without this, a task
+# registered by SYSTEM can only be started by an admin — so when the agent dies, nothing
+# short of someone typing an admin password can revive it, and remote repair (a Deadline
+# job, which runs as the desktop user) fails with "Access is denied". GA for Admins/SYSTEM,
+# read+execute for authenticated users.
+try {
+  $svc = New-Object -ComObject Schedule.Service; $svc.Connect()
+  $svc.GetFolder("\\").GetTask("TrackerAgentElevated").SetSecurityDescriptor(
+    "D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;GRGX;;;AU)", 0)
+} catch { }
 Start-ScheduledTask -TaskName "TrackerAgentElevated"
 Write-Host "Elevated tracker agent installed as SYSTEM (headless, highest privileges) on $env:COMPUTERNAME — runs with no login required; installs run without UAC."
 `;
