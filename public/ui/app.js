@@ -13,7 +13,6 @@ import { MachinesView } from './views/machines.js';
 import { UpdatesView } from './views/updates.js';
 import { HistoryView } from './views/history.js';
 import { CatalogView } from './views/catalog.js';
-import { LicensesView } from './views/licenses.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
 import { Palette } from './components/palette.js';
@@ -29,7 +28,6 @@ const ROUTES = [
   { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
   { name: 'history', label: 'History', icon: 'activity', key: 'h', view: () => html`<${HistoryView} />` },
   { name: 'catalog', label: 'Apps', icon: 'package', key: 'a', view: () => html`<${CatalogView} />` },
-  { name: 'licenses', label: 'Licenses', icon: 'key', key: 'l', view: () => html`<${LicensesView} />` },
   { name: 'settings', label: 'Settings', icon: 'sliders', key: 's', view: () => html`<${SettingsView} />` },
   { name: 'help', label: 'Help', icon: 'help', key: '?', view: () => html`<${HelpView} />` },
 ];

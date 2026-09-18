@@ -19,8 +19,6 @@ const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
 const reachability = require('./lib/reachability');
 const sourceHealth = require('./lib/source_health');
-const { createAdobe } = require('./lib/adobe_umapi');
-const adobe = createAdobe(() => config);
 sourceHealth.init(db);
 const { createRollouts } = require('./lib/rollouts');
 const { createAsk } = require('./lib/ask');
@@ -268,7 +266,7 @@ if (!config.downloadDir || path.resolve(config.downloadDir) === path.resolve(INS
 }
 
 function saveConfig() {
-  // mode 600: config.json can hold the Adobe API secret, so only this account may read it.
+  // mode 600: config.json holds the tracker's settings and tokens, so only this account may read it.
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* best effort */ }
 }
@@ -1836,54 +1834,6 @@ function reconcileRunning(node, body, now) {
   return [...stop];
 }
 
-// Licenses-tab actions an agent can carry out (2.37.0+), and how the log names them.
-const LICENSE_ACTIONS = {
-  maxon_refresh: 'refresh the Maxon account',
-  maxon_logout: 'sign out of Maxon',
-  maxon_login_token: 'sign in to Maxon with a login token',
-  ae_render_only_on: "make After Effects a render-only node",
-  ae_render_only_off: "turn off After Effects' render-only mode",
-  win_logoff_disconnected: 'log off disconnected Windows sessions',
-  maxon_release: 'release a Maxon seat',
-  maxon_assign: 'take a Maxon seat',
-  maxon_lock: 'lock a Maxon seat to the machine',
-  maxon_unlock: 'unlock a Maxon seat',
-  maxon_block: 'stop a Maxon license auto-activating',
-  maxon_unblock: 'let a Maxon license auto-activate again',
-};
-const SEAT_ACTIONS = new Set(['maxon_release', 'maxon_assign', 'maxon_lock', 'maxon_unlock', 'maxon_block', 'maxon_unblock']);
-const MAXON_LICENSE = /^net\.maxon\.license\.[A-Za-z0-9._~-]+$/;
-// "Move a seat": release on one machine, and only once that's CONFIRMED, take it on another.
-// Keyed by the release action's id; lives in memory (a restart just means asking again).
-const pendingMoves = new Map();
-// A license action is delivered once, but only COUNTS once the machine reports a result for it.
-// If the agent restarts in between (its own self-update did exactly that to the first live test,
-// Sep 18), the action is lost in memory — so it stays here and is re-sent after 3 quiet minutes,
-// up to 3 times. Token actions keep their token here too (memory only), for the same reason.
-const outstandingLicense = new Map();   // action id -> { nodeId, action, arg, tries, sentAt }
-const LICENSE_RESEND_MS = 3 * 60 * 1000;
-// Maxon login tokens wait here — in memory only — until the agent collects them, then they're
-// gone. A restart drops any that weren't collected; the action just has to be asked for again.
-const licenseSecrets = new Map();
-setInterval(() => { const cut = Date.now() - 15 * 60 * 1000; for (const [k, v] of licenseSecrets) if (v.at < cut) licenseSecrets.delete(k); }, 60 * 1000).unref();
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, o] of outstandingLicense) {
-    if (now - o.sentAt < LICENSE_RESEND_MS) continue;
-    const host = (db.prepare('SELECT hostname FROM nodes WHERE id = ?').get(o.nodeId) || {}).hostname || `#${o.nodeId}`;
-    if (o.tries >= 3) {
-      outstandingLicense.delete(id); licenseSecrets.delete(id);
-      db.prepare('UPDATE nodes SET license_action = ? WHERE id = ?').run(JSON.stringify([{ id, action: o.action, ok: false,
-        message: `${host} never reported back after 3 tries — is its agent running?`, at: now }]), o.nodeId);
-      logEvent('node', `Licenses: ${LICENSE_ACTIONS[o.action] || o.action} on ${host} gave up — no answer after 3 tries`);
-      continue;
-    }
-    o.tries++; o.sentAt = now;
-    commands.queue(o.nodeId, 'license', { id, action: o.action, arg: o.action === 'maxon_login_token' ? null : o.arg });
-    logEvent('node', `Licenses: re-sending ${LICENSE_ACTIONS[o.action] || o.action} to ${host} (no answer yet — try ${o.tries} of 3)`);
-  }
-}, 30 * 1000).unref();
-
 // Who must have signed each app's installer before an agent will run it (agent 2.36+). Read off
 // the farm's real installers on Sep 18, 2026 — Authenticode subject on Windows, Apple Team ID on
 // macOS — not guessed. Apps not listed (your own custom apps) carry no expectation: the agent
@@ -2044,29 +1994,6 @@ function handleCheckin(body) {
         at: now,
       }), node.id);
     }
-    if (hh.licenses && typeof hh.licenses === 'object') {
-      db.prepare('UPDATE nodes SET license_info = ? WHERE id = ?').run(JSON.stringify(hh.licenses).slice(0, 60000), node.id);
-    }
-    if (Array.isArray(hh.licenseActions) && hh.licenseActions.length) {
-      const results = hh.licenseActions.slice(0, 10).map((r) => ({
-        id: String(r.id || ''), action: String(r.action || ''), ok: !!r.ok, at: now,
-        message: String(r.message || '').split('#< CLIXML')[0].replace(/\s+/g, ' ').trim().slice(0, 400),   // PowerShell progress noise
-      }));
-      db.prepare('UPDATE nodes SET license_action = ? WHERE id = ?').run(JSON.stringify(results), node.id);
-      for (const r of results) logEvent('node', `Licenses on ${node.hostname}: ${LICENSE_ACTIONS[r.action] || r.action} — ${r.ok ? 'done' : 'failed'}: ${r.message}`);
-      for (const r of results) { outstandingLicense.delete(r.id); licenseSecrets.delete(r.id); }
-      for (const r of results) {
-        const mv = pendingMoves.get(r.id);
-        if (!mv) continue;
-        pendingMoves.delete(r.id);
-        const label = mv.name.split('license.app.').pop();
-        if (!r.ok) { logEvent('node', `Licenses: move of ${label} to ${mv.toHost} stopped — releasing it on ${mv.fromHost} failed`); continue; }
-        const nid = crypto.randomBytes(8).toString('hex');
-        commands.queue(mv.to, 'license', { id: nid, action: 'maxon_assign', arg: { name: mv.name, version: mv.version } });
-        outstandingLicense.set(nid, { nodeId: mv.to, action: 'maxon_assign', arg: { name: mv.name, version: mv.version }, tries: 1, sentAt: Date.now() });
-        logEvent('node', `Licenses: ${label} released on ${mv.fromHost} — now taking it on ${mv.toHost}`);
-      }
-    }
     if (hh.deadlineFix && typeof hh.deadlineFix === 'object') {
       const fx = { ok: !!hh.deadlineFix.ok, message: String(hh.deadlineFix.message || '').slice(0, 500), at: now };
       db.prepare('UPDATE nodes SET deadline_fix = ? WHERE id = ?').run(JSON.stringify(fx), node.id);
@@ -2222,15 +2149,6 @@ function handleCheckin(body) {
     shutdown: cmds.some((c) => c.kind === 'shutdown') || undefined,
     // Make Deadline start by itself (dashboard "Fix Deadline startup"), agents 2.31.0+.
     deadlineFix: cmds.some((c) => c.kind === 'deadline_fix') || undefined,
-    // Licenses-tab actions (agents 2.37.0+). A login token is never stored: it waits in memory
-    // and is attached here, at delivery, then forgotten.
-    licenseActions: (() => {
-      const la = cmds.filter((c) => c.kind === 'license').map((c) => {
-        const arg = licenseSecrets.has(c.payload.id) ? licenseSecrets.get(c.payload.id).token : c.payload.arg;
-        return { id: c.payload.id, action: c.payload.action, arg };
-      });
-      return la.length ? la : undefined;
-    })(),
     // One-time fleet migration to a new tracker server (gated by config.rehome).
     rehome: rehomeFor(hostname),
     // User-added (custom) products + their detection patterns, so the agent can detect them
@@ -3021,93 +2939,6 @@ const server = http.createServer(async (req, res) => {
       commands.queue(node.id, 'deadline_fix');
       logEvent('node', `Deadline startup fix requested for ${node.hostname}`);
       return sendJson(res, 200, { ok: true, hostname: node.hostname });
-    }
-
-    // Licenses tab: queue an action for a machine's agent (runs in the signed-in user's session).
-    const nodeLic = p.match(/^\/api\/nodes\/(\d+)\/license$/);
-    if (req.method === 'POST' && nodeLic) {
-      const b = await readBody(req);
-      const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeLic[1]));
-      if (!node) return sendJson(res, 404, { error: 'no such node' });
-      const action = String(b.action || '');
-      if (!LICENSE_ACTIONS[action]) return sendJson(res, 400, { error: `unknown action ${action}` });
-      if (action === 'win_logoff_disconnected' && node.os !== 'windows') return sendJson(res, 400, { error: 'Only applies to Windows machines.' });
-      const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
-      if (!online) return sendJson(res, 400, { error: `${node.hostname} is offline.` });
-      if (!node.agent_version || cmpVersionServer(node.agent_version, '2.37.0') < 0) {
-        return sendJson(res, 400, { error: `${node.hostname}'s agent (${node.agent_version || 'unknown'}) doesn't support this yet — it updates itself within a few minutes.` });
-      }
-      let arg = null;
-      if (SEAT_ACTIONS.has(action)) {
-        const name = String((b.license && b.license.name) || '');
-        const version = String((b.license && b.license.version) || '');
-        if (!MAXON_LICENSE.test(name) || !/^[A-Za-z0-9._-]*$/.test(version)) return sendJson(res, 400, { error: 'Not a Maxon license name.' });
-        arg = { name, version, block: !!(b.license && b.license.block) };
-      }
-      const id = crypto.randomBytes(8).toString('hex');
-      if (action === 'maxon_login_token') {
-        const token = String(b.token || '').trim();
-        if (!/^[^\s'"]{8,4096}$/.test(token)) return sendJson(res, 400, { error: "That doesn't look like a Maxon login token." });
-        licenseSecrets.set(id, { token, at: Date.now() });      // memory only — never the database or the log
-      }
-      commands.queue(node.id, 'license', { id, action, arg });
-      outstandingLicense.set(id, { nodeId: node.id, action, arg, tries: 1, sentAt: Date.now() });
-      logEvent('node', `Licenses: ${LICENSE_ACTIONS[action]}${arg ? ` (${arg.name.split('license.app.').pop()})` : ''} requested for ${node.hostname}`);
-      return sendJson(res, 200, { ok: true, id, hostname: node.hostname });
-    }
-
-    // Adobe Admin Console connection (official User Management API). The secret is write-only:
-    // it goes into config.json (mode 600) and is never included in any response.
-    if (req.method === 'GET' && p === '/api/adobe') return sendJson(res, 200, adobe.status());
-    if (req.method === 'POST' && p === '/api/adobe/credentials') {
-      const b = await readBody(req);
-      const orgId = String(b.orgId || '').trim(), clientId = String(b.clientId || '').trim();
-      const clientSecret = String(b.clientSecret || '').trim(), scopes = String(b.scopes || '').trim();
-      if (!/^[A-F0-9]{24}@AdobeOrg$/i.test(orgId)) return sendJson(res, 400, { error: 'The Organization ID looks like 24 letters/digits followed by @AdobeOrg.' });
-      if (!/^[A-Za-z0-9]{16,64}$/.test(clientId)) return sendJson(res, 400, { error: "That doesn't look like a Client ID." });
-      if (clientSecret.length < 16 || /\s/.test(clientSecret)) return sendJson(res, 400, { error: "That doesn't look like a Client Secret." });
-      if (scopes && !/^[A-Za-z0-9_.,\s-]+$/.test(scopes)) return sendJson(res, 400, { error: 'Scopes: copy them exactly as the Developer Console lists them, comma-separated.' });
-      config.adobe = { orgId, clientId, clientSecret, scopes: scopes.replace(/\s+/g, '') || undefined };
-      saveConfig();
-      adobe.forget();
-      logEvent('settings', `Adobe Admin Console connection saved (org ${orgId})`);
-      return sendJson(res, 200, { ok: true, test: await adobe.test(), status: adobe.status() });
-    }
-    if (req.method === 'POST' && p === '/api/adobe/test') {
-      if (!adobe.configured()) return sendJson(res, 400, { error: 'Not connected yet.' });
-      return sendJson(res, 200, { ok: true, test: await adobe.test(), status: adobe.status() });
-    }
-    if (req.method === 'DELETE' && p === '/api/adobe/credentials') {
-      delete config.adobe; saveConfig(); adobe.forget();
-      logEvent('settings', 'Adobe Admin Console connection removed');
-      return sendJson(res, 200, { ok: true, status: adobe.status() });
-    }
-
-    // Move a Maxon seat between machines: release it where it is, then take it on the target.
-    if (req.method === 'POST' && p === '/api/licenses/move') {
-      const b = await readBody(req);
-      const name = String(b.name || ''), version = String(b.version || '');
-      if (!MAXON_LICENSE.test(name) || !/^[A-Za-z0-9._-]*$/.test(version)) return sendJson(res, 400, { error: 'Not a Maxon license name.' });
-      const to = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(b.to));
-      const from = b.from != null ? db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(b.from)) : null;
-      const offMs = (config.offlineAfterSeconds || 180) * 1000;
-      const ready = (n) => n && n.last_seen != null && Date.now() - n.last_seen < offMs && n.agent_version && cmpVersionServer(n.agent_version, '2.38.0') >= 0;
-      if (!ready(to)) return sendJson(res, 400, { error: `${to ? to.hostname : 'That machine'} is offline or its agent is too old for seat moves (needs 2.38).` });
-      if (from && !ready(from)) return sendJson(res, 400, { error: `${from.hostname} is offline or its agent is too old for seat moves (needs 2.38).` });
-      const label = name.split('license.app.').pop();
-      if (!from) {
-        const id = crypto.randomBytes(8).toString('hex');
-        commands.queue(to.id, 'license', { id, action: 'maxon_assign', arg: { name, version } });
-        outstandingLicense.set(id, { nodeId: to.id, action: 'maxon_assign', arg: { name, version }, tries: 1, sentAt: Date.now() });
-        logEvent('node', `Licenses: assign ${label} to ${to.hostname}`);
-        return sendJson(res, 200, { ok: true, steps: [`take it on ${to.hostname}`] });
-      }
-      const id = crypto.randomBytes(8).toString('hex');
-      pendingMoves.set(id, { to: to.id, toHost: to.hostname, fromHost: from.hostname, name, version, at: Date.now() });
-      commands.queue(from.id, 'license', { id, action: 'maxon_release', arg: { name, version } });
-      outstandingLicense.set(id, { nodeId: from.id, action: 'maxon_release', arg: { name, version }, tries: 1, sentAt: Date.now() });
-      logEvent('node', `Licenses: move ${label} from ${from.hostname} to ${to.hostname} — releasing on ${from.hostname} first`);
-      return sendJson(res, 200, { ok: true, steps: [`release it on ${from.hostname}`, `then take it on ${to.hostname}`] });
     }
 
     const nodeWake = p.match(/^\/api\/nodes\/(\d+)\/wake$/);
