@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.36.0"
+AGENT_VERSION = "2.37.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1394,6 +1394,9 @@ def handle_directives(resp):
         print("  ⏻ sending Wake-on-LAN for %s" % w.get("hostname"))
     if resp.get("deadlineFix"):
         _PENDING["deadline_fix"] = True
+    for la in resp.get("licenseActions") or []:
+        if isinstance(la, dict) and la.get("action"):
+            _LICENSE_QUEUE.append(la)
     if resp.get("reboot"):
         _PENDING["reboot"] = True
     if resp.get("shutdown"):
@@ -1426,6 +1429,304 @@ def _run_cancellable(cmd, timeout):
     if _JOB["cancel"].is_set():
         raise JobCancelled()
     return proc.returncode, out, err
+
+
+# --------------------------------------------------------------------------
+# Licenses: who is signed in where, and what they hold (the Licenses tab).
+#
+# Maxon and Adobe sign-ins belong to the logged-in USER, not the machine: `mx1 user info`
+# run as SYSTEM returns nothing at all (checked on MARS-05, Sep 2026), and After Effects'
+# render-only file lives in the user's Documents. So everything here runs in the artist's
+# own session — hidden (no window ever flashes on their screen) — and hands its output back.
+# --------------------------------------------------------------------------
+import base64 as _b64
+
+_RUNNER_PS = r"""
+$ErrorActionPreference='Stop'
+$e = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'explorer.exe' -and $_.SessionId -ne 0 } | Select-Object -First 1
+if (-not $e) { 'NOUSER'; exit }
+$o = Invoke-CimMethod -InputObject $e -MethodName GetOwner
+$u = $o.Domain + '\' + $o.User
+$dir = Join-Path $env:ProgramData 'TrackerAgent\userrun'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$id = [guid]::NewGuid().ToString('N')
+$out = Join-Path $dir ($id + '.out'); $vbs = Join-Path $dir ($id + '.vbs')
+New-Item -ItemType File -Path $out -Force | Out-Null
+$cmd = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand __ENC__ > "' + $out + '" 2>&1'
+Set-Content -Path $vbs -Encoding ASCII -Value ('CreateObject("WScript.Shell").Run "cmd /c ' + ($cmd -replace '"','""') + '", 0, True')
+# Only SYSTEM, Administrators and this user can read the script (it may carry a login token).
+foreach ($f in @($vbs, $out)) { icacls $f /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null }
+icacls $vbs /grant ($u + ':RX') | Out-Null
+icacls $out /grant ($u + ':M') | Out-Null
+$task = 'TrackerAsUser_' + $id
+$a = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('//B //Nologo "' + $vbs + '"')
+$p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName $task -Action $a -Principal $p -Force | Out-Null
+Start-ScheduledTask -TaskName $task
+$until = (Get-Date).AddSeconds(__TIMEOUT__)
+Start-Sleep -Milliseconds 800
+while ((Get-ScheduledTask -TaskName $task).State -eq 'Running' -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500 }
+$state = (Get-ScheduledTask -TaskName $task).State
+Unregister-ScheduledTask -TaskName $task -Confirm:$false
+$text = Get-Content -Raw -Path $out -ErrorAction SilentlyContinue
+Remove-Item $vbs, $out -Force -ErrorAction SilentlyContinue
+if ($state -eq 'Running') { 'TIMEOUT'; exit }
+'OK'
+$text
+"""
+
+
+def _ps_encoded(script, timeout=120):
+    """Run a PowerShell script as the agent (no quoting pitfalls: -EncodedCommand)."""
+    try:
+        enc = _b64.b64encode(script.encode("utf-16-le")).decode()
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                            "-EncodedCommand", enc], capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
+        return "ERR:%s" % e
+
+
+def _desktop_console_user_mac():
+    try:
+        u = subprocess.run(["stat", "-f", "%Su", "/dev/console"], capture_output=True, text=True, timeout=10).stdout.strip()
+        return None if u in ("", "root", "loginwindow", "_mbsetupuser") else u
+    except Exception:
+        return None
+
+
+def run_as_desktop_user(script, timeout=120):
+    """Run `script` (PowerShell on Windows, bash on macOS) as the signed-in desktop user,
+    hidden. Returns (ok, output). Nobody signed in → (False, "nobody is signed in")."""
+    if IS_WINDOWS:
+        inner = _b64.b64encode(script.encode("utf-16-le")).decode()
+        runner = _RUNNER_PS.replace("__ENC__", inner).replace("__TIMEOUT__", str(int(timeout)))
+        out = _ps_encoded(runner, timeout=timeout + 60).lstrip("\ufeff")
+        head, _, rest = out.strip().partition("\n")
+        head = head.strip()
+        if head == "NOUSER":
+            return False, "nobody is signed in"
+        if head == "TIMEOUT":
+            return False, "didn't finish within %ds" % timeout
+        if head != "OK":
+            return False, (out.strip()[:300] or "no output")
+        return True, rest
+    user = _desktop_console_user_mac()
+    if not user:
+        return False, "nobody is signed in"
+    try:
+        uid = subprocess.run(["id", "-u", user], capture_output=True, text=True, timeout=10).stdout.strip()
+        r = subprocess.run(["launchctl", "asuser", uid, "sudo", "-u", user, "/bin/bash", "-c", script],
+                           capture_output=True, text=True, timeout=timeout)
+        return True, (r.stdout or "") + (r.stderr or "")
+    except Exception as e:
+        return False, str(e)
+
+
+def _parse_mx1_user(text):
+    info = {}
+    for line in (text or "").splitlines():
+        k, sep, v = line.partition(":")
+        if sep and k.strip() and not k.startswith(" "):
+            info[k.strip()] = v.strip()
+    return {
+        "account": info.get("user") or None, "name": info.get("name") or None,
+        "organization": info.get("organization") or None, "machineUser": info.get("machineUser") or None,
+        "server": info.get("server") or None, "rlm": (info.get("isRlmAccount") or "").lower() == "yes",
+        "autologin": (info.get("isAutologin") or "").lower() == "yes",
+    }
+
+
+_LIC_ROW = re.compile(r"^(?P<name>\S+)\s{2,}(?P<source>\S+)\s{2,}(?:(?P<version>\S+)\s{2,})?(?P<desc>.+?)\s{2,}"
+                      r"(?P<activated>yes|no)\s+(?P<expired>yes|no)\s+(?P<start>\d{4}-\d{2}-\d{2})\s*-\s*"
+                      r"(?P<end>\d{4}-\d{2}-\d{2})\s+(?P<state>\S+)\s+(?P<method>.+?)\s*$", re.I)
+
+
+def _parse_mx1_licenses(text):
+    rows = []
+    for line in (text or "").splitlines():
+        m = _LIC_ROW.match(line.strip())
+        if m:
+            d = m.groupdict()
+            rows.append({"id": d["name"], "description": d["desc"].strip(), "source": d["source"],
+                         "activated": d["activated"].lower() == "yes", "expired": d["expired"].lower() == "yes",
+                         "start": d["start"], "end": d["end"], "state": d["state"], "method": d["method"].strip(),
+                         "includes": []})
+        elif line.strip().startswith("+---") and rows:
+            rows[-1]["includes"].append(line.strip().lstrip("+-").strip())
+    return rows
+
+
+_USER_SCRIPT_WIN = r"""
+$r = [ordered]@{}
+$docs = [Environment]::GetFolderPath('MyDocuments')
+$r.documents = $docs
+$r.aeRenderOnly = Test-Path (Join-Path $docs 'ae_render_only_node.txt')
+$oobe = Join-Path $env:LOCALAPPDATA 'Adobe\OOBE'
+$r.adobeIds = @(Get-ChildItem $oobe -Filter 'com.adobe.acc.container.*.prefs' -ErrorAction SilentlyContinue |
+  ForEach-Object { $_.Name -replace '^com\.adobe\.acc\.container\.', '' -replace '\.prefs$', '' } | Where-Object { $_ -ne 'default' })
+$mx1 = 'C:\Program Files\Maxon\Tools\mx1.exe'
+if (Test-Path $mx1) {
+  $r.mx1User = (& $mx1 user info 2>&1 | Out-String)
+  $r.mx1Licenses = (& $mx1 license list 2>&1 | Out-String)
+  $r.mx1ReleaseHelp = (& $mx1 license release help 2>&1 | Out-String)
+}
+'@@JSON@@' + ($r | ConvertTo-Json -Compress -Depth 4)
+"""
+
+_USER_SCRIPT_MAC = r"""
+docs="$HOME/Documents"; mx1='/Library/Application Support/Maxon/Tools/mx1'
+echo "@@DOCS@@$docs"
+[ -f "$docs/ae_render_only_node.txt" ] && echo "@@AERO@@yes" || echo "@@AERO@@no"
+ls "$HOME/Library/Application Support/Adobe/OOBE" 2>/dev/null | sed -n 's/^com\.adobe\.acc\.container\.\(.*\)\.prefs$/@@ADOBEID@@\1/p'
+if [ -x "$mx1" ]; then echo "@@MX1USER@@"; "$mx1" user info 2>&1; echo "@@MX1LIC@@"; "$mx1" license list 2>&1; echo "@@END@@"; fi
+"""
+
+
+def _windows_sessions():
+    """Signed-in sessions and the auto-login setting, read as SYSTEM."""
+    out = _ps_encoded(r"""
+$w = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+'AUTO|' + $w.AutoAdminLogon + '|' + $w.DefaultUserName
+(query user 2>$null) | Select-Object -Skip 1 | ForEach-Object { 'SESS|' + ($_ -replace '^[\s>]+', '') }
+""", timeout=60)
+    auto, sessions = {}, []
+    for line in out.splitlines():
+        if line.startswith("AUTO|"):
+            _, a, u = (line.split("|") + ["", ""])[:3]
+            auto = {"enabled": a.strip() == "1", "user": u.strip() or None}
+        elif line.startswith("SESS|"):
+            parts = re.split(r"\s{2,}", line[5:].strip())
+            # USERNAME  SESSIONNAME  ID  STATE  IDLE  LOGON  (SESSIONNAME is blank when disconnected)
+            if len(parts) >= 5:
+                user = parts[0]
+                if parts[1].isdigit():
+                    sid, state, logon = parts[1], parts[2], parts[-1]
+                else:
+                    sid, state, logon = parts[2], parts[3], parts[-1]
+                sessions.append({"user": user, "id": sid, "state": "active" if state.lower().startswith("act") else "disconnected" if state.lower().startswith("disc") else state.lower(),
+                                 "since": logon})
+    return auto, sessions
+
+
+def collect_licenses():
+    """Everything the Licenses tab shows for this machine."""
+    info = {"at": int(time.time() * 1000)}
+    try:
+        if IS_WINDOWS:
+            info["autologin"], info["sessions"] = _windows_sessions()
+            ok, out = run_as_desktop_user(_USER_SCRIPT_WIN, timeout=90)
+            if ok and "@@JSON@@" in out:
+                d = json.loads(out.split("@@JSON@@", 1)[1].strip())
+                info["adobe"] = {"renderOnly": bool(d.get("aeRenderOnly")), "accounts": d.get("adobeIds") or [],
+                                 "documents": d.get("documents")}
+                if d.get("mx1User") is not None:
+                    info["maxon"] = {"user": _parse_mx1_user(d.get("mx1User")), "licenses": _parse_mx1_licenses(d.get("mx1Licenses"))}
+                    if d.get("mx1ReleaseHelp"):
+                        info["maxon"]["releaseHelp"] = d["mx1ReleaseHelp"][:1500]
+            else:
+                info["userContext"] = out[:200] if not ok else "no data"
+        elif IS_MACOS:
+            user = _desktop_console_user_mac()
+            auto = subprocess.run(["defaults", "read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"],
+                                  capture_output=True, text=True, timeout=10)
+            info["autologin"] = {"enabled": auto.returncode == 0 and bool(auto.stdout.strip()), "user": auto.stdout.strip() or None}
+            info["sessions"] = [{"user": user, "id": "console", "state": "active", "since": None}] if user else []
+            ok, out = run_as_desktop_user(_USER_SCRIPT_MAC, timeout=90)
+            if ok:
+                docs = re.search(r"@@DOCS@@(.*)", out)
+                info["adobe"] = {"renderOnly": "@@AERO@@yes" in out, "accounts": re.findall(r"@@ADOBEID@@(\S+)", out),
+                                 "documents": docs.group(1).strip() if docs else None}
+                if "@@MX1USER@@" in out:
+                    u = out.split("@@MX1USER@@", 1)[1].split("@@MX1LIC@@", 1)
+                    info["maxon"] = {"user": _parse_mx1_user(u[0]),
+                                     "licenses": _parse_mx1_licenses(u[1].split("@@END@@", 1)[0] if len(u) > 1 else "")}
+            else:
+                info["userContext"] = out[:200]
+    except Exception as e:
+        info["error"] = str(e)[:300]
+    return info
+
+
+_MX1_WIN = r"& 'C:\Program Files\Maxon\Tools\mx1.exe' "
+_MX1_MAC = "'/Library/Application Support/Maxon/Tools/mx1' "
+
+
+def license_action(action, arg=None):
+    """Carry out one Licenses-tab action. Returns (ok, message). Never logs a token."""
+    mx1 = _MX1_WIN if IS_WINDOWS else _MX1_MAC
+    q = (lambda v: "'" + str(v).replace("'", "''") + "'") if IS_WINDOWS else (lambda v: "'" + str(v).replace("'", "'\\''") + "'")
+    if action in ("maxon_refresh", "maxon_logout", "maxon_login_token"):
+        if action == "maxon_login_token":
+            if not arg or not re.match(r"^[^\s'\"]{8,4096}$", str(arg)):
+                return False, "That doesn't look like a Maxon login token."
+            cmd = mx1 + "user login -t " + q(arg) + " -s"
+        else:
+            cmd = mx1 + ("user refresh" if action == "maxon_refresh" else "user logout")
+        ok, out = run_as_desktop_user(cmd + (" 2>&1" if IS_WINDOWS else " 2>&1"), timeout=120)
+        text = re.sub(r"\s+", " ", out or "").strip()
+        if not ok:
+            return False, "Couldn't run it in the signed-in user's session: %s" % text
+        if re.search(r"error|fail|invalid|denied", text, re.I):
+            return False, text[:300]
+        return True, {"maxon_refresh": "Maxon account refreshed.", "maxon_logout": "Signed out of Maxon.",
+                      "maxon_login_token": "Signed in to Maxon with the login token."}[action]
+    if action in ("ae_render_only_on", "ae_render_only_off"):
+        on = action.endswith("_on")
+        if IS_WINDOWS:
+            f = "(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'ae_render_only_node.txt')"
+            cmd = ("New-Item -ItemType File -Force -Path %s | Out-Null; 'done'" % f) if on else ("Remove-Item -Force -ErrorAction SilentlyContinue -Path %s; 'done'" % f)
+        else:
+            cmd = ('touch "$HOME/Documents/ae_render_only_node.txt" && echo done') if on else ('rm -f "$HOME/Documents/ae_render_only_node.txt" && echo done')
+        ok, out = run_as_desktop_user(cmd, timeout=60)
+        if not ok or "done" not in (out or ""):
+            return False, "Couldn't change After Effects' mode: %s" % (out or "").strip()[:200]
+        return True, ("After Effects is now a render-only node here — it renders without using a seat." if on
+                      else "Render-only mode is off — After Effects here will use a named-user seat again.")
+    if action == "win_logoff_disconnected":
+        if not IS_WINDOWS:
+            return False, "Only applies to Windows."
+        _, sessions = _windows_sessions()
+        gone = []
+        for sess in sessions:
+            if sess.get("state") == "disconnected" and str(sess.get("id", "")).isdigit():
+                subprocess.run(["logoff", str(sess["id"])], capture_output=True, timeout=60)
+                gone.append(sess["user"])
+        return True, ("Logged off disconnected session(s): %s." % ", ".join(gone)) if gone else "No disconnected sessions to log off."
+    return False, "Unknown action %r" % action
+
+
+_LICENSE_QUEUE = []
+_LICENSE_STATE = {"thread": None, "last": 0.0}
+LICENSE_EVERY = 10 * 60
+
+
+def _license_worker(server):
+    results = []
+    while _LICENSE_QUEUE:
+        a = _LICENSE_QUEUE.pop(0)
+        try:
+            ok, msg = license_action(a.get("action"), a.get("arg"))
+        except Exception as e:
+            ok, msg = False, str(e)[:300]
+        print("  license action %s: %s" % (a.get("action"), msg))
+        results.append({"id": a.get("id"), "action": a.get("action"), "ok": ok, "message": msg, "at": int(time.time() * 1000)})
+    info = collect_licenses()
+    try:
+        server.checkin(None, health={"licenses": info, "licenseActions": results or None})
+    except Exception as e:
+        print("  ! could not report licenses: %s" % e)
+
+
+def maybe_run_licenses(server):
+    """Collect every 10 minutes, and straight away when the dashboard asks for an action."""
+    t = _LICENSE_STATE["thread"]
+    if t is not None and t.is_alive():
+        return
+    if _LICENSE_QUEUE or time.time() - _LICENSE_STATE["last"] >= LICENSE_EVERY:
+        _LICENSE_STATE["last"] = time.time()
+        _LICENSE_STATE["thread"] = threading.Thread(target=_license_worker, args=(server,), daemon=True)
+        _LICENSE_STATE["thread"].start()
 
 
 # --------------------------------------------------------------------------
@@ -2334,6 +2635,7 @@ def main():
             watch_state["busy_since"] = (watch_state["busy_since"] or time.time()) if busy else None
             # Lightweight heartbeat first — learn whether monitoring is switched on.
             resp = server.checkin(None)
+            maybe_run_licenses(server)
             # Server asked us to reboot (fallback when Deadline RemoteControl can't reach us).
             if _PENDING["reboot"]:
                 _PENDING["reboot"] = False

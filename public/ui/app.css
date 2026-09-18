@@ -1087,3 +1087,21 @@ details.quiet[open] > summary { margin-bottom: 10px; }
 .ucard3 footer { display: flex; align-items: center; gap: 8px; padding-top: 9px; border-top: 1px solid var(--border); font-size: 0.8rem; }
 .ur.quiet-row .ur-main { opacity: 0.78; }
 .ur.quiet-row:hover .ur-main, .ur.quiet-row.open .ur-main { opacity: 1; }
+
+/* ======================================================================== Licenses */
+.ok-text { color: var(--ok); }
+.warn-text { color: var(--warn); }
+.bad-text { color: var(--bad-text); }
+.lic-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.lic-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.lic-card .l { display: flex; align-items: center; gap: 7px; font-size: 0.72rem; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); }
+.lic-card .l .icon { width: 14px; height: 14px; }
+.lic-card b { font-size: 1.05rem; }
+.lic-card .s { font-size: 0.8rem; color: var(--text-2); margin-top: auto; }
+.lic-card.warn { border-color: rgba(245, 158, 11, 0.35); box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.12); }
+.lic-table td { vertical-align: middle; }
+.lic-list { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lic-result { display: flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 0.76rem; font-weight: 400; white-space: normal; max-width: 360px; }
+.lic-result .icon { width: 13px; height: 13px; flex: none; }
+.lic-result.ok { color: var(--ok); }
+.lic-result.bad { color: var(--bad-text); }
