@@ -127,7 +127,7 @@ function MachinePicker({ seat, from, model, close }) {
   };
   return html`<div class="stack" style="gap:12px">
     <p class="dim" style="margin:0">${from ? html`Released on <b>${from.n.hostname}</b> first; once that's confirmed, the machine you pick takes a ${seat.name} seat.` : html`The machine you pick takes a ${seat.name} seat.`}
-      Maxon decides which of your ${seat.name} licenses the seat comes from — usually one with room. If they're all full, Maxon says so and you'll see it here.</p>
+      Maxon decides which of your ${seat.name} licenses the seat comes from; you can't pick one from here. If they're all full, Maxon refuses and you'll see its answer here.</p>
     <label class="search"><${Icon} name="search" /><input class="field" autofocus placeholder="Find a machine" value=${q} onInput=${(e) => setQ(e.currentTarget.value)} /></label>
     <div class="lic-pick">${options.map((m) => html`<button key=${m.n.id} class="lic-pick-row" disabled=${!m.canSeat} onClick=${() => pick(m)}>
       <${OsStatus} node=${m.n} /><b>${m.n.hostname}</b>
@@ -173,7 +173,7 @@ function machineMenu(e, m, model) {
     '-',
     m.renderOnly
       ? { label: 'Turn off render-only (After Effects)', icon: 'eyeOff', disabled: !m.canAct, onSelect: async () => {
-        if (await confirm(`After Effects on ${m.n.hostname} will need a signed-in Adobe seat again.`, { title: 'Turn off render-only', confirmLabel: 'Turn off', danger: true })) act(m, 'ae_render_only_off');
+        if (await confirm(`After Effects on ${m.n.hostname} will need someone signed in with an Adobe license again.`, { title: 'Turn off render-only', confirmLabel: 'Turn off', danger: true })) act(m, 'ae_render_only_off');
       } }
       : { label: 'Make render-only (After Effects)', icon: 'film', disabled: !m.canAct, onSelect: async () => {
         if (await confirm(`Only for machines nobody works on in After Effects. Render-only lets ${m.n.hostname} render After Effects jobs without using an Adobe seat — but After Effects there will no longer open its interface.`,
@@ -207,8 +207,10 @@ function Attention({ model }) {
   const seat = reported.filter((m) => m.renderOnly === false);
   // Deliberately no "make them all render-only" button: render-only stops After Effects
   // opening its interface, so on a machine someone works on it would lock them out.
-  if (seat.length) items.push({ tone: 'info', icon: 'film', text: `After Effects runs on an Adobe seat on ${plural(seat.length, 'machine')}`,
-    detail: `Pure render nodes don't need one — switch those to render-only from their ⋯ menu in Machines. ${seat.map((m) => m.n.hostname).join(', ')}` });
+  // What's known is only whether the render-only file is there — not whether anyone is signed in
+  // or which Adobe license is in use, so this says exactly that and no more.
+  if (seat.length) items.push({ tone: 'info', icon: 'film', text: `After Effects isn't in render-only mode on ${plural(seat.length, 'machine')}`,
+    detail: `In normal mode After Effects needs someone signed in with an Adobe license; render-only mode doesn't. It's for machines nobody works on — set it per machine from its ⋯ menu. ${seat.map((m) => m.n.hostname).join(', ')}` });
   const noAuto = reported.filter((m) => m.autologin === false);
   if (noAuto.length) items.push({ tone: 'warn', icon: 'power', text: `Auto-login is off on ${plural(noAuto.length, 'machine')}`,
     detail: `${noAuto.map((m) => m.n.hostname).join(', ')} — after a reboot nothing renders until someone signs in` });
@@ -281,7 +283,7 @@ function MachinesView({ model, q }) {
         : m.account === model.company ? html`<span class="dim">company account</span>`
         : html`<span class="warn-text mono" title="Not the account the rest of the farm uses">${m.account}</span>`}</td>
       <td>${m.held.length ? [...new Set(m.held.map((l) => l.name))].map((nm) => html`<span key=${nm} class="tag">${nm}</span> `) : html`<span class="dim">—</span>`}</td>
-      <td class="nowrap">${m.renderOnly == null ? html`<span class="dim">—</span>` : m.renderOnly ? html`<span class="dim">render-only</span>` : html`<span class="warn-text">uses a seat</span>`}</td>
+      <td class="nowrap">${m.renderOnly == null ? html`<span class="dim">—</span>` : m.renderOnly ? html`<span class="dim">render-only</span>` : html`<span class="dim">normal mode</span>`}</td>
       <td class="right"><button class="btn sm ghost icon" aria-label=${`Actions for ${m.n.hostname}`} onClick=${(e) => machineMenu(e, m, model)}><${Icon} name="more" /></button></td>
     </tr>`)}</tbody>
   </table></div>`;

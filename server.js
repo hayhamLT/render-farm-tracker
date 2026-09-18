@@ -1771,19 +1771,28 @@ function reconcileFailedJobs(node, software, now) {
   const installed = new Map();
   for (const s of software) if (s && s.product && s.version) installed.set(String(s.product), String(s.version));
   if (!installed.size) return;
+  // Newest first, and only ONE job per app gets the credit — the latest attempt, the one that can
+  // have done it. Crediting every failed attempt turned an earlier try that installed nothing
+  // (Node-03's Creative Cloud bootstrapper, Sep 18) into a false "success".
   const failed = db.prepare(
     `SELECT j.id, j.log, p.product_key, p.version FROM jobs j JOIN packages p ON p.id = j.package_id
-      WHERE j.node_id = ? AND j.status = 'failed' AND j.updated_at > ?`
+      WHERE j.node_id = ? AND j.status = 'failed' AND j.updated_at > ? ORDER BY j.id DESC`
   ).all(node.id, now - RECONCILE_WINDOW_MS);
+  const credited = new Set();
   for (const j of failed) {
+    if (credited.has(j.product_key)) continue;
     const have = installed.get(j.product_key);
     if (!have || !j.version || j.version === 'uninstall') continue;
     if (cmpVersionServer(have, j.version) < 0) continue;
+    // Say only what's known: the machine now reports the target version. Why the job was marked
+    // failed differs (a non-zero exit code, or — like Creative Cloud — the version changing after
+    // the job had already ended), and the original report below keeps that detail.
     const note = `Verified on check-in: ${node.hostname} now reports ${j.product_key} ${have} `
-      + `(target ${j.version}), so this install succeeded — the failure came from the `
-      + `installer's exit code, not from the install.\n--- original report ---\n`;
+      + `(target ${j.version}), so the install did take effect — later than the job's own check. `
+      + `The original report is below.\n--- original report ---\n`;
     db.prepare("UPDATE jobs SET status = 'success', log = ? WHERE id = ? AND status = 'failed'")
       .run((note + (j.log || '')).slice(0, 20000), j.id);
+    credited.add(j.product_key);
     clearRolloutHaltFlag(j.product_key, j.version);
     logEvent('job', `Job #${j.id} corrected to success: ${j.product_key} ${j.version} is installed on ${node.hostname} (${have})`);
   }
