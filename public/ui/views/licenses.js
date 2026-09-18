@@ -104,13 +104,6 @@ async function act(m, action, extra = {}) {
   } catch (e) { toast(`${m.n.hostname}: ${e.message}`, 'error', 8000); }
   refresh();
 }
-async function actMany(list, action) {
-  const ok = list.filter((m) => m.canAct);
-  for (const m of ok) { try { await post(`/api/nodes/${m.n.id}/license`, { action }); } catch (e) { toast(`${m.n.hostname}: ${e.message}`, 'error', 8000); } }
-  if (ok.length) toast(`${ACTION[action]} — sent to ${plural(ok.length, 'machine')}.`, 'success', 6000);
-  if (ok.length < list.length) toast(`${plural(list.length - ok.length, 'machine')} skipped — offline or still updating.`, 'info', 6000);
-  refresh();
-}
 const seatArg = (seat) => ({ license: { name: seat.id, version: seat.version || '' } });
 
 async function releaseSeat(seat) {
@@ -183,7 +176,10 @@ function machineMenu(e, m, model) {
       ? { label: 'Turn off render-only (After Effects)', icon: 'eyeOff', disabled: !m.canAct, onSelect: async () => {
         if (await confirm(`After Effects on ${m.n.hostname} will need a signed-in Adobe seat again.`, { title: 'Turn off render-only', confirmLabel: 'Turn off', danger: true })) act(m, 'ae_render_only_off');
       } }
-      : { label: 'Make render-only (After Effects)', icon: 'film', disabled: !m.canAct, onSelect: () => act(m, 'ae_render_only_on') },
+      : { label: 'Make render-only (After Effects)', icon: 'film', disabled: !m.canAct, onSelect: async () => {
+        if (await confirm(`Only for machines nobody works on in After Effects. Render-only lets ${m.n.hostname} render After Effects jobs without using an Adobe seat — but After Effects there will no longer open its interface.`,
+          { title: 'Make render-only', confirmLabel: 'Make render-only' })) act(m, 'ae_render_only_on');
+      } },
     m.n.os === 'windows' ? { label: 'Log off disconnected sessions', icon: 'power', disabled: !m.canAct || !m.disconnected.length, onSelect: async () => {
       if (await confirm(`Log off disconnected Windows sessions on ${m.n.hostname}? Only sessions nobody is connected to — anything left open in them closes.`, { title: 'Log off', confirmLabel: 'Log off', danger: true })) act(m, 'win_logoff_disconnected');
     } } : null,
@@ -211,8 +207,10 @@ function Attention({ model }) {
   const noMaxon = reported.filter((m) => m.hasMaxon && !m.account);
   if (noMaxon.length) items.push({ tone: 'warn', icon: 'key', text: `${plural(noMaxon.length, 'machine')} not signed in to Maxon`, detail: noMaxon.map((m) => m.n.hostname).join(', ') });
   const seat = reported.filter((m) => m.renderOnly === false);
-  if (seat.length) items.push({ tone: 'info', icon: 'film', text: `After Effects uses an Adobe seat on ${plural(seat.length, 'machine')}`,
-    detail: `${seat.map((m) => m.n.hostname).join(', ')} — render-only nodes don't need one`, action: ['Make all render-only', () => actMany(seat, 'ae_render_only_on')] });
+  // Deliberately no "make them all render-only" button: render-only stops After Effects
+  // opening its interface, so on a machine someone works on it would lock them out.
+  if (seat.length) items.push({ tone: 'info', icon: 'film', text: `After Effects runs on an Adobe seat on ${plural(seat.length, 'machine')}`,
+    detail: `Pure render nodes don't need one — switch those to render-only from their ⋯ menu in Machines. ${seat.map((m) => m.n.hostname).join(', ')}` });
   const noAuto = reported.filter((m) => m.autologin === false);
   if (noAuto.length) items.push({ tone: 'warn', icon: 'power', text: `Auto-login is off on ${plural(noAuto.length, 'machine')}`,
     detail: `${noAuto.map((m) => m.n.hostname).join(', ')} — after a reboot nothing renders until someone signs in` });
