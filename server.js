@@ -1843,10 +1843,33 @@ const MAXON_LICENSE = /^net\.maxon\.license\.[A-Za-z0-9._~-]+$/;
 // "Move a seat": release on one machine, and only once that's CONFIRMED, take it on another.
 // Keyed by the release action's id; lives in memory (a restart just means asking again).
 const pendingMoves = new Map();
+// A license action is delivered once, but only COUNTS once the machine reports a result for it.
+// If the agent restarts in between (its own self-update did exactly that to the first live test,
+// Sep 18), the action is lost in memory — so it stays here and is re-sent after 3 quiet minutes,
+// up to 3 times. Token actions keep their token here too (memory only), for the same reason.
+const outstandingLicense = new Map();   // action id -> { nodeId, action, arg, tries, sentAt }
+const LICENSE_RESEND_MS = 3 * 60 * 1000;
 // Maxon login tokens wait here — in memory only — until the agent collects them, then they're
 // gone. A restart drops any that weren't collected; the action just has to be asked for again.
 const licenseSecrets = new Map();
 setInterval(() => { const cut = Date.now() - 15 * 60 * 1000; for (const [k, v] of licenseSecrets) if (v.at < cut) licenseSecrets.delete(k); }, 60 * 1000).unref();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, o] of outstandingLicense) {
+    if (now - o.sentAt < LICENSE_RESEND_MS) continue;
+    const host = (db.prepare('SELECT hostname FROM nodes WHERE id = ?').get(o.nodeId) || {}).hostname || `#${o.nodeId}`;
+    if (o.tries >= 3) {
+      outstandingLicense.delete(id); licenseSecrets.delete(id);
+      db.prepare('UPDATE nodes SET license_action = ? WHERE id = ?').run(JSON.stringify([{ id, action: o.action, ok: false,
+        message: `${host} never reported back after 3 tries — is its agent running?`, at: now }]), o.nodeId);
+      logEvent('node', `Licenses: ${LICENSE_ACTIONS[o.action] || o.action} on ${host} gave up — no answer after 3 tries`);
+      continue;
+    }
+    o.tries++; o.sentAt = now;
+    commands.queue(o.nodeId, 'license', { id, action: o.action, arg: o.action === 'maxon_login_token' ? null : o.arg });
+    logEvent('node', `Licenses: re-sending ${LICENSE_ACTIONS[o.action] || o.action} to ${host} (no answer yet — try ${o.tries} of 3)`);
+  }
+}, 30 * 1000).unref();
 
 // Who must have signed each app's installer before an agent will run it (agent 2.36+). Read off
 // the farm's real installers on Sep 18, 2026 — Authenticode subject on Windows, Apple Team ID on
@@ -2017,13 +2040,16 @@ function handleCheckin(body) {
       }));
       db.prepare('UPDATE nodes SET license_action = ? WHERE id = ?').run(JSON.stringify(results), node.id);
       for (const r of results) logEvent('node', `Licenses on ${node.hostname}: ${LICENSE_ACTIONS[r.action] || r.action} — ${r.ok ? 'done' : 'failed'}: ${r.message}`);
+      for (const r of results) { outstandingLicense.delete(r.id); licenseSecrets.delete(r.id); }
       for (const r of results) {
         const mv = pendingMoves.get(r.id);
         if (!mv) continue;
         pendingMoves.delete(r.id);
         const label = mv.name.split('license.app.').pop();
         if (!r.ok) { logEvent('node', `Licenses: move of ${label} to ${mv.toHost} stopped — releasing it on ${mv.fromHost} failed`); continue; }
-        commands.queue(mv.to, 'license', { id: crypto.randomBytes(8).toString('hex'), action: 'maxon_assign', arg: { name: mv.name, version: mv.version } });
+        const nid = crypto.randomBytes(8).toString('hex');
+        commands.queue(mv.to, 'license', { id: nid, action: 'maxon_assign', arg: { name: mv.name, version: mv.version } });
+        outstandingLicense.set(nid, { nodeId: mv.to, action: 'maxon_assign', arg: { name: mv.name, version: mv.version }, tries: 1, sentAt: Date.now() });
         logEvent('node', `Licenses: ${label} released on ${mv.fromHost} — now taking it on ${mv.toHost}`);
       }
     }
@@ -2187,7 +2213,6 @@ function handleCheckin(body) {
     licenseActions: (() => {
       const la = cmds.filter((c) => c.kind === 'license').map((c) => {
         const arg = licenseSecrets.has(c.payload.id) ? licenseSecrets.get(c.payload.id).token : c.payload.arg;
-        licenseSecrets.delete(c.payload.id);
         return { id: c.payload.id, action: c.payload.action, arg };
       });
       return la.length ? la : undefined;
@@ -3012,6 +3037,7 @@ const server = http.createServer(async (req, res) => {
         licenseSecrets.set(id, { token, at: Date.now() });      // memory only — never the database or the log
       }
       commands.queue(node.id, 'license', { id, action, arg });
+      outstandingLicense.set(id, { nodeId: node.id, action, arg, tries: 1, sentAt: Date.now() });
       logEvent('node', `Licenses: ${LICENSE_ACTIONS[action]}${arg ? ` (${arg.name.split('license.app.').pop()})` : ''} requested for ${node.hostname}`);
       return sendJson(res, 200, { ok: true, id, hostname: node.hostname });
     }
@@ -3031,12 +3057,14 @@ const server = http.createServer(async (req, res) => {
       if (!from) {
         const id = crypto.randomBytes(8).toString('hex');
         commands.queue(to.id, 'license', { id, action: 'maxon_assign', arg: { name, version } });
+        outstandingLicense.set(id, { nodeId: to.id, action: 'maxon_assign', arg: { name, version }, tries: 1, sentAt: Date.now() });
         logEvent('node', `Licenses: assign ${label} to ${to.hostname}`);
         return sendJson(res, 200, { ok: true, steps: [`take it on ${to.hostname}`] });
       }
       const id = crypto.randomBytes(8).toString('hex');
       pendingMoves.set(id, { to: to.id, toHost: to.hostname, fromHost: from.hostname, name, version, at: Date.now() });
       commands.queue(from.id, 'license', { id, action: 'maxon_release', arg: { name, version } });
+      outstandingLicense.set(id, { nodeId: from.id, action: 'maxon_release', arg: { name, version }, tries: 1, sentAt: Date.now() });
       logEvent('node', `Licenses: move ${label} from ${from.hostname} to ${to.hostname} — releasing on ${from.hostname} first`);
       return sendJson(res, 200, { ok: true, steps: [`release it on ${from.hostname}`, `then take it on ${to.hostname}`] });
     }

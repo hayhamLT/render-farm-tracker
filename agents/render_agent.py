@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.39.0"
+AGENT_VERSION = "2.39.1"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1395,7 +1395,14 @@ def handle_directives(resp):
     if resp.get("deadlineFix"):
         _PENDING["deadline_fix"] = True
     for la in resp.get("licenseActions") or []:
-        if isinstance(la, dict) and la.get("action"):
+        if not (isinstance(la, dict) and la.get("action")):
+            continue
+        lid = la.get("id")
+        # The server re-sends an action it hasn't heard back about. Never run one twice:
+        # already done → just report the result again; already queued/running → ignore.
+        if lid and lid in _LICENSE_DONE:
+            _LICENSE_REPORT.append(_LICENSE_DONE[lid])
+        elif not (lid and (lid in _LICENSE_RUNNING or any(q.get("id") == lid for q in _LICENSE_QUEUE))):
             _LICENSE_QUEUE.append(la)
     if resp.get("reboot"):
         _PENDING["reboot"] = True
@@ -1786,20 +1793,34 @@ def license_action(action, arg=None):
 
 
 _LICENSE_QUEUE = []
+_LICENSE_RUNNING = set()     # action ids being carried out right now
+_LICENSE_DONE = {}           # action id -> result, so a re-sent action is answered, not re-run
+_LICENSE_REPORT = []         # results to (re)send with the next report
 _LICENSE_STATE = {"thread": None, "last": 0.0}
 LICENSE_EVERY = 10 * 60
 
 
 def _license_worker(server):
     results = []
+    while _LICENSE_REPORT:
+        results.append(_LICENSE_REPORT.pop(0))
     while _LICENSE_QUEUE:
         a = _LICENSE_QUEUE.pop(0)
+        lid = a.get("id")
+        if lid:
+            _LICENSE_RUNNING.add(lid)
         try:
             ok, msg = license_action(a.get("action"), a.get("arg"))
         except Exception as e:
             ok, msg = False, str(e)[:300]
         print("  license action %s: %s" % (a.get("action"), msg))
-        results.append({"id": a.get("id"), "action": a.get("action"), "ok": ok, "message": msg, "at": int(time.time() * 1000)})
+        r = {"id": lid, "action": a.get("action"), "ok": ok, "message": msg, "at": int(time.time() * 1000)}
+        results.append(r)
+        if lid:
+            _LICENSE_RUNNING.discard(lid)
+            _LICENSE_DONE[lid] = r
+            while len(_LICENSE_DONE) > 50:
+                _LICENSE_DONE.pop(next(iter(_LICENSE_DONE)))
     info = collect_licenses()
     try:
         server.checkin(None, health={"licenses": info, "licenseActions": results or None})
@@ -1812,7 +1833,7 @@ def maybe_run_licenses(server):
     t = _LICENSE_STATE["thread"]
     if t is not None and t.is_alive():
         return
-    if _LICENSE_QUEUE or time.time() - _LICENSE_STATE["last"] >= LICENSE_EVERY:
+    if _LICENSE_QUEUE or _LICENSE_REPORT or time.time() - _LICENSE_STATE["last"] >= LICENSE_EVERY:
         _LICENSE_STATE["last"] = time.time()
         _LICENSE_STATE["thread"] = threading.Thread(target=_license_worker, args=(server,), daemon=True)
         _LICENSE_STATE["thread"].start()

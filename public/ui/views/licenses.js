@@ -68,10 +68,16 @@ function build(s) {
   // is one POOL — Maxon One "2/2", Redshift "4/4", Team Render Client "0/10" — and every tracked
   // machine that has it activated is one of its holders. Pool SIZES and devices without the
   // tracker exist only on Maxon's servers, so nothing here invents a "free" seat.
+  // Matched across machines by license + dates + position: mx1's rowId is each machine's own
+  // local number, and two pools can be identical in every field (two Maxon One, same dates) —
+  // but every machine lists the account's pools in the same order.
   const entries = new Map();
   for (const m of machines.filter((x) => x.account === company)) {
+    const seen = new Map();
     for (const l of m.lic) {
-      const k = l.rowId != null ? `r${l.rowId}` : `${l.id}|${l.start}|${l.end}`;
+      const base = `${l.id}|${l.start}|${l.end}`;
+      const occ = seen.get(base) || 0; seen.set(base, occ + 1);
+      const k = `${base}#${occ}`;
       const e = entries.get(k) || { key: k, ...l, holders: [] };
       if (l.activated && !e.holders.includes(m)) e.holders.push(m);
       entries.set(k, e);
