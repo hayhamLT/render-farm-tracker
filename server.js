@@ -1831,7 +1831,18 @@ const LICENSE_ACTIONS = {
   ae_render_only_on: "make After Effects a render-only node",
   ae_render_only_off: "turn off After Effects' render-only mode",
   win_logoff_disconnected: 'log off disconnected Windows sessions',
+  maxon_release: 'release a Maxon seat',
+  maxon_assign: 'take a Maxon seat',
+  maxon_lock: 'lock a Maxon seat to the machine',
+  maxon_unlock: 'unlock a Maxon seat',
+  maxon_block: 'stop a Maxon license auto-activating',
+  maxon_unblock: 'let a Maxon license auto-activate again',
 };
+const SEAT_ACTIONS = new Set(['maxon_release', 'maxon_assign', 'maxon_lock', 'maxon_unlock', 'maxon_block', 'maxon_unblock']);
+const MAXON_LICENSE = /^net\.maxon\.license\.[A-Za-z0-9._~-]+$/;
+// "Move a seat": release on one machine, and only once that's CONFIRMED, take it on another.
+// Keyed by the release action's id; lives in memory (a restart just means asking again).
+const pendingMoves = new Map();
 // Maxon login tokens wait here — in memory only — until the agent collects them, then they're
 // gone. A restart drops any that weren't collected; the action just has to be asked for again.
 const licenseSecrets = new Map();
@@ -2006,6 +2017,15 @@ function handleCheckin(body) {
       }));
       db.prepare('UPDATE nodes SET license_action = ? WHERE id = ?').run(JSON.stringify(results), node.id);
       for (const r of results) logEvent('node', `Licenses on ${node.hostname}: ${LICENSE_ACTIONS[r.action] || r.action} — ${r.ok ? 'done' : 'failed'}: ${r.message}`);
+      for (const r of results) {
+        const mv = pendingMoves.get(r.id);
+        if (!mv) continue;
+        pendingMoves.delete(r.id);
+        const label = mv.name.split('license.app.').pop();
+        if (!r.ok) { logEvent('node', `Licenses: move of ${label} to ${mv.toHost} stopped — releasing it on ${mv.fromHost} failed`); continue; }
+        commands.queue(mv.to, 'license', { id: crypto.randomBytes(8).toString('hex'), action: 'maxon_assign', arg: { name: mv.name, version: mv.version } });
+        logEvent('node', `Licenses: ${label} released on ${mv.fromHost} — now taking it on ${mv.toHost}`);
+      }
     }
     if (hh.deadlineFix && typeof hh.deadlineFix === 'object') {
       const fx = { ok: !!hh.deadlineFix.ok, message: String(hh.deadlineFix.message || '').slice(0, 500), at: now };
@@ -2978,15 +2998,47 @@ const server = http.createServer(async (req, res) => {
       if (!node.agent_version || cmpVersionServer(node.agent_version, '2.37.0') < 0) {
         return sendJson(res, 400, { error: `${node.hostname}'s agent (${node.agent_version || 'unknown'}) doesn't support this yet — it updates itself within a few minutes.` });
       }
+      let arg = null;
+      if (SEAT_ACTIONS.has(action)) {
+        const name = String((b.license && b.license.name) || '');
+        const version = String((b.license && b.license.version) || '');
+        if (!MAXON_LICENSE.test(name) || !/^[A-Za-z0-9._-]*$/.test(version)) return sendJson(res, 400, { error: 'Not a Maxon license name.' });
+        arg = { name, version, block: !!(b.license && b.license.block) };
+      }
       const id = crypto.randomBytes(8).toString('hex');
       if (action === 'maxon_login_token') {
         const token = String(b.token || '').trim();
         if (!/^[^\s'"]{8,4096}$/.test(token)) return sendJson(res, 400, { error: "That doesn't look like a Maxon login token." });
         licenseSecrets.set(id, { token, at: Date.now() });      // memory only — never the database or the log
       }
-      commands.queue(node.id, 'license', { id, action });
-      logEvent('node', `Licenses: ${LICENSE_ACTIONS[action]} requested for ${node.hostname}`);
+      commands.queue(node.id, 'license', { id, action, arg });
+      logEvent('node', `Licenses: ${LICENSE_ACTIONS[action]}${arg ? ` (${arg.name.split('license.app.').pop()})` : ''} requested for ${node.hostname}`);
       return sendJson(res, 200, { ok: true, id, hostname: node.hostname });
+    }
+
+    // Move a Maxon seat between machines: release it where it is, then take it on the target.
+    if (req.method === 'POST' && p === '/api/licenses/move') {
+      const b = await readBody(req);
+      const name = String(b.name || ''), version = String(b.version || '');
+      if (!MAXON_LICENSE.test(name) || !/^[A-Za-z0-9._-]*$/.test(version)) return sendJson(res, 400, { error: 'Not a Maxon license name.' });
+      const to = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(b.to));
+      const from = b.from != null ? db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(b.from)) : null;
+      const offMs = (config.offlineAfterSeconds || 180) * 1000;
+      const ready = (n) => n && n.last_seen != null && Date.now() - n.last_seen < offMs && n.agent_version && cmpVersionServer(n.agent_version, '2.38.0') >= 0;
+      if (!ready(to)) return sendJson(res, 400, { error: `${to ? to.hostname : 'That machine'} is offline or its agent is too old for seat moves (needs 2.38).` });
+      if (from && !ready(from)) return sendJson(res, 400, { error: `${from.hostname} is offline or its agent is too old for seat moves (needs 2.38).` });
+      const label = name.split('license.app.').pop();
+      if (!from) {
+        const id = crypto.randomBytes(8).toString('hex');
+        commands.queue(to.id, 'license', { id, action: 'maxon_assign', arg: { name, version } });
+        logEvent('node', `Licenses: assign ${label} to ${to.hostname}`);
+        return sendJson(res, 200, { ok: true, steps: [`take it on ${to.hostname}`] });
+      }
+      const id = crypto.randomBytes(8).toString('hex');
+      pendingMoves.set(id, { to: to.id, toHost: to.hostname, fromHost: from.hostname, name, version, at: Date.now() });
+      commands.queue(from.id, 'license', { id, action: 'maxon_release', arg: { name, version } });
+      logEvent('node', `Licenses: move ${label} from ${from.hostname} to ${to.hostname} — releasing on ${from.hostname} first`);
+      return sendJson(res, 200, { ok: true, steps: [`release it on ${from.hostname}`, `then take it on ${to.hostname}`] });
     }
 
     const nodeWake = p.match(/^\/api\/nodes\/(\d+)\/wake$/);

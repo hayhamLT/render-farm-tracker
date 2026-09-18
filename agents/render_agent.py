@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.37.0"
+AGENT_VERSION = "2.38.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1537,27 +1537,61 @@ def _parse_mx1_user(text):
     }
 
 
-_LIC_ROW = re.compile(r"^(?P<name>\S+)\s{2,}(?P<source>\S+)\s{2,}(?:(?P<version>\S+)\s{2,})?(?P<desc>.+?)\s{2,}"
-                      r"(?P<activated>yes|no)\s+(?P<expired>yes|no)\s+(?P<start>\d{4}-\d{2}-\d{2})\s*-\s*"
-                      r"(?P<end>\d{4}-\d{2}-\d{2})\s+(?P<state>\S+)\s+(?P<method>.+?)\s*$", re.I)
+# `mx1 license list` is a fixed-width table; long descriptions are cut by mx1 itself
+# ("Red Giant Complete (render only"), so columns are read by the header's offsets and known
+# licenses get their proper names.
+_LIC_NAMES = {
+    "bundle_maxonone-release~commercial": "Maxon One",
+    "cinema4d-release~commandline-floating": "Cinema 4D Commandline (floating)",
+    "teamrenderclient~commercial-floating": "Team Render Client (floating)",
+    "teamrender-release~commercial": "Team Render Server",
+    "redshift~commercial": "Redshift",
+    "fx.bundle_complete-renderonly": "Red Giant Complete (render-only)",
+    "fx.complete~commercial": "Red Giant Complete",
+    "zpad~commercial": "ZBrush for iPad",
+    "zbrush~commercial": "ZBrush",
+    "autograph~lite": "Autograph Lite",
+    "autograph~commandline": "Autograph Commandline",
+    "cinema4d-release~commercial": "Cinema 4D",
+}
+_LIC_RANGE = re.compile(r"(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})\s+(\S+)\s*(.*)$")
 
 
 def _parse_mx1_licenses(text):
+    """Rows of `mx1 license list`. The header's column positions don't line up with the
+    data, so each row is read by structure: the license id first, the validity range as an
+    anchor, the Activated/Expired yes-no pair just before it, state and method after it."""
     rows = []
     for line in (text or "").splitlines():
-        m = _LIC_ROW.match(line.strip())
-        if m:
-            d = m.groupdict()
-            rows.append({"id": d["name"], "description": d["desc"].strip(), "source": d["source"],
-                         "activated": d["activated"].lower() == "yes", "expired": d["expired"].lower() == "yes",
-                         "start": d["start"], "end": d["end"], "state": d["state"], "method": d["method"].strip(),
-                         "includes": []})
-        elif line.strip().startswith("+---") and rows:
-            rows[-1]["includes"].append(line.strip().lstrip("+-").strip())
+        t = line.strip()
+        if not t.startswith("net.maxon."):
+            if rows and (t.startswith("+---") or t.startswith("|---")):
+                rows[-1]["includes"].append(t[4:].strip())
+            continue
+        lid, _, rest = t.partition(" ")
+        m = _LIC_RANGE.search(rest)
+        if not m:
+            continue
+        before = [x for x in re.split(r"\s{2,}", rest[:m.start()].strip()) if x]
+        flags = [x for x in before if x.lower() in ("yes", "no")]
+        fields = [x for x in before if x.lower() not in ("yes", "no")]
+        activated = len(flags) >= 1 and flags[-2 if len(flags) >= 2 else -1].lower() == "yes"
+        expired = len(flags) >= 2 and flags[-1].lower() == "yes"
+        source = fields[0] if fields else ""
+        desc = fields[-1] if len(fields) >= 2 else ""
+        version = fields[1] if len(fields) >= 3 else ""
+        key = lid.split("license.app.", 1)[-1]
+        rows.append({
+            "id": lid, "version": version, "name": _LIC_NAMES.get(key) or desc or key, "description": desc,
+            "source": source, "activated": activated, "expired": expired,
+            "start": m.group(1), "end": m.group(2), "state": m.group(3), "method": re.sub(r"\s+", " ", m.group(4)).strip(),
+            "includes": [],
+        })
     return rows
 
 
 _USER_SCRIPT_WIN = r"""
+$ProgressPreference = 'SilentlyContinue'
 $r = [ordered]@{}
 $docs = [Environment]::GetFolderPath('MyDocuments')
 $r.documents = $docs
@@ -1569,7 +1603,6 @@ $mx1 = 'C:\Program Files\Maxon\Tools\mx1.exe'
 if (Test-Path $mx1) {
   $r.mx1User = (& $mx1 user info 2>&1 | Out-String)
   $r.mx1Licenses = (& $mx1 license list 2>&1 | Out-String)
-  $r.mx1ReleaseHelp = (& $mx1 license release help 2>&1 | Out-String)
 }
 '@@JSON@@' + ($r | ConvertTo-Json -Compress -Depth 4)
 """
@@ -1617,13 +1650,12 @@ def collect_licenses():
             info["autologin"], info["sessions"] = _windows_sessions()
             ok, out = run_as_desktop_user(_USER_SCRIPT_WIN, timeout=90)
             if ok and "@@JSON@@" in out:
-                d = json.loads(out.split("@@JSON@@", 1)[1].strip())
+                # raw_decode: PowerShell may append progress/CLIXML noise after the JSON line.
+                d, _ = json.JSONDecoder().raw_decode(out.split("@@JSON@@", 1)[1].lstrip())
                 info["adobe"] = {"renderOnly": bool(d.get("aeRenderOnly")), "accounts": d.get("adobeIds") or [],
                                  "documents": d.get("documents")}
                 if d.get("mx1User") is not None:
                     info["maxon"] = {"user": _parse_mx1_user(d.get("mx1User")), "licenses": _parse_mx1_licenses(d.get("mx1Licenses"))}
-                    if d.get("mx1ReleaseHelp"):
-                        info["maxon"]["releaseHelp"] = d["mx1ReleaseHelp"][:1500]
             else:
                 info["userContext"] = out[:200] if not ok else "no data"
         elif IS_MACOS:
@@ -1671,6 +1703,26 @@ def license_action(action, arg=None):
             return False, text[:300]
         return True, {"maxon_refresh": "Maxon account refreshed.", "maxon_logout": "Signed out of Maxon.",
                       "maxon_login_token": "Signed in to Maxon with the login token."}[action]
+    if action in ("maxon_release", "maxon_assign", "maxon_lock", "maxon_unlock", "maxon_block", "maxon_unblock"):
+        a = arg if isinstance(arg, dict) else {}
+        name, version = str(a.get("name") or ""), str(a.get("version") or "")
+        if not re.match(r"^net\.maxon\.license\.[A-Za-z0-9._~\-]+$", name) or not re.match(r"^[A-Za-z0-9._\-]*$", version):
+            return False, "Not a Maxon license name."
+        verb = action.split("_", 1)[1]
+        opts = " -b" if (verb == "release" and a.get("block")) else ""
+        cmd = mx1 + "license " + verb + opts + " " + q(name) + (" " + q(version) if version else "")
+        ok, out = run_as_desktop_user(cmd + " 2>&1", timeout=180)
+        text = re.sub(r"\s+", " ", out or "").strip()
+        if not ok:
+            return False, "Couldn't run it in the signed-in user's session: %s" % text
+        if re.search(r"error|fail|invalid|denied|not found|no .*available", text, re.I):
+            return False, text[:300]
+        label = _LIC_NAMES.get(name.split("license.app.", 1)[-1], name)
+        return True, {"release": "Released %s — the seat is free for another machine." % label,
+                      "assign": "Took a %s seat." % label, "lock": "%s is locked to this machine." % label,
+                      "unlock": "%s is no longer locked here." % label,
+                      "block": "%s won't auto-activate here any more." % label,
+                      "unblock": "%s can auto-activate here again." % label}[verb] + (" " + text[:160] if text else "")
     if action in ("ae_render_only_on", "ae_render_only_off"):
         on = action.endswith("_on")
         if IS_WINDOWS:
