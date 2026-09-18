@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.33.0"
+AGENT_VERSION = "2.34.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -963,8 +963,24 @@ def detect_custom_paths():
     return found
 
 
+# Creative Cloud updates itself in place, but its Windows uninstall entry keeps the version
+# it was INSTALLED at — so the tracker said 6.10.0.252.3 on machines actually running
+# 6.10.0.253 (MARS-02, Stark, Sep 2026) and kept offering an update that had already
+# happened. The desktop app's own executable is the truth. (The Mac side already reads the
+# app bundle, which Adobe does keep current.)
+CC_EXE_WIN = (r"C:\Program Files\Adobe\Adobe Creative Cloud\ACC\Creative Cloud.exe",
+              r"C:\Program Files (x86)\Adobe\Adobe Creative Cloud\ACC\Creative Cloud.exe")
+
+
 def detect_software():
     found = detect_windows() if IS_WINDOWS else detect_macos() if IS_MACOS else {}
+    if IS_WINDOWS:
+        for exe in CC_EXE_WIN:
+            if os.path.isfile(exe):
+                v = _win_file_version(exe)
+                if v:
+                    found["creativecloud"] = (v, exe)
+                break
     # mx1 only knows Maxon-App-managed installs — a standalone installer (e.g.
     # "Maxon Redshift 2026") is invisible to it. Let mx1 fill gaps or report
     # something NEWER, but never mask a newer on-disk install with a stale one.
@@ -1461,10 +1477,64 @@ def _close_app(names):
                 pass
 
 
+def _launch_cc_for_user():
+    """Start the Creative Cloud desktop app in the LOGGED-IN user's session (Windows).
+
+    The agent runs as SYSTEM, and anything it starts directly lands in session 0 — the
+    invisible service session. Creative Cloud started there leaves the artist with no
+    Creative Cloud of their own (MARS-02, Stark, Sep 2026). A one-shot scheduled task
+    with the console user as an Interactive principal runs in THEIR session, no password
+    needed. Nobody logged in → start nothing; Creative Cloud starts at their next logon."""
+    exe = next((p for p in CC_EXE_WIN if os.path.isfile(p)), None)
+    if not exe:
+        return False
+    # The user who owns a desktop (explorer.exe outside session 0). NOT
+    # Win32_ComputerSystem.UserName: that's only the physical console, and it's empty on
+    # a node whose artist session came in over Parsec/RDP (MARS-02 canary, Sep 2026).
+    ps = ("$e=Get-CimInstance Win32_Process|Where-Object{$_.Name -eq 'explorer.exe' -and $_.SessionId -ne 0}|Select-Object -First 1;"
+          "if(-not $e){'nouser';exit};"
+          "$o=Invoke-CimMethod -InputObject $e -MethodName GetOwner;$u=$o.Domain+'\\'+$o.User;"
+          "$a=New-ScheduledTaskAction -Execute '%s';"
+          "$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited;"
+          "Register-ScheduledTask -TaskName 'TrackerStartCreativeCloud' -Action $a -Principal $p -Force|Out-Null;"
+          "Start-ScheduledTask -TaskName 'TrackerStartCreativeCloud';Start-Sleep -Seconds 4;"
+          "Unregister-ScheduledTask -TaskName 'TrackerStartCreativeCloud' -Confirm:$false;'ok'"
+          % exe.replace("'", "''"))
+    return "ok" in _ps(ps, timeout=60)
+
+
+def _kill_cc_in_session0():
+    """Close Creative Cloud processes stranded in session 0 (only ever put there by a
+    SYSTEM-context launch). AdobeUpdateService is a real service and is left alone."""
+    _ps("Get-CimInstance Win32_Process | Where-Object { $_.SessionId -eq 0 -and "
+        "$_.Name -in @('Creative Cloud.exe','Adobe Desktop Service.exe','CCXProcess.exe') } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }", timeout=60)
+
+
+def ensure_cc_in_user_session():
+    """Repair on start: if Creative Cloud is running in session 0 while someone is logged
+    in, move it to their session. Idempotent; never during a render."""
+    if not IS_WINDOWS:
+        return
+    try:
+        if _proc_running(["aerender.exe", "Cinema 4D.exe"]):
+            return
+        out = _ps("@(Get-CimInstance Win32_Process | Where-Object { "
+                  "$_.Name -eq 'Creative Cloud.exe' -and $_.SessionId -eq 0 }).Count", timeout=30).strip()
+        if out.isdigit() and int(out) > 0:
+            _kill_cc_in_session0()
+            time.sleep(2)
+            if _launch_cc_for_user():
+                print("  ↻ moved Creative Cloud out of the service session into the user's")
+    except Exception:
+        pass
+
+
 def _restart_cc():
-    """Bounce the Creative Cloud desktop app right after an install so it relaunches
-    and runs its own self-update check. Best-effort and silent — never fails a job,
-    and skipped while a render is active (don't disturb Adobe licensing mid-render)."""
+    """Restart the Creative Cloud desktop app so it re-checks Adobe for updates. Used only
+    by the explicit "Update Creative Cloud" action now — it no longer runs after every
+    install, which bounced the artist's Creative Cloud for no measurable benefit (Creative
+    Cloud keeps itself current). Never during a render."""
     ae_render = ["aerender.exe"] if IS_WINDOWS else ["aerender"]
     c4d = ["Cinema 4D.exe"] if IS_WINDOWS else ["Cinema 4D"]
     if _proc_running(ae_render + c4d):
@@ -1476,11 +1546,7 @@ def _restart_cc():
                 '/IM "CCXProcess.exe" 2>nul & ver >nul',
                 shell=True, capture_output=True, timeout=30)
             time.sleep(2)
-            for p in (r"C:\Program Files\Adobe\Adobe Creative Cloud\ACC\Creative Cloud.exe",
-                      r"C:\Program Files (x86)\Adobe\Adobe Creative Cloud\ACC\Creative Cloud.exe"):
-                if os.path.exists(p):
-                    subprocess.Popen([p], close_fds=True)
-                    break
+            _launch_cc_for_user()
         else:
             subprocess.run(
                 "pkill -f 'Adobe Desktop Service' 2>/dev/null; pkill -x 'Creative Cloud' 2>/dev/null; "
@@ -1490,7 +1556,7 @@ def _restart_cc():
             # -g: don't bring it to the foreground;  -j: launch hidden/minimized in the
             # background. CC still runs and self-updates, but never steals the screen.
             subprocess.run(["open", "-g", "-j", "-a", "Creative Cloud"], capture_output=True, timeout=20)
-        print("  ↻ restarted Creative Cloud (hidden) to pick up updates")
+        print("  ↻ restarted Creative Cloud to pick up updates")
     except Exception:
         pass
 
@@ -1738,9 +1804,6 @@ def _run_job(server, job):
                 note = "Installed: %s -> %s\n%s" % (before_ver, after_ver, tail)
             server.report(job_id, "success", note)
             print("  ✓ success (%s -> %s%s)" % (before_ver, after_ver, "" if rc == 0 else ", " + exit_note))
-            # Restart Creative Cloud right after any install so it self-updates too.
-            if job["product_key"] != "creativecloud":
-                _restart_cc()
         elif rc == 0 and rum_noop:
             server.report(job_id, "success",
                           "No RUM update needed — Adobe RUM reports this node is already "
@@ -2102,6 +2165,7 @@ def main():
     # Fast Startup so reboots cold-boot the agent before login (and Wake-on-LAN works).
     ensure_task_watchdog()
     ensure_fast_startup_disabled()
+    ensure_cc_in_user_session()
     wol_state = {"status": ensure_wol_enabled(), "at": time.time()}
 
     # Wedge watchdog: force a restart if the loop stalls or a job hangs (see above).
