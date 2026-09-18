@@ -15,7 +15,7 @@ import {
 import * as act from '../lib/actions.js';
 import { canUpdate, installerState, updateTargets } from '../lib/updater.js';
 import { Icon, OsStatus, ProductLogo, ViewToggle } from '../components/common.js';
-import { PageHeader } from '../components/page.js';
+import { FleetHeader } from '../components/page.js';
 import { StackBar, Donut, Num, Ring } from '../components/viz.js';
 import { RolloutList } from '../components/rollouts.js';
 import { openUpdate } from '../components/update-sheet.js';
@@ -305,10 +305,10 @@ export function UpdatesView() {
     .filter((g) => g.rows.length);
 
   return html`<div class="page updates-page">
-    <${PageHeader} title="Updates" subtitle=${updateCount ? `${plural(updateCount, 'update')} for ${plural(behindMachines.size, 'machine')}` : 'Every machine is up to date'}>
+    <${FleetHeader} lens="updates" subtitle=${updateCount ? `${plural(updateCount, 'update')} for ${plural(behindMachines.size, 'machine')}` : 'Every machine is up to date'}>
       <button class="btn" onClick=${() => openRollout({})}><${Icon} name="package" />Install a specific version…</button>
       ${available.length ? html`<${ViewToggle} value=${view.value} onChange=${(v) => { view.value = v; }} />` : null}
-    </${PageHeader}>
+    </${FleetHeader}>
 
     <div class="stack">
       <${Hero} s=${s} models=${models} updateCount=${updateCount} appsBehind=${available.filter((m) => m.behind.length).length} updateAll=${updateAll} />

@@ -127,7 +127,7 @@ export function GettingStarted() {
       state: installedEver ? 'done' : updates ? 'todo' : 'done',
       summary: updates ? `${plural(updates, 'update')} waiting` : installedEver ? 'Updates have run from here' : 'Nothing is behind right now',
       body: () => html`<div class="stack" style="gap:12px">
-        <p style="margin:0">Open <b>Updates</b>, press <b>Update all</b> — or tick a few apps, or open one app and choose machines. You always get a review step first: what installs where, what will make it wait, and whether it runs now or tonight.</p>
+        <p style="margin:0">Open <b>Farm</b>, press <b>Update all</b> — or tick a few apps, or open one app and choose machines. You always get a review step first: what installs where, what will make it wait, and whether it runs now or tonight.</p>
         <ul style="margin:0;padding-left:18px">
           <li>Installs never start under a render, and each machine does one at a time.</li>
           <li>A new version tries 3 machines first; if those fail, the rest is paused.</li>

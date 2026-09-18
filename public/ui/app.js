@@ -18,19 +18,24 @@ import { HelpView } from './views/help.js';
 import { Palette } from './components/palette.js';
 import { AskPanel, askOpen, askShortcut } from './components/ask.js';
 import { startAlerts } from './lib/alerts.js';
-import { normalizeProducts, isTracked } from './lib/domain.js';
-import { canUpdate, updateTargets } from './lib/updater.js';
+import { updatesWaiting } from './lib/updater.js';
 
 const ACTIVE = ['pending', 'downloading', 'installing'];
 
+// Updates, Machines and History are three ways of looking at the SAME farm, so they share one
+// nav item and one page (the lens switcher lives in the header — see components/page.js). They
+// keep their own addresses, so deep links and every cross-link between them still work; they
+// just move the switch now instead of leaving the page.
 const ROUTES = [
-  { name: 'updates', label: 'Updates', icon: 'download', key: 'u', view: () => html`<${UpdatesView} />` },
-  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
-  { name: 'history', label: 'History', icon: 'activity', key: 'h', view: () => html`<${HistoryView} />` },
+  { name: 'updates', label: 'Updates', icon: 'download', key: 'u', nav: 'Farm', view: () => html`<${UpdatesView} />` },
+  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', lens: true, view: () => html`<${MachinesView} />` },
+  { name: 'history', label: 'History', icon: 'activity', key: 'h', lens: true, view: () => html`<${HistoryView} />` },
   { name: 'catalog', label: 'Apps', icon: 'package', key: 'a', view: () => html`<${CatalogView} />` },
   { name: 'settings', label: 'Settings', icon: 'sliders', key: 's', view: () => html`<${SettingsView} />` },
   { name: 'help', label: 'Help', icon: 'help', key: '?', view: () => html`<${HelpView} />` },
 ];
+const FARM = ROUTES.filter((t) => t.nav === 'Farm' || t.lens).map((t) => t.name);
+const NAV = ROUTES.filter((t) => !t.lens);
 // Old addresses from before the updates-first layout.
 const MOVED = { overview: 'updates', timeline: 'machines', activity: 'history' };
 
@@ -54,19 +59,30 @@ function Sidebar() {
   const running = s ? s.jobs.filter((j) => ACTIVE.includes(j.status) && !(j.status === 'pending' && waiting.has(j.rollout_id))).length : 0;
   const failed = s ? s.jobs.filter((j) => j.status === 'failed' && j.updated_at > Date.now() - 24 * 3600 * 1000).length : 0;
   const offline = s ? s.nodes.filter((n) => !n.online).length : 0;
-  const available = s ? normalizeProducts(s).filter((p) => isTracked(p) && canUpdate(p)).reduce((c, p) => c + updateTargets(s, p).length, 0) : 0;
+  const available = updatesWaiting(s);
   const counts = {
     updates: running ? { n: running, cls: 'accent', title: `${running} updating or queued` } : available ? { n: available, cls: 'info', title: `${available} updates available` } : null,
-    machines: offline ? { n: offline, cls: 'bad', title: `${offline} offline` } : null,
-    history: failed ? { n: failed, cls: 'bad', title: `${failed} failed in the last 24 h` } : null,
   };
+  // The Farm item carries the update count; a red dot says something in there needs a look,
+  // so an offline machine or a failed install is still noticeable from any page.
+  const alert = offline || failed
+    ? [offline ? `${offline} offline` : '', failed ? `${failed} failed in the last 24 h` : ''].filter(Boolean).join(' · ')
+    : null;
   return html`<aside class="sidebar">
     <div class="brand"><span class="brand-mark"><${Icon} name="zap" /></span><div><b>deadline_farm</b><span>tracker</span></div></div>
     <nav class="nav" aria-label="Sections">
-      ${ROUTES.map((t) => html`<button key=${t.name} class=${'nav-item' + (r === t.name ? ' active' : '')} onClick=${() => go(t.name)} title=${`${t.label}  ·  g then ${t.key}`} aria-current=${r === t.name ? 'page' : null}>
-        <${Icon} name=${t.icon} /><span class="label">${t.label}</span>
-        ${counts[t.name] && html`<span class=${'nav-count ' + counts[t.name].cls} title=${counts[t.name].title}>${counts[t.name].n}</span><span class="dotcount"></span>`}
-      </button>`)}
+      ${NAV.map((t) => {
+        const isFarm = t.nav === 'Farm';
+        const on = isFarm ? FARM.includes(r) : r === t.name;
+        const label = t.nav || t.label;
+        return html`<button key=${t.name} class=${'nav-item' + (on ? ' active' : '')} onClick=${() => go(t.name)}
+          title=${isFarm ? `Updates, machines and history  ·  g then u / m / h${alert ? `  ·  ${alert}` : ''}` : `${t.label}  ·  g then ${t.key}`}
+          aria-current=${on ? 'page' : null}>
+          <${Icon} name=${t.icon} /><span class="label">${label}</span>
+          ${isFarm && alert ? html`<span class="nav-alert" title=${alert}></span>` : null}
+          ${counts[t.name] && html`<span class=${'nav-count ' + counts[t.name].cls} title=${counts[t.name].title}>${counts[t.name].n}</span><span class="dotcount"></span>`}
+        </button>`;
+      })}
     </nav>
     <div class="sidebar-foot">
       <button class=${'search-btn ask-btn' + (askOpen.value ? ' on' : '')} onClick=${() => { askOpen.value = !askOpen.value; }} title="Ask questions about the farm, answered by the local AI">

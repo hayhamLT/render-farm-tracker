@@ -11,8 +11,9 @@ import { askOpen } from './ask.js';
 
 export const paletteOpen = signal(false);
 
+// The first three are lenses on the one Farm page, named so searching "machines" still finds them.
 const SECTIONS = [
-  ['updates', 'Updates', 'download'], ['machines', 'Machines', 'server'], ['history', 'History', 'activity'],
+  ['updates', 'Farm · Updates', 'download'], ['machines', 'Farm · Machines', 'server'], ['history', 'Farm · History', 'activity'],
   ['catalog', 'Apps', 'package'], ['settings', 'Settings', 'sliders'], ['help', 'Help', 'help'],
 ];
 

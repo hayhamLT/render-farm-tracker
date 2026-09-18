@@ -16,7 +16,7 @@ import {
 import * as act from '../lib/actions.js';
 import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
 import { Icon, OsStatus, ProductLogo, Badge, Empty, ViewToggle } from '../components/common.js';
-import { PageHeader } from '../components/page.js';
+import { FleetHeader } from '../components/page.js';
 import { waitingRollout, whenLabel } from '../components/rollouts.js';
 import { Donut } from '../components/viz.js';
 import { openUpdate } from '../components/update-sheet.js';
@@ -397,9 +397,9 @@ export function MachinesView() {
   const online = nodes.filter((m) => m.node.online).length;
 
   return html`<div class="page">
-    <${PageHeader} title="Machines" subtitle=${`${nodes.length} machines · ${counts.behind} need updates · ${counts.updating} updating${nodes.length - online ? ` · ${nodes.length - online} offline` : ''}`}>
+    <${FleetHeader} lens="machines" subtitle=${`${nodes.length} machines · ${counts.behind} need updates · ${counts.updating} updating${nodes.length - online ? ` · ${nodes.length - online} offline` : ''}`}>
       <label class="search"><${Icon} name="search" /><input id="machine-search" class="field" placeholder="Search machines   /" value=${search.value} onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:240px" /></label>
-    </${PageHeader}>
+    </${FleetHeader}>
 
     <section class="card card-pad fleet">
       <${Donut} size=${118} stroke=${13} segments=${[

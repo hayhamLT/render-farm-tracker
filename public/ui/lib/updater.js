@@ -5,8 +5,8 @@
 import { get, post } from './api.js';
 import { ADOBE_RUM, presetCommand } from './presets.js';
 import {
-  appliesToOS, isDeployable, jobActiveFor, latestForOS, latestInstallerReady, nodesByKind, nudgeWaiting, productStatus,
-  savedSource, selfUpdateBehind, stagedFor, SELF_UPDATING,
+  appliesToOS, isDeployable, isTracked, jobActiveFor, latestForOS, latestInstallerReady, normalizeProducts, nodesByKind,
+  nudgeWaiting, productStatus, savedSource, selfUpdateBehind, stagedFor, SELF_UPDATING,
 } from './domain.js';
 
 // Creative Cloud has no installer to push per version: the tracker restarts Adobe's own updater
@@ -87,6 +87,14 @@ export async function queueUpdates(items, plan, { onProgress } = {}) {
     }
   }
   return { rollout, queued: [...new Set(queued)], skipped };
+}
+
+// How many updates are waiting across the whole farm — the number in the sidebar and on the
+// Updates lens. One definition, so they can never disagree.
+export function updatesWaiting(state) {
+  if (!state) return 0;
+  return normalizeProducts(state).filter((p) => isTracked(p) && canUpdate(p))
+    .reduce((c, p) => c + updateTargets(state, p).length, 0);
 }
 
 // Everything a machine is behind on (patches; majors only if asked).
