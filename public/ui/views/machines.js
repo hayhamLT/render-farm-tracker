@@ -11,7 +11,7 @@ import { get } from '../lib/api.js';
 import { pref, openMenu, isTyping } from '../lib/ui.js';
 import { ago, plural, parseJSON } from '../lib/format.js';
 import {
-  normalizeProducts, productStatus, activeJobFor, nodeActivity, deadlineStatus, isTracked, agentOutdated, canShutdown, AGENT_NAME,
+  normalizeProducts, productStatus, activeJobFor, nodeActivity, deadlineStatus, isTracked, agentOutdated, canShutdown, osVersionLabel, selfUpdateBehind, AGENT_NAME,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
@@ -290,7 +290,10 @@ function AppStatus({ s, node, p }) {
       title=${blockedReason(node) ? `Machine is ${blockedReason(node)}` : installerState(p, node.os).ok ? '' : installerState(p, node.os).label}
       onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Update ${p.name} on ${node.hostname}` })}><${Icon} name="download" />Update to ${st.target}</button>` : html`<span class="tag info">${st.target} available</span>`;
     case 'major': return canUpdate(p) ? html`<button class="btn sm ghost" onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Install ${p.name} ${st.target} on ${node.hostname}`, subtitle: 'New major — installs next to the current version' })}><${Icon} name="up" />Install ${String(st.target).split('.')[0]}</button>` : html`<span class="tag violet">new ${String(st.target).split('.')[0]}</span>`;
-    case 'selfupdate': return html`<span class="dim">Updates itself</span>`;
+    case 'selfupdate': return selfUpdateBehind(node, p)
+      ? html`<button class="btn sm" disabled=${!!blockedReason(node)} title=${blockedReason(node) ? `Machine is ${blockedReason(node)}` : `Restarts Adobe's updater so it picks up ${st.target}`}
+        onClick=${() => openUpdate([{ product: p, nodes: [node] }], { title: `Update ${p.name} on ${node.hostname}` })}><${Icon} name="refresh" />Update to ${st.target}</button>`
+      : html`<span class="dim">Updates itself</span>`;
     default: return html`<span class="dim">—</span>`;
   }
 }
@@ -354,8 +357,8 @@ function MachineDrawer({ hostname, model }) {
         <h3 class="section-title">Machine</h3>
         <dl class="kv">
           <dt>Status</dt><dd>${n.online ? 'Online' : 'Offline'} · last seen ${ago(n.last_seen, s.now)}</dd>
-          <dt>OS</dt><dd>${n.os_version || n.os}</dd>
-          <dt>IP</dt><dd class="mono">${(n.ip || '—').replace('::ffff:', '')}</dd>
+          <dt>OS</dt><dd>${osVersionLabel(n)}</dd>
+          <dt>IP</dt><dd class="mono">${(n.ip || '—').replace('::ffff:', '')}${n.reach && n.reach.ok && n.reach.addr && n.reach.addr !== (n.ip || '').replace('::ffff:', '') ? html` <span class="dim">(last check-in) — answers now at ${n.reach.addr}</span>` : ''}</dd>
           <dt>GPU</dt><dd>${n.gpu || '—'}${n.gpu_driver ? html` · driver <span class="mono">${n.gpu_driver}</span>` : ''}</dd>
           <dt>Disk</dt><dd style=${n.disk_free_gb != null && n.disk_free_gb < 20 ? 'color:var(--warn)' : ''}>${n.disk_free_gb != null ? `${Math.round(n.disk_free_gb)} GB free of ${Math.round(n.disk_total_gb || 0)} GB` : '—'}</dd>
           <dt>${AGENT_NAME}</dt><dd class="mono">${n.agent_version || '—'}${agentOutdated(s, n) ? html` <span style="color:var(--warn)">(updating itself to ${s.latestAgentVersion})</span>` : ''}</dd>

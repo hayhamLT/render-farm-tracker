@@ -44,6 +44,7 @@ const CONTENT = {
     <${QA} q="“No installer yet”">The new version's installer isn't on the share. With a saved download link the tracker fetches it once (the app shows "Downloads first"); otherwise add the installer or a link in <b>Apps</b>.<//>
     <${QA} q="NVIDIA drivers">Driver updates are always in-place. GTX 9xx/10xx cards stay on NVIDIA's legacy driver track, so they're never flagged behind the current driver. A pending Windows restart blocks the driver installer — restart first.<//>
     <${QA} q="After Effects">After Effects updates through Adobe Remote Update Manager (together with Media Encoder). RUM only patches within a major; a new major needs a full install from the Adobe Admin Console.<//>
+    <${QA} q="Creative Cloud">Adobe publishes no per-version installer for the Creative Cloud desktop app, so "Update" here restarts Adobe's own updater on each machine and Adobe applies the update from there — the new build shows up on the next check-in, not immediately. "Behind" means older than the newest build on the farm <b>for that OS</b> (Adobe numbers Windows and Mac builds differently). If a machine still won't move, reinstall the Creative Cloud app with <b>Install a specific version…</b>.<//>
     <${QA} q="Installing a specific version">Updates → <b>Install a specific version…</b> picks the installer yourself: a file on the share, a saved or pasted download link, and the exact machines.<//>`,
   schedule: () => html`
     <p>In the review step, <b>When</b> decides if the update runs now or later:</p>

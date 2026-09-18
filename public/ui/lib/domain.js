@@ -6,7 +6,9 @@ import { INSTALL_PRESETS, ADOBE_RUM } from './presets.js';
 
 export const AGENT_NAME = 'Beacon';
 
-// Adobe keeps Creative Cloud current itself: shown, never offered for update.
+// Adobe keeps Creative Cloud current itself — there is no installer to push for a given version.
+// The tracker can still move it along: it restarts Adobe's own updater on the machine (see
+// selfUpdateBehind / queueUpdates), which is what a person would do by hand.
 export const SELF_UPDATING = new Set(['creativecloud']);
 // Manager apps: no auto-deploy toggle ("self-managed"), still trackable.
 export const SELF_MANAGED = new Set(['creativecloud', 'maxonapp']);
@@ -24,18 +26,23 @@ const verMajor = (v) => { const m = String(v || '').match(/\d+/); return m ? Num
 
 export const PRODUCT_ORDER = ['creativecloud', 'aftereffects', 'maxonapp', 'cinema4d', 'redgiant', 'redshift'];
 
-// Display order, and Creative Cloud's "latest" = newest version seen on any machine.
+// Display order, and Creative Cloud's "latest" = newest version seen on the farm — PER OS.
+// Adobe numbers the Windows and Mac builds differently (6.10.0.252.41 vs 6.10.0.253), so a
+// single farm-wide maximum would mark every Windows machine behind a Mac forever.
 export function normalizeProducts(state) {
   const oi = (k) => { const i = PRODUCT_ORDER.indexOf(k); return i < 0 ? 99 : i; };
   return state.products
     .map((p) => {
       if (!SELF_UPDATING.has(p.key)) return p;
-      let max = p.latest_version || '';
+      const max = { windows: '', macos: '' };
       for (const n of state.nodes) {
         const sw = (n.software || []).find((s) => s.product_key === p.key);
-        if (sw && sw.version && (!max || cmpVersion(sw.version, max) > 0)) max = sw.version;
+        if (!sw || !sw.version || !(n.os in max)) continue;
+        if (!max[n.os] || cmpVersion(sw.version, max[n.os]) > 0) max[n.os] = sw.version;
       }
-      return { ...p, latest_version: max || p.latest_version };
+      const overall = [max.windows, max.macos, p.latest_version].filter(Boolean)
+        .sort((a, b) => cmpVersion(a, b)).pop();
+      return { ...p, latest_win: max.windows || p.latest_win, latest_mac: max.macos || p.latest_mac, latest_version: overall || p.latest_version };
     })
     .sort((a, b) => oi(a.key) - oi(b.key));
 }
@@ -46,9 +53,10 @@ export function productStatus(node, product) {
   const sw = (node.software || []).find((s) => s.product_key === product.key);
   if (!appliesToOS(product, node.os)) return { status: 'na', version: sw ? sw.version : null };
   if (SELF_UPDATING.has(product.key)) {
+    const newest = latestForOS(product, node.os);      // per-OS: Adobe numbers Win and Mac apart
     if (!sw || !sw.version) return { status: 'selfupdate', version: sw ? sw.version : null };
-    if (product.latest_version && cmpVersion(sw.version, product.latest_version) >= 0) return { status: 'uptodate', version: sw.version };
-    return { status: 'selfupdate', version: sw.version };
+    if (newest && cmpVersion(sw.version, newest) >= 0) return { status: 'uptodate', version: sw.version };
+    return { status: 'selfupdate', version: sw.version, target: newest || null };
   }
   if (!sw) {
     if (product.key === 'nvidia' && !/nvidia/i.test(node.gpu || '')) return { status: 'na', version: null };
@@ -62,6 +70,14 @@ export function productStatus(node, product) {
   return { status: kind, version: sw.version, target: latest };
 }
 
+// A self-updating app is "behind" when it's on an older build than the newest one on the farm —
+// that's the only target we can trust, since Adobe publishes no version we can stage.
+export function selfUpdateBehind(node, product) {
+  if (!SELF_UPDATING.has(product.key)) return false;
+  const st = productStatus(node, product);
+  return st.status === 'selfupdate' && !!st.version && !!st.target;
+}
+
 export const ACTIVE = ['pending', 'downloading', 'installing'];
 export const jobActiveFor = (state, node, productKey) =>
   state.jobs.some((j) => j.hostname === node.hostname && j.product_key === productKey && ACTIVE.includes(j.status));
@@ -70,7 +86,7 @@ export const activeJobFor = (state, node, productKey) =>
 
 // Tracked apps behind on this machine that aren't already queued/installing.
 export function outdatedProducts(state, products, node) {
-  return products.filter((p) => isTracked(p) && ['patch', 'major'].includes(productStatus(node, p).status) && !jobActiveFor(state, node, p.key));
+  return products.filter((p) => isTracked(p) && (['patch', 'major'].includes(productStatus(node, p).status) || selfUpdateBehind(node, p)) && !jobActiveFor(state, node, p.key));
 }
 
 export const stagedFor = (prod, os) => (os === 'windows' ? prod.staged_win : prod.staged_mac);
@@ -162,6 +178,18 @@ export function osVersionShort(n) {
   }
   const m = v.match(/(\d+)(?:\.\d+)*/);
   return m ? m[1] : '';
+}
+
+// Windows reports itself as "10.0.<build>" whatever it's called — build 22000+ IS Windows 11.
+// Show the name people actually use, and keep the build for anyone who needs it.
+export function osVersionLabel(n) {
+  const v = n.os_version || '';
+  if (n.os === 'windows') {
+    const m = v.match(/10\.0\.(\d+)/);
+    if (m) return `Windows ${Number(m[1]) >= 22000 ? '11' : '10'} \u00b7 build ${m[1]}`;
+    return v || 'Windows';
+  }
+  return v || 'macOS';
 }
 
 export const agentOutdated = (state, n) => !!(n.agent_version && state.latestAgentVersion && cmpVersion(n.agent_version, state.latestAgentVersion) < 0);

@@ -5,7 +5,7 @@ import { useState } from 'preact/hooks';
 import { farm, refresh } from '../lib/store.js';
 import { openSheet, toast } from '../lib/ui.js';
 import { plural } from '../lib/format.js';
-import { latestForOS, productStatus, nvidiaTarget } from '../lib/domain.js';
+import { latestForOS, productStatus, nvidiaTarget, SELF_UPDATING } from '../lib/domain.js';
 import { installerState, queueUpdates } from '../lib/updater.js';
 import { Icon, Badge, ProductLogo, OsStatus } from './common.js';
 import { WhenPicker, rolloutPlan, resetWhen, when, whenLabel } from './rollouts.js';
@@ -36,6 +36,7 @@ function ItemRow({ item }) {
       <${Icon} name="chevronDown" cls=${open ? 'flip-v' : ''} />
     </button>
     <div class="us-notes">
+      ${SELF_UPDATING.has(p.key) ? html`<${Badge} tone="info" icon="refresh">Restarts Adobe's updater — the new version lands once Adobe finishes<//>` : null}
       ${inst.filter((i) => !i.ok).map((i) => html`<${Badge} key=${i.os} tone="bad" icon="alert">${i.os === 'macos' ? 'Mac' : 'Windows'}: ${i.label}<//>`)}
       ${inst.filter((i) => i.ok && i.download).map((i) => html`<${Badge} key=${'d' + i.os} tone="info" icon="download">${i.os === 'macos' ? 'Mac' : 'Windows'}: ${i.label}<//>`)}
       ${w.offline.length ? html`<${Badge} tone="warn" icon="power" title=${w.offline.map((n) => n.hostname).join(', ')}>${w.offline.length} offline — updates when back<//>` : null}

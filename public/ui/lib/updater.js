@@ -5,11 +5,19 @@
 import { get, post } from './api.js';
 import { ADOBE_RUM, presetCommand } from './presets.js';
 import {
-  appliesToOS, isDeployable, jobActiveFor, latestForOS, latestInstallerReady, nodesByKind, productStatus, savedSource, stagedFor, SELF_UPDATING,
+  appliesToOS, isDeployable, jobActiveFor, latestForOS, latestInstallerReady, nodesByKind, productStatus, savedSource,
+  selfUpdateBehind, stagedFor, SELF_UPDATING,
 } from './domain.js';
+
+// Creative Cloud has no installer to push per version: the tracker restarts Adobe's own updater
+// on the machine, which then pulls whatever Adobe has. Same buttons, different mechanism.
+const NUDGE_COMMAND = '__RESTART_CC__';
 
 // Machines that can take this app's update now (behind, or new major when asked), grouped for the UI.
 export function updateTargets(state, product, { majors = false } = {}) {
+  if (SELF_UPDATING.has(product.key)) {
+    return state.nodes.filter((n) => !jobActiveFor(state, n, product.key) && selfUpdateBehind(n, product));
+  }
   const kinds = majors ? ['patch', 'major'] : ['patch'];
   return nodesByKind(state, product, ['windows', 'macos'], kinds);
 }
@@ -17,13 +25,14 @@ export function updateTargets(state, product, { majors = false } = {}) {
 // Can this app be updated on this OS without a manual step?
 export function installerState(product, os) {
   if (!appliesToOS(product, os)) return { ok: true, label: '' };
+  if (SELF_UPDATING.has(product.key)) return { ok: true, label: "Adobe's own updater", nudge: true };
   if (ADOBE_RUM[product.key]) return ADOBE_RUM[product.key][os] ? { ok: true, label: 'Adobe RUM' } : { ok: false, label: 'No Adobe package for this OS' };
   if (latestInstallerReady(product, os)) return { ok: true, label: 'Installer ready' };
   if (savedSource(product, os)) return { ok: true, label: 'Downloads the installer first', download: true };
   return { ok: false, label: 'Installer not on the share yet' };
 }
 
-export const canUpdate = (product) => isDeployable(product) && !SELF_UPDATING.has(product.key);
+export const canUpdate = (product) => SELF_UPDATING.has(product.key) || isDeployable(product);
 
 async function downloadToShare(link, onProgress) {
   const { dlId, filename } = await post('/api/download-url', { url: link });
@@ -52,7 +61,10 @@ export async function queueUpdates(items, plan, { onProgress } = {}) {
       try {
         let pkg;
         const rum = ADOBE_RUM[p.key];
-        if (rum) {
+        if (SELF_UPDATING.has(p.key)) {
+          // No file: the agent restarts the Creative Cloud desktop app so it re-checks Adobe.
+          pkg = { product_key: p.key, version: latestForOS(p, os) || 'latest', os, kind: 'command', install_command: NUDGE_COMMAND };
+        } else if (rum) {
           if (!rum[os]) { skipped.push(`${label}: no Adobe package for this OS`); continue; }
           pkg = { product_key: p.key, version: p.latest_version || 'latest', os, kind: 'installer', filename: rum[os].filename, install_command: rum[os].command };
         } else {
@@ -81,6 +93,7 @@ export async function queueUpdates(items, plan, { onProgress } = {}) {
 // Everything a machine is behind on (patches; majors only if asked).
 export function machineUpdates(state, products, node, { majors = false } = {}) {
   return products.filter((p) => canUpdate(p) && p.dashboard_hidden !== 1 && !jobActiveFor(state, node, p.key)).filter((p) => {
+    if (SELF_UPDATING.has(p.key)) return selfUpdateBehind(node, p);
     const st = productStatus(node, p).status;
     return st === 'patch' || (majors && st === 'major');
   });

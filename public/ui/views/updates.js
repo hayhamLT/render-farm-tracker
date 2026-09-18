@@ -9,7 +9,7 @@ import { go } from '../lib/router.js';
 import { openMenu, pref } from '../lib/ui.js';
 import { ago, plural, cmpVersion } from '../lib/format.js';
 import {
-  normalizeProducts, isTracked, appliesToOS, productStatus, inProgressNodes, latestForOS, nodesByKind, nvidiaTarget, SELF_UPDATING,
+  normalizeProducts, isTracked, appliesToOS, productStatus, inProgressNodes, latestForOS, nodesByKind, nvidiaTarget,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, installerState, updateTargets } from '../lib/updater.js';
@@ -70,6 +70,7 @@ function Installers({ m }) {
   const dl = m.installers.filter((i) => i.ok && i.download);
   if (bad.length) return html`<span class="ur-inst bad" title=${bad.map((i) => `${i.os === 'macos' ? 'Mac' : 'Windows'}: ${i.label}`).join('\n')}><${Icon} name="alert" />${bad.length === m.installers.length ? 'No installer yet' : `No ${bad[0].os === 'macos' ? 'Mac' : 'Windows'} installer`}</span>`;
   if (dl.length) return html`<span class="ur-inst info" title="The tracker downloads it to the share first"><${Icon} name="download" />Downloads first</span>`;
+  if (m.installers.some((i) => i.nudge)) return html`<span class="ur-inst info" title="Adobe publishes no installer for a given version — the tracker restarts Creative Cloud's own updater on each machine, and Adobe applies the update from there."><${Icon} name="refresh" />Adobe's updater</span>`;
   return null;
 }
 
@@ -277,7 +278,7 @@ export function UpdatesView() {
   const pending = available.filter((m) => m.behind.length || m.updating.length);
   const majors = models.filter((m) => canUpdate(m.p) && m.majors.length);
   const current = available.filter((m) => !m.behind.length && !m.updating.length);
-  const selfManaged = models.filter((m) => m.installed.length && (SELF_UPDATING.has(m.p.key) || !canUpdate(m.p)));
+  const selfManaged = models.filter((m) => m.installed.length && !canUpdate(m.p));
   const behindMachines = new Set(available.flatMap((m) => m.behind.map((n) => n.id)));
   const updateCount = available.reduce((c, m) => c + m.behind.length, 0);
   const openRollouts = (s.rollouts || []).filter((r) => ['scheduled', 'running'].includes(r.status));

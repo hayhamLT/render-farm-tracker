@@ -3,7 +3,7 @@ import { html } from '../lib/html.js';
 import { useEffect, useRef } from 'preact/hooks';
 import { ICONS } from './icon-paths.js';
 import { TILE } from '../lib/presets.js';
-import { osVersionShort } from '../lib/domain.js';
+import { osVersionShort, osVersionLabel } from '../lib/domain.js';
 import { url } from '../lib/api.js';
 import { toasts, dismissToast, dialog, menu, closeMenu } from '../lib/ui.js';
 
@@ -16,7 +16,7 @@ export function Icon({ name, cls = '', title }) {
 // Machine state as its OS mark: green when online, red when offline, with the OS version.
 export function OsStatus({ node }) {
   const v = osVersionShort(node);
-  const full = node.os_version || (node.os === 'windows' ? 'Windows' : 'macOS');
+  const full = osVersionLabel(node);
   return html`<span class="os-status" title=${`${full} · ${node.online ? 'online' : 'offline'}`}
     style=${`position:relative;display:inline-flex;color:${node.online ? 'var(--ok)' : 'var(--bad)'}`}>
     <${Icon} name=${node.os === 'windows' ? 'windows' : 'apple'} />
