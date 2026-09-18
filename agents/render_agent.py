@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.32.0"
+AGENT_VERSION = "2.33.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -181,6 +181,13 @@ def ensure_task_watchdog():
     admin-only by default and isn't even visible to other users, so remote repair — a
     Deadline job, which runs as whoever is logged in — died on "Access is denied" and a
     machine whose agent had stopped could only be revived by hand (RAZER-01, Sep 2026).
+
+    And makes sure the task actually RUNS as SYSTEM. Nodes enrolled before elevate.ps1
+    pinned the principal carry `UserId=<the desktop user>, LogonType=Interactive`, which
+    means the task only runs while that user is logged in — so on a machine with
+    auto-login off (AVA-01, MARS-04, RAZER-01), a reboot left the machine powered on with
+    no agent and no way to start one. Switching the principal keeps the same action and
+    triggers; the agent simply runs as SYSTEM from its next start.
     """
     if not IS_WINDOWS:
         return
@@ -191,6 +198,9 @@ def ensure_task_watchdog():
         "$beat=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1) "
         "-RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650);"
         "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Trigger @($boot,$beat) | Out-Null;"
+        "if($t.Principal.UserId -notmatch 'SYSTEM'){try{"
+        "$p=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest;"
+        "Set-ScheduledTask -TaskName 'TrackerAgentElevated' -Principal $p | Out-Null}catch{}}"
         "try{$svc=New-Object -ComObject Schedule.Service;$svc.Connect();"
         "$svc.GetFolder('\\').GetTask('TrackerAgentElevated')"
         ".SetSecurityDescriptor('D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;GRGX;;;AU)',0)}catch{}}"
