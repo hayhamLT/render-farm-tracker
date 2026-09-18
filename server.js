@@ -1479,23 +1479,38 @@ echo "tracker-agent installed on \$(hostname)"
 function winEnrollUser(base) {
   return `$ErrorActionPreference = "Stop"
 $dir = "$env:ProgramData\\TrackerAgent"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $py = "C:\\Program Files\\Thinkbox\\Deadline10\\bin\\python3\\python.exe"
 if (-not (Test-Path $py)) { $py = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
-Invoke-WebRequest "${base}/agent" -OutFile "$dir\\render_agent.py" -UseBasicParsing
-$script = "$dir\\render_agent.py"
-$cmd = '"' + $py + '" "' + $script + '" --server ${base} --key ${config.agentKey} --interval 60'
-# If this node was elevated (TrackerAgentElevated scheduled task), DON'T clobber it —
-# just refresh the agent script and restart the elevated task, preserving elevation.
+# An elevated node keeps its elevation: the agent file there belongs to SYSTEM and a
+# standard user CAN'T overwrite it (that's what killed the remote repair of RAZER-01,
+# Sep 2026). So check for the task BEFORE touching any file, and just restart it.
 $elev = Get-ScheduledTask -TaskName "TrackerAgentElevated" -ErrorAction SilentlyContinue
 if ($elev) {
   Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like '*render_agent.py*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  Start-ScheduledTask -TaskName "TrackerAgentElevated"
-  Write-Host "tracker-agent (elevated) refreshed on $env:COMPUTERNAME"
-  return
+  try {
+    Start-ScheduledTask -TaskName "TrackerAgentElevated"
+    Write-Host "tracker-agent (elevated) restarted on $env:COMPUTERNAME"
+    return
+  } catch {
+    # A task registered by SYSTEM can only be STARTED by an admin, so a repair run as the
+    # desktop user (a Deadline job) lands here. Don't give up: install a user-level agent so
+    # the machine reports again; the SYSTEM task takes over again at the next boot.
+    Write-Host "elevated task can't be started as $env:USERNAME — installing a user-level agent instead"
+  }
 }
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+# If ProgramData isn't writable for this user, fall back to their own folder rather than failing.
+try {
+  Invoke-WebRequest "${base}/agent" -OutFile "$dir\\render_agent.py" -UseBasicParsing
+} catch {
+  $dir = "$env:LOCALAPPDATA\\TrackerAgent"
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  Invoke-WebRequest "${base}/agent" -OutFile "$dir\\render_agent.py" -UseBasicParsing
+}
+$script = "$dir\\render_agent.py"
+$cmd = '"' + $py + '" "' + $script + '" --server ${base} --key ${config.agentKey} --interval 60'
 # Kill any already-running tracker agent so re-enrolment never stacks duplicates.
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -like '*render_agent.py*' } |
