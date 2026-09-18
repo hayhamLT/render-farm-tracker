@@ -2,18 +2,24 @@
 // checks, and adding your own (with auto-fill from a link).
 import { html } from '../lib/html.js';
 import { useState } from 'preact/hooks';
+import { signal } from '@preact/signals-core';
 import { farm, refresh } from '../lib/store.js';
 import { post, put, del } from '../lib/api.js';
 import { pref, toast, confirm, openSheet, openMenu } from '../lib/ui.js';
 import { ago, plural } from '../lib/format.js';
-import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS } from '../lib/domain.js';
+import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS, nodesByKind } from '../lib/domain.js';
+import { canUpdate, updateTargets } from '../lib/updater.js';
 import * as act from '../lib/actions.js';
+import { go } from '../lib/router.js';
 import { Icon, ProductLogo, Badge, Empty, ViewToggle } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
-import { StackBar, Ring } from '../components/viz.js';
+import { StackBar } from '../components/viz.js';
+import { openUpdate } from '../components/update-sheet.js';
+import { openRollout } from './deploy.js';
 import { InstallerLibrary } from './installers.js';
 
 const tab = pref('catalog.tab', 'catalog');
+const search = signal('');
 const SECTIONS = [['app', 'Apps'], ['plugin', 'Plug-ins'], ['script', 'Scripts']];
 const view = pref('apps.view', 'grid');
 // Anything that isn't the installer library is the catalog (older builds stored 'app'/'plugin').
@@ -178,10 +184,49 @@ async function uninstallProduct(p, s) {
   refresh();
 }
 
+const behindCount = (s, p) => (canUpdate(p) ? updateTargets(s, p).length : 0);
+
+// The newest version the tracker knows about — per OS when Windows and Mac are numbered
+// differently. "Not detected" used to be a dead end; now it says what to do about it, and
+// for your own apps it opens the place where you say where to look.
+function Latest({ p }) {
+  const split = p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac;
+  if (split) return html`Win ${p.latest_win} · Mac ${p.latest_mac}`;
+  if (p.latest_version) return html`${p.latest_version}`;
+  return p.custom
+    ? html`<button class="linkish" title="Set where the tracker should look for this app's version" onClick=${() => editProduct(p)}>set a version source…</button>`
+    : html`<button class="linkish" title="The tracker hasn't read a version for this app yet" onClick=${act.checkVersions}>check now…</button>`;
+}
+
+// Everything you can do TO an app, from the page where you're looking at it. This used to be a
+// settings screen: you could see that Redshift was current on 5 of 29 machines and had to go
+// somewhere else to act on it. Update / install where missing / a specific version / uninstall.
+function appActions(p, s, e) {
+  const behind = canUpdate(p) ? updateTargets(s, p) : [];
+  const missing = canUpdate(p) ? nodesByKind(s, p, ['windows', 'macos'], ['missing']) : [];
+  const custom = !!p.custom;
+  openMenu(e.currentTarget, [
+    { label: behind.length ? `Update ${plural(behind.length, 'machine')}…` : 'Nothing to update', icon: 'download', disabled: !behind.length,
+      onSelect: () => openUpdate([{ product: p, nodes: behind }], { title: `Update ${p.name}` }) },
+    { label: missing.length ? `Install where it's missing (${missing.length})…` : 'Installed everywhere it applies', icon: 'plus', disabled: !missing.length,
+      onSelect: () => openUpdate([{ product: p, nodes: missing }], { title: `Install ${p.name}`, subtitle: `${plural(missing.length, 'machine')} without it` }) },
+    { label: 'Install a specific version…', icon: 'package', onSelect: () => openRollout({ productKey: p.key, mode: 'choose' }) },
+    '-',
+    { label: 'Show machines with it', icon: 'server', onSelect: () => go('machines') },
+    { label: 'Uninstall from machines…', icon: 'x', danger: true, onSelect: () => uninstallProduct(p, s) },
+    ...(custom ? ['-',
+      { label: `Edit ${p.name}`, icon: 'edit', onSelect: () => editProduct(p) },
+      { label: 'Delete from the tracker', icon: 'trash', danger: true, onSelect: () => deleteProduct(p) },
+    ] : []),
+  ]);
+}
+
 export function CatalogView() {
   const s = farm.value;
   if (!s) return html`<div class="page"><${Empty}>Loading…<//></div>`;
-  const products = normalizeProducts(s);
+  const all = normalizeProducts(s);
+  const q = search.value.trim().toLowerCase();
+  const products = q ? all.filter((p) => `${p.name} ${p.key}`.toLowerCase().includes(q)) : all;
   const count = (c) => products.filter((p) => catOf(p) === c).length;
   const sections = SECTIONS.map(([k, label]) => ({ k, label, rows: products.filter((p) => catOf(p) === k) }));
   const setTrack = async (p, shown) => {
@@ -200,6 +245,9 @@ export function CatalogView() {
   };
   return html`<div class="page stack">
     <${PageHeader} title="Apps" subtitle="What the tracker keeps updated, where new versions come from, and the installers on the share.">
+      ${onCatalog() ? html`<label class="search"><${Icon} name="search" />
+        <input id="app-search" class="field" placeholder="Search apps   /" value=${search.value}
+          onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:200px" /></label>` : null}
       <button class="btn" onClick=${act.checkVersions}><${Icon} name="refresh" />Check for updates</button>
       ${onCatalog() ? html`<button class="btn primary" onClick=${(e) => openMenu(e.currentTarget, SECTIONS.map(([k, l]) => ({ label: `Add ${LABEL[k]}`, icon: 'plus', onSelect: () => addProduct(k) })))}><${Icon} name="plus" />Add…</button>` : null}
     </${PageHeader}>
@@ -219,32 +267,28 @@ export function CatalogView() {
             const tracked = p.dashboard_hidden !== 1;
             return html`<tr key=${p.key} style=${tracked ? '' : 'opacity:.6'}>
               <td class="nowrap"><span class="row" style="flex-wrap:nowrap;gap:10px"><${ProductLogo} product=${p} size=${22} /><b>${p.name}</b></span></td>
-              <td class="mono nowrap">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</td>
+              <td class="mono nowrap"><${Latest} p=${p} /></td>
               <td>${cv.have ? html`<div class="row" style="flex-wrap:nowrap;gap:9px"><${StackBar} height=${6} total=${cv.have} parts=${[{ value: cv.current, color: 'var(--ok)', label: 'current' }, { value: cv.have - cv.current, color: 'var(--info)', label: 'behind' }]} /><span class="mono nowrap" style="font-size:.78rem">${cv.current}/${cv.have}</span></div>` : html`<span class="dim">not installed</span>`}</td>
               <td><${Switch} on=${tracked} label=${`Track ${p.name}`} onChange=${(on) => setTrack(p, on)} /></td>
               <td>${SELF_MANAGED.has(p.key) ? html`<span class="dim" title="Updates itself">self</span>` : html`<${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} />`}</td>
-              <td class="right nowrap">${p.custom ? html`
-                <button class="btn sm ghost icon" title="Edit" onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
-                <button class="btn sm ghost icon" title="Uninstall from machines" onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
-                <button class="btn sm ghost icon" title="Delete from the tracker" onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}</td>
+              <td class="right nowrap">
+                ${behindCount(s, p) ? html`<button class="btn sm" onClick=${() => openUpdate([{ product: p, nodes: updateTargets(s, p) }], { title: `Update ${p.name}` })}><${Icon} name="download" />Update ${behindCount(s, p)}</button>` : null}
+                <button class="btn sm ghost icon" title=${`More for ${p.name}`} aria-label=${`More for ${p.name}`} onClick=${(e) => appActions(p, s, e)}><${Icon} name="more" /></button>
+              </td>
             </tr>`;
           })}</tbody></table></div>`
         : html`<div class="appgrid">${sec.rows.map((p) => {
           const cv = coverage(p);
           const tracked = p.dashboard_hidden !== 1;
-          const pct = cv.have ? Math.round((cv.current / cv.have) * 100) : null;
           return html`<article key=${p.key} class=${'card acard' + (tracked ? '' : ' off')}>
             <header>
               <${ProductLogo} product=${p} size=${34} />
               <div class="ac-name"><b>${p.name}</b><span class="dim">${p.custom ? 'Custom' : 'Built in'}${p.check_url ? ' · checks a web page' : ''}</span></div>
-              <${Ring} size=${52} stroke=${6} total=${Math.max(1, cv.have)} label=${cv.have ? `${cv.current} of ${cv.have} machines current` : 'not installed anywhere'}
-                segments=${[{ value: cv.current, color: 'var(--ok)' }, { value: cv.have - cv.current, color: 'var(--info)' }]}>
-                <span class="ac-pct">${pct == null ? '–' : pct}${pct == null ? '' : html`<small>%</small>`}</span>
-              <//>
+              <button class="btn sm ghost icon" title=${`More for ${p.name}`} aria-label=${`More for ${p.name}`} onClick=${(e) => appActions(p, s, e)}><${Icon} name="more" /></button>
             </header>
             <div class="ac-ver">
               <span class="l">Latest</span>
-              <span class="mono">${p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac ? `Win ${p.latest_win} · Mac ${p.latest_mac}` : p.latest_version || html`<span class="dim">not detected</span>`}</span>
+              <span class="mono"><${Latest} p=${p} /></span>
               ${p.updated_at ? html`<span class="dim">checked ${ago(p.updated_at, s.now)}</span>` : null}
             </div>
             <div class="ac-cov">
@@ -257,10 +301,7 @@ export function CatalogView() {
                 ? html`<span class="dim" title="Updates itself or rides along with other installs">self-managed</span>`
                 : html`<label class="ac-toggle"><${Switch} on=${!!p.autodeploy} label=${`Auto-deploy ${p.name}`} onChange=${(on) => setAuto(p, on)} /><span title="Install new versions everywhere automatically, testing on 3 machines first">Auto</span></label>`}
               <span class="grow"></span>
-              ${p.custom ? html`
-                <button class="btn sm ghost icon" title="Edit" aria-label=${`Edit ${p.name}`} onClick=${() => editProduct(p)}><${Icon} name="edit" /></button>
-                <button class="btn sm ghost icon" title="Uninstall from machines" aria-label=${`Uninstall ${p.name}`} onClick=${() => uninstallProduct(p, s)}><${Icon} name="x" /></button>
-                <button class="btn sm ghost icon" title="Delete from the tracker" aria-label=${`Delete ${p.name}`} onClick=${() => deleteProduct(p)}><${Icon} name="trash" /></button>` : null}
+              ${behindCount(s, p) ? html`<button class="btn sm" onClick=${() => openUpdate([{ product: p, nodes: updateTargets(s, p) }], { title: `Update ${p.name}` })}><${Icon} name="download" />Update ${behindCount(s, p)}</button>` : null}
             </footer>
           </article>`;
         })}</div>`}
