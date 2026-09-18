@@ -7,7 +7,7 @@ import { farm, refresh } from '../lib/store.js';
 import { post, put, del } from '../lib/api.js';
 import { pref, toast, confirm, openSheet, openMenu } from '../lib/ui.js';
 import { ago, plural } from '../lib/format.js';
-import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS, nodesByKind } from '../lib/domain.js';
+import { normalizeProducts, SELF_MANAGED, productStatus, appliesToOS, nodesByKind, sourceProblem } from '../lib/domain.js';
 import { canUpdate, updateTargets } from '../lib/updater.js';
 import * as act from '../lib/actions.js';
 import { go } from '../lib/router.js';
@@ -190,6 +190,12 @@ const behindCount = (s, p) => (canUpdate(p) ? updateTargets(s, p).length : 0);
 // differently. "Not detected" used to be a dead end; now it says what to do about it, and
 // for your own apps it opens the place where you say where to look.
 function Latest({ p }) {
+  const s = farm.value;
+  const bad = s && sourceProblem(s, p.key);
+  const warn = bad ? html`<span class="tag warn" style="margin-left:6px" title=${`${bad.label}: ${bad.error}${bad.ok_at ? ` — last worked ${ago(bad.ok_at, s.now)}` : ''}. New versions won't be noticed until this works again.`}><${Icon} name="alert" />source not answering</span>` : null;
+  return html`<${LatestValue} p=${p} />${warn}`;
+}
+function LatestValue({ p }) {
   const split = p.latest_win && p.latest_mac && p.latest_win !== p.latest_mac;
   if (split) return html`Win ${p.latest_win} · Mac ${p.latest_mac}`;
   if (p.latest_version) return html`${p.latest_version}`;

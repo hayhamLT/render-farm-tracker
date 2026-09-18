@@ -10,7 +10,7 @@ import { openMenu, pref } from '../lib/ui.js';
 import { ago, plural, cmpVersion } from '../lib/format.js';
 import {
   normalizeProducts, isTracked, appliesToOS, productStatus, inProgressNodes, latestForOS, nodesByKind, nvidiaTarget,
-  nudgeWaiting, selfUpdateBehind,
+  nudgeWaiting, selfUpdateBehind, sourceProblem,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, installerState, updateTargets } from '../lib/updater.js';
@@ -194,11 +194,15 @@ function Attention({ s, models }) {
   const behindIds = new Set(models.flatMap((m) => m.behind.map((n) => n.id)));
   const offline = s.nodes.filter((n) => !n.online && behindIds.has(n.id));
   const notReady = s.nodes.filter((n) => n.elevated === 0 && behindIds.has(n.id));
+  const broken = models.map((m) => ({ m, src: sourceProblem(s, m.p.key) })).filter((x) => x.src);
   const items = [
     failedLatest.length && { tone: 'bad', icon: 'alert', text: `${plural(failedLatest.length, 'install')} failed in the last 24 h`, detail: failedLatest.slice(0, 4).map((j) => j.hostname).join(', '),
       actions: [{ label: 'Retry all', run: async () => { for (const j of failedLatest) await act.retryJob(j); } }, { label: 'View', run: () => go('history') }] },
     offline.length && { tone: 'warn', icon: 'power', text: `${plural(offline.length, 'machine')} with updates ${offline.length === 1 ? 'is' : 'are'} offline`, detail: offline.slice(0, 5).map((n) => n.hostname).join(', '),
       actions: [{ label: 'Wake', run: () => act.wake(offline) }] },
+    broken.length && { tone: 'warn', icon: 'alert', text: `Can't check for new versions of ${broken.map((x) => x.m.p.name).join(', ')}`,
+      detail: broken.map((x) => `${x.src.label}: ${x.src.error}${x.src.ok_at ? ` (last worked ${ago(x.src.ok_at, s.now)})` : ''}`).join(' · '),
+      actions: [{ label: 'Check again', run: act.checkVersions }] },
     notReady.length && { tone: 'warn', icon: 'shieldOff', text: `${plural(notReady.length, 'machine')} can't install silently yet`, detail: 'Run the elevate command once on them (Settings → Enroll a machine)',
       actions: [{ label: 'How', run: () => go('settings') }] },
   ].filter(Boolean);

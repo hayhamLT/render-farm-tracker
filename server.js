@@ -18,6 +18,8 @@ const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
 const timeline = require('./lib/timeline');
 const reachability = require('./lib/reachability');
+const sourceHealth = require('./lib/source_health');
+sourceHealth.init(db);
 const { createRollouts } = require('./lib/rollouts');
 const { createAsk } = require('./lib/ask');
 const installerFiles = require('./lib/installer_files');
@@ -188,7 +190,14 @@ function fetchToInstallers(dlId, fileUrl, filename, destDir) {
 
   const go = (u, redirects) => {
     if (redirects > 8) { fail('too many redirects'); return; }
-    const lib = u.startsWith('https:') ? https : http;
+    // Installers run as SYSTEM on every machine, so they only ever come over https — including
+    // every redirect hop. A vendor link that bounces to plain http is refused, not followed.
+    if (!/^https:/i.test(u)) {
+      fail(redirects ? `the download redirected to plain http (${u}) — refused; installers only come over https`
+        : `refusing to download an installer over plain http (${u}) — use the vendor's https link`);
+      return;
+    }
+    const lib = https;
     const req = lib.get(u, { headers: { 'User-Agent': 'tracker/1' } }, (resp) => {
       if ([301, 302, 303, 307, 308].includes(resp.statusCode) && resp.headers.location) {
         resp.resume();
@@ -491,12 +500,16 @@ async function checkCustomVersions() {
         } else {
           ver = (txt.match(/\d+(?:\.\d+){1,3}/g) || []).sort((a, b) => cmpVersionServer(a, b)).pop() || null;
         }
+        sourceHealth.record(prod.key, (() => { try { return new URL(prod.check_url).hostname; } catch { return 'its web page'; } })(),
+          !!ver, ver || (prod.check_regex ? 'the page answered but the pattern matched nothing' : 'no version number on the page'));
         if (ver && (!prod.latest_version || cmpVersionServer(ver, prod.latest_version) > 0)) {
           db.prepare('UPDATE products SET latest_version = ?, updated_at = ? WHERE key = ?').run(ver, Date.now(), prod.key);
           logEvent('catalog', `Auto-detected newer ${prod.name}: latest is now ${ver}`);
           bumped.push(`${prod.key} ${ver}`);
         }
-      } catch { /* best-effort: leave the manual/last value */ }
+      } catch (e) {
+        sourceHealth.record(prod.key, 'its web page', false, e.message);   // leave the last known value
+      }
     } else {
       // No version source configured → derive "latest" from the newest staged installer's
       // filename, so just dropping the installer on the share makes the product deployable.
@@ -532,6 +545,25 @@ async function checkCustomVersions() {
   return { bumped, fetched };
 }
 
+// A version source that has produced nothing for a day gets said out loud — once a day, in Slack
+// and the event log — instead of the farm silently freezing on its current versions.
+const SOURCE_STALE_MS = 24 * 3600 * 1000;
+const _sourceAlerted = new Map();
+function checkSourceHealth() {
+  const now = Date.now();
+  for (const src of sourceHealth.all()) {
+    const prod = db.prepare('SELECT * FROM products WHERE key = ?').get(src.key);
+    if (!prod || !isTracked(prod)) continue;
+    if (src.ok) { _sourceAlerted.delete(src.key); continue; }
+    if (src.ok_at && now - src.ok_at < SOURCE_STALE_MS) continue;          // a blip — give it a day
+    if (now - (_sourceAlerted.get(src.key) || 0) < SOURCE_STALE_MS) continue;
+    _sourceAlerted.set(src.key, now);
+    const since = src.ok_at ? `since ${new Date(src.ok_at).toLocaleString()}` : 'since the tracker started watching it';
+    logEvent('catalog', `Version check for ${prod.name} (${src.label}) hasn't worked ${since}: ${src.error}`);
+    notifySlack(`⚠️ The version check for *${prod.name}* (${src.label}) hasn't worked ${since} — ${src.error}. New ${prod.name} versions won't be noticed until it's fixed.`);
+  }
+}
+
 // When the version check last ran to completion — shown as "last version check". Products'
 // updated_at only moves when a version is bumped OR the app's settings are edited, so it
 // was a poor stand-in: turning auto-deploy on reset it and made the checks look 11 h stale.
@@ -552,6 +584,8 @@ function runMaxonVersionCheck() {
       if (r.bumped.length || r.fetched.length) console.log('Custom products:', JSON.stringify(r));
       if (r.bumped.length) notifySlack(`🆕 New version detected: ${r.bumped.join(', ')}`);
       lastVersionCheck = Date.now();
+      checkSourceHealth();
+      return verifyVendorChecksums();
     })
     .catch((e) => console.error('version/installer check failed:', e.message));
 }
@@ -1657,6 +1691,7 @@ function fullState() {
     monitoring: { active: config.monitoringActive },
     latestAgentVersion: LATEST_AGENT_VERSION,   // newest Beacon the server serves — flags out-of-date agents
     lastVersionCheck,                            // when the version check last completed (null until the first run)
+    versionSources: sourceHealth.all(),          // per app: did its version source answer, and since when
     maxConcurrentInstalls: config.maxConcurrentInstalls || 4,
     slackWebhook: config.slackWebhook || '',
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
@@ -1786,6 +1821,102 @@ function reconcileRunning(node, body, now) {
     logEvent('job', `Job #${j.id} failed: ${node.hostname} stopped running it without reporting a result`);
   }
   return [...stop];
+}
+
+// Who must have signed each app's installer before an agent will run it (agent 2.36+). Read off
+// the farm's real installers on Sep 18, 2026 — Authenticode subject on Windows, Apple Team ID on
+// macOS — not guessed. Apps not listed (your own custom apps) carry no expectation: the agent
+// records who signed them and runs them.
+const VENDOR_SIGNERS = {
+  cinema4d: { windows: ['Maxon Computer GmbH'], macos: ['4ZY22YGXQG'] },
+  redshift: { windows: ['Maxon Computer GmbH'], macos: ['4ZY22YGXQG'] },
+  redgiant: { windows: ['Maxon Computer GmbH'], macos: ['4ZY22YGXQG'] },
+  maxonapp: { windows: ['Maxon Computer GmbH'], macos: ['4ZY22YGXQG'] },
+  nvidia: { windows: ['NVIDIA Corporation'] },
+  blender: { windows: ['Blender Foundation'], macos: ['68UA947AUU'] },
+  notchlc: { windows: ['10 Bit FX Limited'], macos: ['84ZPL6724B'] },
+  creativecloud: { windows: ['Adobe Inc.', 'Adobe Systems Incorporated'], macos: ['JQ525L2MZD'] },
+  aftereffects: { windows: ['Adobe Inc.', 'Adobe Systems Incorporated'], macos: ['JQ525L2MZD'] },
+};
+// Adobe Admin Console packages are built for YOUR organisation by your Admin Console and are
+// never signed (Adobe_CC_No-Apps.msi / .pkg — confirmed on both). They're allowed unsigned, and
+// the job log says so.
+const ADMIN_CONSOLE_PKG = /^Adobe_.*(No-Apps|_en_US_)/i;
+
+// FFmpeg ships as a zip — nothing to sign — so it's checked against the vendor's own published
+// checksum instead. gyan.dev (Windows) publishes a SHA-256 per build; evermeet.cx (Mac) doesn't
+// publish one the tracker can check, so the Mac build is allowed but explicitly recorded as NOT
+// vendor-verified rather than quietly trusted.
+db.exec(`CREATE TABLE IF NOT EXISTS vendor_checksums (
+  filename TEXT PRIMARY KEY, sha256 TEXT NOT NULL, source TEXT, verified_at INTEGER)`);
+function vendorChecksumOk(filename) {
+  const row = db.prepare('SELECT sha256 FROM vendor_checksums WHERE filename = ?').get(path.basename(filename || ''));
+  if (!row) return false;
+  const full = resolveInstaller(filename);
+  const sha = full && installerSha256(full);
+  return !!sha && sha.toLowerCase() === row.sha256.toLowerCase();
+}
+// Check every Windows FFmpeg build on the share against the SHA-256 gyan.dev publishes for that
+// exact version. Runs at start and after each version check; a mismatch is refused by the agents
+// (no verified row) and reported.
+async function verifyVendorChecksums() {
+  let files = [];
+  try { files = listInstallerFiles().map((f) => f.name).filter((n) => /^ffmpeg-[\d.]+-windows-x64\.zip$/i.test(n)); } catch { return; }
+  for (const name of files) {
+    const v = name.match(/^ffmpeg-([\d.]+)-windows/i)[1];
+    const full = resolveInstaller(name);
+    const sha = full && installerSha256(full);
+    if (!sha) continue;                                   // still hashing — next run
+    const known = db.prepare('SELECT sha256 FROM vendor_checksums WHERE filename = ?').get(name);
+    if (known && known.sha256 === sha) continue;
+    try {
+      const published = (await fetchTextHttps(`https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-${v}-essentials_build.zip.sha256`)).trim().split(/\s+/)[0].toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(published)) continue;
+      if (published === sha.toLowerCase()) {
+        db.prepare('INSERT OR REPLACE INTO vendor_checksums (filename, sha256, source, verified_at) VALUES (?,?,?,?)').run(name, sha, 'gyan.dev', Date.now());
+        logEvent('package', `${name}: matches the SHA-256 gyan.dev publishes — vendor-verified`);
+      } else {
+        db.prepare('DELETE FROM vendor_checksums WHERE filename = ?').run(name);
+        logEvent('package', `${name}: does NOT match gyan.dev's published SHA-256 — agents will refuse it`);
+        notifySlack(`🛑 ${name} on the share does not match the checksum gyan.dev publishes for FFmpeg ${v}. Agents will refuse to install it. Delete it and let the tracker download it again.`);
+      }
+    } catch (e) { console.error('vendor checksum check failed for', name, e.message); }
+  }
+}
+// https only, including every redirect — a vendor download must never be allowed to fall back
+// to plain http.
+function fetchTextHttps(url, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (!/^https:/i.test(url)) return reject(new Error(`refusing non-https URL ${url}`));
+    if (redirects > 6) return reject(new Error('too many redirects'));
+    https.get(url, { headers: { 'User-Agent': 'render-farm-tracker' }, timeout: 20000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(fetchTextHttps(new URL(res.headers.location, url).href, redirects + 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      let body = ''; res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; if (body.length > 1e6) res.destroy(); });
+      res.on('end', () => resolve(body));
+    }).on('error', reject).on('timeout', function () { this.destroy(new Error('timeout')); });
+  });
+}
+setTimeout(() => { verifyVendorChecksums().catch(() => {}); }, 60 * 1000);
+
+function signaturePolicy(job) {
+  if (job.product_key === 'ffmpeg') {
+    if (job.os === 'windows') {
+      return vendorChecksumOk(job.filename)
+        ? { unsigned_ok: 'matches the SHA-256 gyan.dev publishes for this build' }
+        : { signers: ["gyan.dev's published checksum"] };   // an archive nobody vouched for → refused
+    }
+    return { unsigned_ok: 'NOT vendor-verified — evermeet.cx publishes no checksum the tracker can check' };
+  }
+  const want = VENDOR_SIGNERS[job.product_key];
+  if (!want) return null;
+  const policy = { signers: want[job.os] || [] };
+  if (ADMIN_CONSOLE_PKG.test(job.filename || '')) policy.unsigned_ok = 'an Adobe Admin Console package built by your organisation — Adobe never signs these';
+  return policy;
 }
 
 function handleCheckin(body) {
@@ -1972,6 +2103,8 @@ function handleCheckin(body) {
       const full = resolveInstaller(j.filename);
       const sha = full && installerSha256(full);
       if (sha) j.sha256 = sha;
+      const sig = signaturePolicy({ ...j, os: node.os });
+      if (sig) j.signature = sig;
     }
   }
 

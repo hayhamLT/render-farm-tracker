@@ -97,6 +97,16 @@ export function nudgeWaiting(state, node, product) {
 
 // Machines that can take this app's update now (behind, or new major when asked), grouped for the UI.
 
+// Is this app's version source broken? Checks run every 6 h; two misses in a row (12 h without
+// an answer) is a problem worth showing — before that it's a blip.
+const SOURCE_GRACE_MS = 12 * 3600 * 1000;
+export function sourceProblem(state, key) {
+  const src = (state.versionSources || []).find((x) => x.key === key);
+  if (!src || src.ok) return null;
+  if (src.ok_at && (state.now || Date.now()) - src.ok_at < SOURCE_GRACE_MS) return null;
+  return src;
+}
+
 export const ACTIVE = ['pending', 'downloading', 'installing'];
 export const jobActiveFor = (state, node, productKey) =>
   state.jobs.some((j) => j.hostname === node.hostname && j.product_key === productKey && ACTIVE.includes(j.status));
