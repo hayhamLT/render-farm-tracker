@@ -435,19 +435,30 @@ details.qa > div { color: var(--text-2); padding: 8px 0 2px; }
 .page-header h1 { margin: 0; font-size: 1.55rem; font-weight: 700; letter-spacing: -0.2px; }
 .page-header p { margin: 4px 0 0; color: var(--text-2); }
 .page-header .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
-/* The farm's three lenses: one page, one header, three ways to look at it. */
-.page-header .lens-row { width: 100%; margin-top: 14px; }
-.lens { display: inline-flex; gap: 2px; padding: 3px; border-radius: 13px; background: var(--surface); border: 1px solid var(--border); }
-.lens-tab { display: inline-flex; align-items: center; gap: 7px; height: 33px; padding: 0 14px; border: 0; border-radius: 10px;
-  background: transparent; color: var(--text-2); font: inherit; font-weight: 600; cursor: pointer;
-  transition: background 0.14s var(--ease), color 0.14s, box-shadow 0.14s; }
-.lens-tab:hover { color: var(--text); background: var(--surface-2); }
-.lens-tab.on { background: var(--surface-3); color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong), 0 1px 2px rgba(0, 0, 0, 0.35); cursor: default; }
-.lens-tab .n { display: inline-grid; place-items: center; min-width: 20px; height: 19px; padding: 0 6px; border-radius: 999px;
-  background: var(--surface-3); color: var(--text-2); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
-.lens-tab.on .n { background: var(--accent); color: var(--bg); }
-.lens-tab .n.bad { background: var(--bad-soft); color: var(--bad-text); }
-.lens-tab.on .n.bad { background: var(--bad); color: #fff; }
+/* Dashboard sections: one page, each part collapsible. */
+.sec { border-top: 1px solid var(--border); padding-top: 4px; }
+.sec + .sec { margin-top: 4px; }
+.sec-head { display: flex; align-items: center; gap: 12px; min-height: 52px; }
+.sec-toggle { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 6px 2px; border: 0; background: none;
+  color: var(--text); font: inherit; cursor: pointer; text-align: left; }
+.sec-toggle:hover .sec-chev { color: var(--text); }
+.sec-chev { color: var(--text-3); transition: transform 0.16s var(--ease), color 0.14s; flex: none; }
+.sec-chev.flip-r { transform: rotate(-90deg); }
+.sec-icon { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--surface-3); color: var(--text-2); flex: none; }
+.sec-icon.info { background: var(--info-soft); color: var(--info); }
+.sec-icon.bad { background: var(--bad-soft); color: var(--bad-text); }
+.sec-head h2 { margin: 0; font-size: 1.06rem; font-weight: 650; letter-spacing: -0.1px; }
+.sec-count { display: inline-grid; place-items: center; min-width: 22px; height: 20px; padding: 0 7px; border-radius: 999px;
+  background: var(--surface-3); color: var(--text-2); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.sec-count.info { background: var(--info-soft); color: var(--info); }
+.sec-count.bad { background: var(--bad-soft); color: var(--bad-text); }
+.sec-summary { font-size: 0.86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.sec-body { padding: 2px 0 18px; }
+/* One line of fleet facts, in place of a second donut. */
+.fleet-line { display: flex; gap: 18px; flex-wrap: wrap; color: var(--text-2); font-size: 0.88rem; padding: 0 2px 2px; }
+.fleet-line b { color: var(--text); font-variant-numeric: tabular-nums; }
+.fleet-line .bad, .fleet-line .bad b { color: var(--bad-text); }
 /* Something in the farm needs a look, visible from any page. */
 .nav-alert { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); margin-left: auto; flex: none; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16); }
 .nav-item .nav-count + .nav-alert, .nav-alert + .nav-count { margin-left: 6px; }
@@ -459,8 +470,7 @@ details.qa > div { color: var(--text-2); padding: 8px 0 2px; }
   .nav-count { position: absolute; top: 2px; right: 0; min-width: 16px; height: 16px; font-size: 0.62rem; }
   .sidebar-foot { margin: 0 0 0 auto; flex-direction: row; border: 0; padding: 0; } .search-btn .label, .search-btn .kbd, .collapse-btn { display: none; }
   .page-header h1 { font-size: 1.3rem; }
-  .page-header .lens-row { margin-top: 10px; }
-  .lens-tab { padding: 0 11px; }
+  .sec-summary { display: none; }
 }
 
 /* ======================================================================== v2: viz */

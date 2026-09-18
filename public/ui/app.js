@@ -9,9 +9,7 @@ import { isTyping, pref } from './lib/ui.js';
 import { PageSkeleton } from './components/viz.js';
 import { ago } from './lib/format.js';
 import { Icon, ToastHost, DialogHost, MenuHost } from './components/common.js';
-import { MachinesView } from './views/machines.js';
-import { UpdatesView } from './views/updates.js';
-import { HistoryView } from './views/history.js';
+import { FarmView } from './views/farm.js';
 import { CatalogView } from './views/catalog.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
@@ -22,14 +20,13 @@ import { updatesWaiting } from './lib/updater.js';
 
 const ACTIVE = ['pending', 'downloading', 'installing'];
 
-// Updates, Machines and History are three ways of looking at the SAME farm, so they share one
-// nav item and one page (the lens switcher lives in the header — see components/page.js). They
-// keep their own addresses, so deep links and every cross-link between them still work; they
-// just move the switch now instead of leaving the page.
+// Updates, machines and history are one page (views/farm.js), not three. They keep their own
+// addresses so old links, bookmarks and the g-shortcuts still work — those now scroll to the
+// right part of the dashboard instead of loading a different page.
 const ROUTES = [
-  { name: 'updates', label: 'Updates', icon: 'download', key: 'u', nav: 'Farm', view: () => html`<${UpdatesView} />` },
-  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', lens: true, view: () => html`<${MachinesView} />` },
-  { name: 'history', label: 'History', icon: 'activity', key: 'h', lens: true, view: () => html`<${HistoryView} />` },
+  { name: 'updates', label: 'Updates', icon: 'download', key: 'u', nav: 'Farm', view: () => html`<${FarmView} />` },
+  { name: 'machines', label: 'Machines', icon: 'server', key: 'm', lens: true, view: () => html`<${FarmView} />` },
+  { name: 'history', label: 'History', icon: 'activity', key: 'h', lens: true, view: () => html`<${FarmView} />` },
   { name: 'catalog', label: 'Apps', icon: 'package', key: 'a', view: () => html`<${CatalogView} />` },
   { name: 'settings', label: 'Settings', icon: 'sliders', key: 's', view: () => html`<${SettingsView} />` },
   { name: 'help', label: 'Help', icon: 'help', key: '?', view: () => html`<${HelpView} />` },
@@ -114,9 +111,10 @@ function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-  // Scroll to the top when changing section (not when opening a machine drawer).
+  // Scroll to the top when changing section — except within the farm page, where the section
+  // itself scrolls into view (views/farm.js).
   const name = route.value.name;
-  useEffect(() => { window.scrollTo({ top: 0 }); }, [name]);
+  useEffect(() => { if (!FARM.includes(name)) window.scrollTo({ top: 0 }); }, [name]);
   useEffect(() => { if (MOVED[name]) go(MOVED[name], ...route.value.params); }, [name]);
   const current = ROUTES.find((t) => t.name === name) || ROUTES[0];
   return html`<div class=${'shell' + (collapsed.value ? ' collapsed' : '') + (askOpen.value ? ' ask-open' : '')}>

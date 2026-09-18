@@ -10,7 +10,6 @@ import { ago, elapsed } from '../lib/format.js';
 import { normalizeProducts, ACTIVE } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo, Badge, Bar, Empty } from '../components/common.js';
-import { FleetHeader } from '../components/page.js';
 import { RolloutList, waitingRollout, whenLabel } from '../components/rollouts.js';
 import { ActivityLog } from './activity.js';
 
@@ -128,14 +127,13 @@ export function Jobs({ s, products, compact = false }) {
 }
 
 
-export function HistoryView() {
+// The record, at the bottom of the dashboard: every install, every rollout, every event.
+export function HistorySection() {
   const s = farm.value;
   if (!s) return null;
   const products = normalizeProducts(s);
-  const failed = s.jobs.filter((j) => j.status === 'failed').length;
   const TABS = [['installs', 'Installs', s.jobs.length], ['rollouts', 'Rollouts', (s.rollouts || []).length], ['log', 'Activity log', s.events.length]];
-  return html`<div class="page stack">
-    <${FleetHeader} lens="history" subtitle=${`Every install and rollout${failed ? ` · ${failed} failed` : ''}`} />
+  return html`<div class="stack">
     <div class="pills">${TABS.map(([k, l, n]) => html`<button key=${k} class=${'pill' + (tab.value === k ? ' on' : '')} onClick=${() => { tab.value = k; }}>${l}<span class="n">${n}</span></button>`)}</div>
     ${tab.value === 'installs' ? html`<${Jobs} s=${s} products=${products} />`
       : tab.value === 'rollouts' ? html`<section class="card card-pad">${(s.rollouts || []).length ? html`<${RolloutList} s=${s} limitDone=${30} />` : html`<${Empty}>No rollouts yet.<//>`}</section>`

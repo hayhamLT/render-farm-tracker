@@ -16,9 +16,8 @@ import {
 import * as act from '../lib/actions.js';
 import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
 import { Icon, OsStatus, ProductLogo, Badge, Empty, ViewToggle } from '../components/common.js';
-import { FleetHeader } from '../components/page.js';
+import { revealSection } from '../components/section.js';
 import { waitingRollout, whenLabel } from '../components/rollouts.js';
-import { Donut } from '../components/viz.js';
 import { openUpdate } from '../components/update-sheet.js';
 import { askAbout } from '../components/ask.js';
 import { Jobs } from './history.js';
@@ -371,8 +370,10 @@ function MachineDrawer({ hostname, model }) {
   </aside>`;
 }
 
-// ---------------------------------------------------------------- page
-export function MachinesView() {
+// ---------------------------------------------------------------- section
+// The machine half of the farm dashboard: the fleet's own filters, the list, and the drawer.
+// The coverage donut lives in the dashboard overview above, so it isn't repeated here.
+export function MachinesSection() {
   const model = useMachineModel();
   useEffect(() => {
     const onKey = (e) => {
@@ -383,7 +384,7 @@ export function MachinesView() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-  if (!model) return html`<div class="page"><${Empty}>Loading…<//></div>`;
+  if (!model) return html`<${Empty}>Loading…<//>`;
   const { nodes } = model;
 
   const q = search.value.trim().toLowerCase();
@@ -396,27 +397,17 @@ export function MachinesView() {
   const drawerHost = route.value.name === 'machines' ? route.value.params[0] : null;
   const online = nodes.filter((m) => m.node.online).length;
 
-  return html`<div class="page">
-    <${FleetHeader} lens="machines" subtitle=${`${nodes.length} machines · ${counts.behind} need updates · ${counts.updating} updating${nodes.length - online ? ` · ${nodes.length - online} offline` : ''}`}>
-      <label class="search"><${Icon} name="search" /><input id="machine-search" class="field" placeholder="Search machines   /" value=${search.value} onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:240px" /></label>
-    </${FleetHeader}>
+  const rendering = nodes.filter((m) => m.activity.key === 'rendering').length;
+  const reboot = nodes.filter((m) => m.node.online && m.node.pending_reboot).length;
+  const noDeadline = nodes.filter((m) => m.dl && m.dl.state === 'down').length;
 
-    <section class="card card-pad fleet">
-      <${Donut} size=${118} stroke=${13} segments=${[
-        { key: 'current', label: 'Up to date', value: nodes.filter((m) => rowState(m) === 'current' || rowState(m) === 'rendering').length, color: 'var(--ok)', onClick: () => { quick.value = 'all'; }, active: quick.value === 'all' },
-        { key: 'updating', label: 'Updating', value: counts.updating, color: 'var(--accent)', onClick: () => { quick.value = 'updating'; }, active: quick.value === 'updating' },
-        { key: 'behind', label: 'Needs updates', value: counts.behind, color: 'var(--info)', onClick: () => { quick.value = 'behind'; }, active: quick.value === 'behind' },
-        { key: 'failed', label: 'Failed installs', value: counts.failed, color: 'var(--bad)', onClick: () => { quick.value = 'failed'; }, active: quick.value === 'failed' },
-        { key: 'blocked', label: "Can't update", value: counts.blocked, color: 'var(--text-3)', onClick: () => { quick.value = 'blocked'; }, active: quick.value === 'blocked' },
-      ]} center=${`${online}/${nodes.length}`} sub="online" label=${`${online} of ${nodes.length} machines online`} />
-      <div class="fleet-facts">
-        <div><span class="l">Updates waiting</span><b>${nodes.reduce((c, m) => c + m.behind.length, 0)}</b></div>
-        <div><span class="l">Rendering now</span><b>${nodes.filter((m) => m.activity.key === 'rendering').length}</b></div>
-        <div><span class="l">Restart pending</span><b>${nodes.filter((m) => m.node.online && m.node.pending_reboot).length}</b></div>
-        <div><span class="l">Out of Deadline</span><b class=${nodes.filter((m) => m.dl && m.dl.state === 'down').length ? 'bad' : ''}>${nodes.filter((m) => m.dl && m.dl.state === 'down').length}</b></div>
-      </div>
-    </section>
-
+  return html`<div class="stack">
+    <div class="fleet-line">
+      <span><b>${online}</b>/${nodes.length} online</span>
+      ${rendering ? html`<span><b>${rendering}</b> rendering</span>` : null}
+      ${reboot ? html`<span><b>${reboot}</b> waiting on a restart</span>` : null}
+      ${noDeadline ? html`<span class="bad"><b>${noDeadline}</b> out of Deadline</span>` : null}
+    </div>
     <div class="filterbar">
       <div class="pills" role="tablist" aria-label="Filter machines">
         ${QUICK.map(([k, label]) => html`<button key=${k} role="tab" aria-selected=${quick.value === k} class=${'pill' + (quick.value === k ? ' on' : '')} onClick=${() => { quick.value = quick.value === k ? 'all' : k; }} disabled=${k !== 'all' && !counts[k]}>
@@ -444,10 +435,22 @@ export function MachinesView() {
   </div>`;
 }
 
+// What the Machines heading says when the section is collapsed, and its own controls.
+export function machinesSummary(s) {
+  if (!s) return '';
+  const offline = s.nodes.filter((n) => !n.online).length;
+  return `${s.nodes.length} machines${offline ? ` · ${offline} offline` : ' · all online'}`;
+}
+export function MachinesActions() {
+  return html`<label class="search"><${Icon} name="search" />
+    <input id="machine-search" class="field" placeholder="Search machines   /" value=${search.value}
+      onInput=${(e) => { search.value = e.currentTarget.value; }} style="width:220px" /></label>`;
+}
+
 export { selected as selectedMachines };
 
-// Open Machines with a filter applied (the Updates donut links here).
+// Jump to the machine list with a filter applied (the overview donut links here).
 export function showMachines(filter = 'all') {
   quick.value = filter;
-  go('machines');
+  revealSection('machines');
 }
