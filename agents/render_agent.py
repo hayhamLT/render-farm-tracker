@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.34.0"
+AGENT_VERSION = "2.35.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1771,7 +1771,13 @@ def _run_job(server, job):
         # Some installs don't reflect the new version during the job:
         #  • NVIDIA driver — installed with -noreboot, so nvidia-smi may keep reporting
         #    the OLD version until the machine reboots. Exit 0 IS the install proof.
-        #  • Creative Cloud — self-updates asynchronously after a nudge.
+        # (Creative Cloud used to be excused here too — "exit 0 is enough" — back when the
+        # tracker couldn't read its real version. It can now (the app's own executable), and
+        # the excuse let two "successful" installs on Sep 18 leave Node-03 and RAZER-01 on
+        # 6.9.0.620: Adobe's bootstrapper had quit without installing anything. A Creative
+        # Cloud install is judged by its version like everything else; if Adobe finishes in
+        # the background after the job ends, the server flips it to success on the next
+        # check-in that reports the new version.)
         reboot_deferred = job["product_key"] == "nvidia"
         # Adobe RUM ran fine but had nothing to install: the node is already current
         # per Adobe's update source. This is NOT a failure — RUM simply can't deliver a
@@ -1783,7 +1789,7 @@ def _run_job(server, job):
                     or "all products are up to date" in tl)
 
         if rc == 0:
-            succeeded = changed or reached or presence_ok or reboot_deferred or job["product_key"] == "creativecloud"
+            succeeded = changed or reached or presence_ok or reboot_deferred
         else:
             # Non-zero exit: only hard evidence counts — the version now meets the target
             # (or, with no target to compare, it moved). Presence alone isn't enough here:
