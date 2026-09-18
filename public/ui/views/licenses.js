@@ -115,7 +115,7 @@ async function releaseSeat(seat, m) {
 function MachinePicker({ seat, from, model, close }) {
   const [q, setQ] = useState('');
   const options = model.machines
-    .filter((m) => m.account === model.company && m !== from && !seat.holders.includes(m))
+    .filter((m) => m.account === model.company && m !== from && !m.held.some((l) => l.id === seat.id))
     .filter((m) => !q || m.n.hostname.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => (b.canSeat - a.canSeat) || a.n.hostname.localeCompare(b.n.hostname));
   const pick = async (m) => {
@@ -126,7 +126,8 @@ function MachinePicker({ seat, from, model, close }) {
     } catch (e) { toast(e.message, 'error', 8000); }
   };
   return html`<div class="stack" style="gap:12px">
-    <p class="dim" style="margin:0">${from ? html`Released on <b>${from.n.hostname}</b> first; the machine you pick takes it once that's confirmed.` : html`The machine you pick takes a seat from this license. If every seat is already assigned (the Maxon App shows how many there are), Maxon refuses and you'll see why here.`}</p>
+    <p class="dim" style="margin:0">${from ? html`Released on <b>${from.n.hostname}</b> first; once that's confirmed, the machine you pick takes a ${seat.name} seat.` : html`The machine you pick takes a ${seat.name} seat.`}
+      Maxon decides which of your ${seat.name} licenses the seat comes from — usually one with room. If they're all full, Maxon says so and you'll see it here.</p>
     <label class="search"><${Icon} name="search" /><input class="field" autofocus placeholder="Find a machine" value=${q} onInput=${(e) => setQ(e.currentTarget.value)} /></label>
     <div class="lic-pick">${options.map((m) => html`<button key=${m.n.id} class="lic-pick-row" disabled=${!m.canSeat} onClick=${() => pick(m)}>
       <${OsStatus} node=${m.n} /><b>${m.n.hostname}</b>
@@ -136,7 +137,7 @@ function MachinePicker({ seat, from, model, close }) {
   </div>`;
 }
 const openPicker = (seat, model, from = null) => openSheet((close) => html`<${MachinePicker} seat=${seat} from=${from} model=${model} close=${close} />`,
-  { title: from ? `Move ${seat.name} from ${from.n.hostname}` : `Give ${seat.name} to a machine`, subtitle: seat.end && !seat.end.startsWith('2099') ? `License valid until ${fmtDate(seat.end)}` : '', width: 520 });
+  { title: from ? `Move ${seat.name} from ${from.n.hostname}` : `Give a ${seat.name} seat`, subtitle: seat.end && !seat.end.startsWith('2099') ? `License valid until ${fmtDate(seat.end)}` : '', width: 520 });
 
 function TokenSheet({ m, close }) {
   const [token, setToken] = useState('');
@@ -249,13 +250,14 @@ function SeatsView({ model, q }) {
       <span class="dim lic-note" title="mx1 on each machine only knows what that machine holds">Seat totals and devices without the tracker are in the <a href="https://my.maxon.net" target="_blank" rel="noopener">Maxon App</a></span></div>
     ${groups.map((g) => html`<section key=${g.name} class="card lic-group">
       <header><b>${g.name}</b><span class="dim">${[...new Set(g.entries.map((e) => e.method))].join(' · ')}</span><span class="grow"></span>
-        <span class="dim nowrap">${plural(g.entries.reduce((c, e) => c + e.holders.length, 0), 'tracked machine')} holding</span></header>
+        <span class="dim nowrap">${plural(g.entries.reduce((c, e) => c + e.holders.length, 0), 'tracked machine')} holding</span>
+        ${g.entries.every((e) => e.floating) ? null : html`<button class="btn sm" onClick=${() => openPicker(g.entries.find((e) => !e.floating), model)}><${Icon} name="plus" />Give a seat to…</button>`}</header>
       ${g.entries.map((e) => html`<div key=${e.key} class="lic-seat">
         <span class=${'lic-ends ' + (e.days != null && e.days <= 14 ? 'bad' : e.days != null && e.days <= SOON ? 'warn' : '')}>
           ${!e.end ? '—' : e.end.startsWith('2099') ? 'Perpetual' : `Until ${fmtDate(e.end)}`}${e.days != null && e.days <= SOON ? html` <small>· ${plural(e.days, 'day')}</small>` : null}</span>
         <span class="lic-holders">${e.holders.length ? e.holders.map((m) => html`<${HolderChip} key=${m.n.id} e=${e} m=${m} model=${model} />`)
           : html`<span class="dim">${e.floating ? 'Floating — taken automatically while a render needs it' : 'Not held by any tracked machine'}</span>`}</span>
-        ${e.floating ? null : html`<button class="btn sm" onClick=${() => openPicker(e, model)}><${Icon} name="plus" />Give to…</button>`}
+
       </div>`)}
     </section>`)}
     ${!groups.length ? html`<${Empty}>No licenses match.<//>` : null}

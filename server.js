@@ -2036,7 +2036,8 @@ function handleCheckin(body) {
     }
     if (Array.isArray(hh.licenseActions) && hh.licenseActions.length) {
       const results = hh.licenseActions.slice(0, 10).map((r) => ({
-        id: String(r.id || ''), action: String(r.action || ''), ok: !!r.ok, message: String(r.message || '').slice(0, 400), at: now,
+        id: String(r.id || ''), action: String(r.action || ''), ok: !!r.ok, at: now,
+        message: String(r.message || '').split('#< CLIXML')[0].replace(/\s+/g, ' ').trim().slice(0, 400),   // PowerShell progress noise
       }));
       db.prepare('UPDATE nodes SET license_action = ? WHERE id = ?').run(JSON.stringify(results), node.id);
       for (const r of results) logEvent('node', `Licenses on ${node.hostname}: ${LICENSE_ACTIONS[r.action] || r.action} — ${r.ok ? 'done' : 'failed'}: ${r.message}`);

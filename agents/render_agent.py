@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.39.1"
+AGENT_VERSION = "2.39.2"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1506,6 +1506,8 @@ def run_as_desktop_user(script, timeout=120):
     """Run `script` (PowerShell on Windows, bash on macOS) as the signed-in desktop user,
     hidden. Returns (ok, output). Nobody signed in → (False, "nobody is signed in")."""
     if IS_WINDOWS:
+        # Progress records would otherwise come back as "#< CLIXML <Objs…" after the real output.
+        script = "$ProgressPreference = 'SilentlyContinue'\n" + script
         inner = _b64.b64encode(script.encode("utf-16-le")).decode()
         runner = _RUNNER_PS.replace("__ENC__", inner).replace("__TIMEOUT__", str(int(timeout)))
         out = _ps_encoded(runner, timeout=timeout + 60).lstrip("\ufeff")
@@ -1756,7 +1758,7 @@ def license_action(action, arg=None):
         opts = " -b" if (verb == "release" and a.get("block")) else ""
         cmd = mx1 + "license " + verb + opts + " " + q(name) + (" " + q(version) if version else "")
         ok, out = run_as_desktop_user(cmd + " 2>&1", timeout=180)
-        text = re.sub(r"\s+", " ", out or "").strip()
+        text = re.sub(r"\s+", " ", (out or "").split("#< CLIXML", 1)[0]).strip()
         if not ok:
             return False, "Couldn't run it in the signed-in user's session: %s" % text
         if re.search(r"error|fail|invalid|denied|not found|no .*available", text, re.I):
