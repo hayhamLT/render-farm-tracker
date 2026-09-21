@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.42.0"
+AGENT_VERSION = "2.43.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1432,7 +1432,7 @@ def _run_as_desktop_user(command, timeout, rid):
         os.makedirs(_RUN_DIR_WIN, exist_ok=True)
         # call :__body keeps %ERRORLEVEL% the command's own, not the redirect's.
         with open(cmdf, "w") as f:
-            f.write("@echo off\r\ncall :__body > \"%s\" 2>&1\r\necho %%ERRORLEVEL%%>\"%s\"\r\n"
+            f.write("@echo off\r\ncall :__body > \"%s\" 2>&1\r\n>\"%s\" echo %%ERRORLEVEL%%\r\n"
                     "exit /b 0\r\n:__body\r\n%s\r\n" % (outf, codef, command))
     except Exception as e:
         return -1, "Could not stage the command for the user session: %s" % e
@@ -1447,7 +1447,8 @@ Register-ScheduledTask -TaskName $task -Action $act -Principal $pri -Settings $s
 Start-ScheduledTask -TaskName $task
 $end = (Get-Date).AddSeconds(%d)
 while ((Get-Date) -lt $end -and -not (Test-Path '%s')) { Start-Sleep -Milliseconds 500 }
-$code = if (Test-Path '%s') { (Get-Content '%s' -Raw).Trim() } else { 'TIMEOUT' }
+$raw = if (Test-Path '%s') { Get-Content '%s' -Raw -ErrorAction SilentlyContinue } else { $null }
+$code = if ($raw) { "$raw".Trim() } else { 'TIMEOUT' }
 try { Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null } catch { }
 Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
 "TRACKER_USER=$du"
@@ -1457,7 +1458,9 @@ if (Test-Path '%s') { Get-Content '%s' -Raw }
 """ % (_PS_DESKTOP_USER, tag, cmdf, timeout, timeout + 15, codef, codef, codef, outf, outf)
     try:
         p = _run_powershell(ps, timeout=timeout + 60)
-        text = ((p.stdout or "") + (p.stderr or "")).replace("\r\n", "\n")
+        text = (p.stdout or "").replace("\r\n", "\n")
+        if not text.strip():
+            text = (p.stderr or "").replace("\r\n", "\n")
     except Exception as e:
         text = "TRACKER_CODE=-1\nTRACKER_OUT_BEGIN\nCould not reach the user session: %s" % e
     finally:
