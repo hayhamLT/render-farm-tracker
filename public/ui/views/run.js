@@ -76,6 +76,7 @@ export function RunView() {
   const [picked, setPicked] = useState(new Set());
   const [cmd, setCmd] = useState('');
   const [osF, setOsF] = useState('windows');
+  const [asUser, setAsUser] = useState(true);
   const [runs, setRuns] = useState([]);       // [{id, hostname, status, exit_code, output}]
   const [skipped, setSkipped] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -112,7 +113,7 @@ export function RunView() {
     // it lands on, verbatim, before anything is sent.
     const ok = await openDialog((close) => html`
       <div class="body stack" style="gap:12px">
-        <p style="margin:0">This runs on <b>${hosts.length}</b> machine${hosts.length === 1 ? '' : 's'} as the agent's account.</p>
+        <p style="margin:0">This runs on <b>${hosts.length}</b> machine${hosts.length === 1 ? '' : 's'}, ${asUser ? html`in the <b>logged-in user's session</b>` : html`as the <b>system account</b>`}.</p>
         <div><div class="dim" style="font-size:.8rem;margin-bottom:5px">Command</div>
           <pre class="run-out" style="margin:0;max-height:120px">${command}</pre></div>
         <div><div class="dim" style="font-size:.8rem;margin-bottom:5px">Machines</div>
@@ -125,7 +126,7 @@ export function RunView() {
     if (!ok) return;
     setBusy(true); setRuns([]); setSkipped([]);
     try {
-      const r = await call('POST', '/api/run', { hostnames: hosts, command });
+      const r = await call('POST', '/api/run', { hostnames: hosts, command, asUser });
       setSkipped(r.skipped || []);
       setRuns(r.runs.map((x) => ({ ...x, status: 'pending' })));
       if (r.runs.length) poll(r.runs.map((x) => x.id));
@@ -169,7 +170,9 @@ export function RunView() {
     <section class="card card-pad stack">
       <b>Command</b>
       <textarea class="field" rows="3" spellcheck="false" style="font-family:var(--mono)" placeholder='"C:\\Program Files\\Maxon\\Tools\\mx1.exe" license assign net.maxon.license.app.redshift~commercial' value=${cmd} onInput=${(e) => setCmd(e.currentTarget.value)}></textarea>
-      <div class="row"><span class="dim">Runs through cmd.exe as the agent's account, no window, 5-minute limit.</span><span class="grow"></span>
+      <label class="check run-asuser"><input type="checkbox" checked=${asUser} onChange=${(e) => setAsUser(e.currentTarget.checked)} />
+        <span><b>Run as the logged-in user</b><span class="dim">Needed by anything tied to a signed-in session — Maxon's mx1 licensing above all. Off means the system account, which is right for installers and machine-wide settings.</span></span></label>
+      <div class="row"><span class="dim">Runs through cmd.exe, no window, 5-minute limit.</span><span class="grow"></span>
         <button class="btn primary" disabled=${busy || !picked.size || !cmd.trim()} onClick=${send}><${Icon} name="zap" />Run on ${picked.size || 0}</button></div>
     </section>
     ${(runs.length || skipped.length) ? (() => {

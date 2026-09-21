@@ -3083,6 +3083,7 @@ const server = http.createServer(async (req, res) => {
       if (!command || !Array.isArray(b.hostnames) || !b.hostnames.length) {
         return sendJson(res, 400, { error: 'hostnames[] and command required' });
       }
+      const asUser = b.asUser === true;
       const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
       const runs = [], skipped = [];
       for (const h of b.hostnames) {
@@ -3090,13 +3091,15 @@ const server = http.createServer(async (req, res) => {
         if (!node) { skipped.push({ hostname: h, reason: 'unknown machine' }); continue; }
         if (!(node.last_seen != null && Date.now() - node.last_seen < offlineMs)) { skipped.push({ hostname: node.hostname, reason: 'offline' }); continue; }
         if (!node.agent_version || cmpVersionServer(node.agent_version, '2.41.0') < 0) { skipped.push({ hostname: node.hostname, reason: `agent ${node.agent_version || 'unknown'} is too old; it updates itself within minutes` }); continue; }
+        // Running in the desktop user's own session needs the agent that can do it.
+        if (asUser && cmpVersionServer(node.agent_version, '2.42.0') < 0) { skipped.push({ hostname: node.hostname, reason: `agent ${node.agent_version} can't run as the logged-in user yet; it updates itself within minutes` }); continue; }
         const info = db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at) VALUES (?, ?, 'pending', ?)")
           .run(node.id, command, Date.now());
         const id = Number(info.lastInsertRowid);
-        commands.queue(node.id, 'run', { id, command, timeout: Math.min(3600, Number(b.timeoutSec) || 300) });
+        commands.queue(node.id, 'run', { id, command, timeout: Math.min(3600, Number(b.timeoutSec) || 300), as_user: asUser || undefined });
         runs.push({ id, hostname: node.hostname });
       }
-      logEvent('node', `Command run on ${runs.map((r) => r.hostname).join(', ') || '(no machines)'}: ${command.slice(0, 200)}`);
+      logEvent('node', `Command run on ${runs.map((r) => r.hostname).join(', ') || '(no machines)'}${asUser ? ' (as the logged-in user)' : ''}: ${command.slice(0, 200)}`);
       return sendJson(res, 200, { ok: true, runs, skipped });
     }
     if (req.method === 'GET' && p === '/api/run') {

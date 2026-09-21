@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.41.0"
+AGENT_VERSION = "2.42.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1407,6 +1407,86 @@ _RUN_SERVER = {"server": None}
 _RUN_SEEN = set()
 
 
+# Public, so the desktop user can read the script SYSTEM writes for it.
+_RUN_DIR_WIN = r"C:\Users\Public\.tracker-run"
+
+
+def _run_as_desktop_user(command, timeout, rid):
+    """Run a command in the logged-in desktop user's own session and return (code, output).
+
+    The agent is SYSTEM. Some tools only work inside a real user session — Maxon's mx1 above
+    all, whose licensing is tied to the signed-in Maxon user, so from SYSTEM every licence
+    call answers "service is not available" (checked on AVA-02, Sep 2026). A scheduled task
+    with an Interactive principal runs in that user's session without a password, the same
+    way fix_deadline_startup() starts the Deadline Launcher.
+
+    The command's own exit code and output come back through files, not the task's
+    LastTaskResult, which reports on the task rather than on the command inside it."""
+    if not IS_WINDOWS:
+        return -1, "Running as the logged-in user is Windows-only."
+    tag = "tracker_run_%s" % rid
+    cmdf = "%s\\%s.cmd" % (_RUN_DIR_WIN, tag)
+    outf = "%s\\%s.out" % (_RUN_DIR_WIN, tag)
+    codef = "%s\\%s.code" % (_RUN_DIR_WIN, tag)
+    try:
+        os.makedirs(_RUN_DIR_WIN, exist_ok=True)
+        # call :__body keeps %ERRORLEVEL% the command's own, not the redirect's.
+        with open(cmdf, "w") as f:
+            f.write("@echo off\r\ncall :__body > \"%s\" 2>&1\r\necho %%ERRORLEVEL%%>\"%s\"\r\n"
+                    "exit /b 0\r\n:__body\r\n%s\r\n" % (outf, codef, command))
+    except Exception as e:
+        return -1, "Could not stage the command for the user session: %s" % e
+    ps = r"""$ProgressPreference='SilentlyContinue'
+%s
+if (-not $du) { 'TRACKER_NO_USER'; exit 3 }
+$task = '%s'
+$act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c "' + '%s' + '"')
+$pri = New-ScheduledTaskPrincipal -UserId $du -LogonType Interactive -RunLevel Highest
+$set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromSeconds(%d)) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $task -Action $act -Principal $pri -Settings $set -Force | Out-Null
+Start-ScheduledTask -TaskName $task
+$end = (Get-Date).AddSeconds(%d)
+while ((Get-Date) -lt $end -and -not (Test-Path '%s')) { Start-Sleep -Milliseconds 500 }
+$code = if (Test-Path '%s') { (Get-Content '%s' -Raw).Trim() } else { 'TIMEOUT' }
+try { Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null } catch { }
+Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+"TRACKER_USER=$du"
+"TRACKER_CODE=$code"
+'TRACKER_OUT_BEGIN'
+if (Test-Path '%s') { Get-Content '%s' -Raw }
+""" % (_PS_DESKTOP_USER, tag, cmdf, timeout, timeout + 15, codef, codef, codef, outf, outf)
+    try:
+        p = _run_powershell(ps, timeout=timeout + 60)
+        text = ((p.stdout or "") + (p.stderr or "")).replace("\r\n", "\n")
+    except Exception as e:
+        text = "TRACKER_CODE=-1\nTRACKER_OUT_BEGIN\nCould not reach the user session: %s" % e
+    finally:
+        for f in (cmdf, outf, codef):
+            try: os.remove(f)
+            except OSError: pass
+    if "TRACKER_NO_USER" in text:
+        return -1, ("Nobody is logged in on this machine, so there is no user session to run in. "
+                    "Log in once (or turn on automatic login), then try again.")
+    user = ""
+    code = -1
+    body = text
+    m = re.search(r"TRACKER_USER=(.*)", text)
+    if m:
+        user = m.group(1).strip()
+    m = re.search(r"TRACKER_CODE=(.*)", text)
+    if m:
+        raw = m.group(1).strip()
+        if raw == "TIMEOUT":
+            return -1, "Timed out after %ds waiting for the command in %s's session." % (timeout, user or "the user")
+        try: code = int(raw)
+        except ValueError: code = -1
+    i = text.find("TRACKER_OUT_BEGIN")
+    if i >= 0:
+        body = text[i + len("TRACKER_OUT_BEGIN"):].lstrip("\n")
+    note = "[ran in %s's session]\n" % user if user else ""
+    return code, note + body.strip()
+
+
 def _run_remote(r):
     """Run one command the tracker sent, capture exit code + output, report it back. Kept apart
     from install jobs (no version check), so a command that changes no installed version — a
@@ -1416,6 +1496,13 @@ def _run_remote(r):
         return
     _RUN_SEEN.add(rid)
     timeout = int(r.get("timeout") or 300)
+    if r.get("as_user"):
+        try:
+            code, out = _run_as_desktop_user(r["command"], timeout, rid)
+        except Exception as e:
+            code, out = -1, "Could not run in the user session: %s" % e
+        _report_run(rid, code, out)
+        return
     kw = {"shell": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
           "stdin": subprocess.DEVNULL, "text": True, "errors": "replace"}
     if IS_WINDOWS:
@@ -1434,6 +1521,14 @@ def _run_remote(r):
             code = -1
     except Exception as e:
         out, code = "Could not start: %s" % e, -1
+    _report_run(rid, code, out)
+
+
+def _report_run(rid, code, out):
+    """Send one command's result back, retrying — a finished command must not look unfinished."""
+    # Windows hands back an unsigned exit code (4294967295 for -1); show what it means.
+    if isinstance(code, int) and code > 0x7FFFFFFF:
+        code -= 0x100000000
     print("  > run #%s exited %s" % (rid, code))
     body = {"id": rid, "exit_code": code, "output": (out or "")[-8000:]}
     for attempt in range(4):

@@ -1106,3 +1106,7 @@ details.quiet[open] > summary { margin-bottom: 10px; }
   font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; color: var(--text-2); }
 .run-note { margin: 8px 0 0; font-size: 0.79rem; }
 .run-summary { font-variant-numeric: tabular-nums; }
+.run-asuser { align-items: flex-start; gap: 9px; }
+.run-asuser input { margin-top: 3px; flex: none; }
+.run-asuser > span { display: flex; flex-direction: column; gap: 2px; }
+.run-asuser .dim { font-size: 0.82rem; line-height: 1.45; }
