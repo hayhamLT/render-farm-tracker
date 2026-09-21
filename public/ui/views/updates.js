@@ -195,6 +195,10 @@ function Attention({ s, models }) {
   const offline = s.nodes.filter((n) => !n.online && behindIds.has(n.id));
   const notReady = s.nodes.filter((n) => n.elevated === 0 && behindIds.has(n.id));
   const broken = models.map((m) => ({ m, src: sourceProblem(s, m.p.key) })).filter((x) => x.src);
+  // Auto-deploy that's stuck on something a human has to decide (a real canary failure) or that's
+  // been waiting an unusually long time (a vendor checksum that still hasn't matched) — normal
+  // canary/fan-out progress isn't here, it's already visible on the app's own row.
+  const autoIssues = s.autoDeployIssues || [];
   const items = [
     failedLatest.length && { tone: 'bad', icon: 'alert', text: `${plural(failedLatest.length, 'install')} failed in the last 24 h`, detail: failedLatest.slice(0, 4).map((j) => j.hostname).join(', '),
       actions: [{ label: 'Retry all', run: async () => { for (const j of failedLatest) await act.retryJob(j); } }, { label: 'View', run: () => go('history') }] },
@@ -205,6 +209,16 @@ function Attention({ s, models }) {
       actions: [{ label: 'Check again', run: act.checkVersions }] },
     notReady.length && { tone: 'warn', icon: 'shieldOff', text: `${plural(notReady.length, 'machine')} can't install silently yet`, detail: 'Run the elevate command once on them (Settings → Enroll a machine)',
       actions: [{ label: 'How', run: () => go('settings') }] },
+    ...autoIssues.map((iss) => {
+      const osLabel = iss.os === 'macos' ? 'Mac' : 'Windows';
+      return iss.state === 'halted'
+        ? { tone: 'bad', icon: 'alert', text: `Auto-deploy of ${iss.name} ${iss.version} (${osLabel}) needs a look`,
+            detail: `Retried automatically and still failing — waiting since ${ago(iss.since, s.now)}. Ready for ${plural(iss.eligible, 'machine')}${iss.sample.length ? `: ${iss.sample.join(', ')}` : ''}.`,
+            actions: [{ label: 'Retry now', run: () => act.retryAutoDeploy(iss) }, { label: 'View', run: () => go('history') }] }
+        : { tone: 'warn', icon: 'clock', text: `${iss.name} ${iss.version} (${osLabel}) is still waiting on its vendor checksum`,
+            detail: `Waiting since ${ago(iss.since, s.now)} — auto-deploy won't roll it out until it matches.`,
+            actions: [{ label: 'Check now', run: act.recheckVendorChecksum }] };
+    }),
   ].filter(Boolean);
   if (!items.length) return null;
   return html`<div class="attn">${items.map((it) => html`<div key=${it.text} class=${'attn-item ' + it.tone}>

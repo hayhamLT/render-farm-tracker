@@ -643,11 +643,19 @@ const MISSING_MIN_AGENT = { ffmpeg: '2.11.0', blender: '2.10.0', notchlc: '2.13.
 // and idempotent — safe to run on a timer. Reuses the install command from a prior deploy
 // of the same product; for self-contained apps (Blender/FFmpeg) it falls back to the
 // built-in SERVER_PRESETS so they install with no prior manual deploy.
+// What auto-deploy currently sees for each autodeploy-enabled product×OS that still has work
+// left to do — recomputed every tick, INCLUDING outside the maintenance window, so a stall shows
+// up on the Updates tab the moment it happens rather than only when the next install would have
+// started. Key: "<product key>|<os>". Exposed (filtered) through /api/state as `autoDeployIssues`.
+const _autoDeployState = new Map();
+const RETRY_CAP = 3;   // how many "not really a failure" canary attempts before treating it as a real one
+
 function runAutoDeploy() {
-  if (!inMaintenanceWindow()) return;   // outside the maintenance window — hold off
+  const canAct = inMaintenanceWindow();   // outside the window: keep watching, just don't queue
   const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
   const now = Date.now();
   let files = null;
+  const seen = new Set();
   for (const prod of db.prepare('SELECT * FROM products WHERE autodeploy = 1').all()) {
     if (!isTracked(prod)) continue;   // app toggled off — don't auto-deploy it
     if (!prod.latest_version) continue;
@@ -656,6 +664,7 @@ function runAutoDeploy() {
       // Per-OS target version (NotchLC differs win vs mac); fall back to latest_version.
       const V = (os === 'windows' ? prod.latest_win : prod.latest_mac) || prod.latest_version;
       if (!V) continue;
+      const statusKey = `${prod.key}|${os}`;
       const nodes = db.prepare(
         'SELECT n.*, s.version AS iv FROM nodes n LEFT JOIN software s ON s.node_id = n.id AND s.product_key = ? WHERE n.os = ?'
       ).all(prod.key, os);
@@ -688,30 +697,57 @@ function runAutoDeploy() {
       const eligible = nodes.filter((n) =>
         !isHiddenHost(n.hostname)
         && needs(n) && gpuOk(n) && online(n) && !installed.has(n.id) && !activeJobForProduct(n.id, prod.key));
-      if (!eligible.length) continue;
+      if (!eligible.length) { _autoDeployState.delete(statusKey); continue; }
+      seen.add(statusKey);
       // canary state for this product@version
       const vjobs = db.prepare(
         'SELECT j.status, j.log FROM jobs j JOIN packages p ON p.id = j.package_id WHERE p.product_key = ? AND p.version = ? AND p.os = ?'
       ).all(prod.key, V, os);
       const proven = nodes.some((n) => n.iv && cmpVersionServer(n.iv, V) >= 0) || vjobs.some((j) => j.status === 'success');
       const inflight = vjobs.some((j) => ['pending', 'downloading', 'installing'].includes(j.status));
-      // A job the agent refused BEFORE running anything (unverified installer) says nothing about
-      // this version — the machines never tried it. Counting it as a failed canary is what stopped
-      // FFmpeg 9.0.2 on Windows for a day (Sep 20): the canary was queued three minutes after the
-      // zip landed, before its checksum had been verified against gyan.dev, and the halt stuck even
-      // after the checksum verified. A refusal is a "not yet", not a failure.
+      // Two ways a canary can come back "failed" without the install itself being at fault: the
+      // agent lost contact mid-run (the reaper marks it failed after 45 quiet minutes — often just
+      // its own scheduled restart) or it refused a file whose vendor checksum hadn't verified yet
+      // (installerAllowed, below). Neither says the install is broken, so each gets retried
+      // automatically — capped, so a canary that keeps genuinely failing still stops for a look
+      // instead of retrying forever. This is what stopped FFmpeg 9.0.2 on Windows for a day
+      // (Sep 20): the canary was refused before the checksum finished, and that refusal alone
+      // halted the rollout with no retry.
+      const reaperTimeout = (j) => j.status === 'failed' && /likely agent restart/.test(j.log || '');
       const preflightRefusal = (j) => j.status === 'failed' && /^Refused:/m.test(j.log || '');
-      const halted = !proven && !inflight
-        && vjobs.some((j) => j.status === 'cancelled' || (j.status === 'failed' && !preflightRefusal(j)));
-      let target;
-      if (proven) { _haltAlerted.delete(`${prod.key}|${V}|${os}`); target = eligible; } // validated → fan out
-      else if (inflight) continue;              // canary running → wait
-      else if (halted) {                        // canary failed/cancelled → stop; needs a manual look
-        const hk = `${prod.key}|${V}|${os}`;
-        if (!_haltAlerted.has(hk)) { _haltAlerted.add(hk); notifySlack(`🛑 Auto-deploy halted: *${prod.name} ${V}* (${os}) — the canary install failed. It won't fan out until you look. (Updates tab)`); }
+      const retryable = (j) => reaperTimeout(j) || preflightRefusal(j);
+      const retryableFails = vjobs.filter((j) => retryable(j)).length;
+      const realFail = vjobs.some((j) => j.status === 'cancelled' || (j.status === 'failed' && !retryable(j)));
+      const halted = !proven && !inflight && (realFail || retryableFails >= RETRY_CAP);
+      let target, state;
+      if (proven) { target = eligible; state = 'fanning_out'; }              // validated → fan out
+      else if (inflight) { state = 'canary_running'; }                       // canary running → wait
+      else if (halted) { state = 'halted'; }                                 // needs a manual look
+      else { target = [eligible[0]]; state = 'canary_pending'; }             // first run, or worth another try
+
+      // Track how long this product×OS has sat in its current state, and alert Slack once per
+      // state (not once per 3-minute tick) — resets the moment the state changes, e.g. a halt
+      // clears itself the instant a retry succeeds.
+      const record = (finalState) => {
+        const prev = _autoDeployState.get(statusKey);
+        const carried = prev && prev.state === finalState;
+        const rec = { key: prod.key, name: prod.name, os, version: V, state: finalState,
+          since: carried ? prev.since : now, escalated: carried ? !!prev.escalated : false,
+          eligible: eligible.length, sample: eligible.slice(0, 5).map((n) => n.hostname) };
+        _autoDeployState.set(statusKey, rec);
+        return rec;
+      };
+
+      if (state === 'halted') {
+        const rec = record('halted');
+        if (!rec.escalated) {
+          rec.escalated = true;
+          notifySlack(`🛑 Auto-deploy halted: *${prod.name} ${V}* (${os}) — needs a look. It won't fan out until you retry or clear it. (Updates tab)`);
+        }
         continue;
       }
-      else target = [eligible[0]];              // first run → one canary node
+      if (state === 'canary_running') { record('canary_running'); continue; }
+
       // find or create the package for this product@version+os (reuse a prior install command)
       let pkg = db.prepare('SELECT * FROM packages WHERE product_key=? AND version=? AND os=? ORDER BY id DESC LIMIT 1').get(prod.key, V, os);
       if (!pkg) {
@@ -725,13 +761,14 @@ function runAutoDeploy() {
         } else if (builtin) {                   // self-contained app, never deployed — use built-in command
           install_command = builtin; kind = 'installer';
         } else {
+          _autoDeployState.delete(statusKey);
           continue;                             // licensed app never deployed manually — no command to use
         }
         if (kind !== 'command') {               // installer: the staged file must match V
           if (!files) files = listInstallerFiles();
           const staged = findStagedInstaller(prod.key, os, V, files);
           const sv = staged ? versionFromFilename(staged.name) : null;
-          if (!sv || cmpVersionServer(sv, V) < 0) continue; // installer for V not staged yet
+          if (!sv || cmpVersionServer(sv, V) < 0) { _autoDeployState.delete(statusKey); continue; } // installer for V not staged yet
           filename = staged.name;
         }
         const id = Number(db.prepare(
@@ -745,14 +782,16 @@ function runAutoDeploy() {
       // download takes a few minutes, so right after a new build lands this is briefly false —
       // wait for it instead of spending the canary on it.
       if (pkg.kind !== 'command' && !installerAllowed(pkg)) {
-        const wk = `${prod.key}|${V}|${os}`;
-        if (!_waitAlerted.has(wk)) {
-          _waitAlerted.add(wk);
+        const rec = record('waiting_checksum');
+        if (!rec.escalated && now - rec.since > 2 * 60 * 60 * 1000) {
+          rec.escalated = true;
+          notifySlack(`🛑 ${prod.name} ${V} (${os}) has been waiting over 2h for ${pkg.filename} to match the vendor's published checksum — check the file on the share.`);
+        } else if (!rec.escalated) {
           logEvent('deploy', `Auto-deploy is waiting for ${prod.name} ${V} (${os}): ${pkg.filename} hasn't been checked against the vendor's published checksum yet`);
         }
         continue;
       }
-      _waitAlerted.delete(`${prod.key}|${V}|${os}`);
+      if (!canAct) { record('waiting_window'); continue; }   // outside the maintenance window — hold off
       const queued = [];
       for (const n of target) {
         if (activeJobForProduct(n.id, prod.key)) continue;
@@ -761,13 +800,23 @@ function runAutoDeploy() {
         queued.push(n.hostname);
       }
       if (queued.length) {
-        logEvent('deploy', `Auto-deploy ${proven ? 'fan-out' : 'canary'}: ${prod.name} ${V} (${os}) → ${queued.join(', ')}`);
+        logEvent('deploy', `Auto-deploy ${state === 'fanning_out' ? 'fan-out' : retryableFails ? 're-run' : 'canary'}: ${prod.name} ${V} (${os}) → ${queued.join(', ')}`);
+        _autoDeployState.delete(statusKey);   // just queued — nothing stuck to report right now
+      } else {
+        record(state);
       }
     }
   }
+  for (const k of [..._autoDeployState.keys()]) if (!seen.has(k)) _autoDeployState.delete(k);
 }
 setTimeout(runAutoDeploy, 30 * 1000);
 setInterval(runAutoDeploy, 3 * 60 * 1000);
+
+// The Updates tab only needs to hear about the states a human might have to act on — a running
+// or about-to-run canary is normal and already visible on the app row itself.
+function autoDeployIssues() {
+  return [..._autoDeployState.values()].filter((r) => r.state === 'halted' || r.state === 'waiting_checksum');
+}
 
 // Reaper: a job whose agent died mid-run (e.g. agent restarted) would otherwise
 // sit "installing" forever. Mark any non-terminal job that hasn't been updated in
@@ -1035,8 +1084,7 @@ function notifySlack(text) {
   } catch (e) { console.error('Slack notify error:', e.message); }
 }
 
-// Dedupe sets so Slack gets ONE alert per event, not one per timer tick.
-const _haltAlerted = new Set();
+// Dedupe set so Slack gets ONE alert per event, not one per timer tick.
 // Alert (once) when a node stays offline a while, and once when it returns.
 const _offlineAlerted = new Set();
 function checkOfflineAlerts() {
@@ -1715,6 +1763,7 @@ function fullState() {
     latestAgentVersion: LATEST_AGENT_VERSION,   // newest Beacon the server serves — flags out-of-date agents
     lastVersionCheck,                            // when the version check last completed (null until the first run)
     versionSources: sourceHealth.all(),          // per app: did its version source answer, and since when
+    autoDeployIssues: autoDeployIssues(),        // auto-deploy stuck on a real failure or a long checksum wait
     maxConcurrentInstalls: config.maxConcurrentInstalls || 4,
     slackWebhook: config.slackWebhook || '',
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
@@ -1941,7 +1990,6 @@ setInterval(() => { verifyVendorChecksums().catch(() => {}); }, 10 * 60 * 1000).
 
 // What the SERVER can rule out before queueing anything: an installer whose vendor check hasn't
 // passed yet. (Signatures are checked on the machine itself — only it can see the file it got.)
-const _waitAlerted = new Set();
 function installerAllowed(pkg) {
   if (pkg.product_key === 'ffmpeg' && pkg.os === 'windows') return vendorChecksumOk(pkg.filename);
   return true;
@@ -2434,6 +2482,39 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         return sendJson(res, 500, { error: e.message });
       }
+    }
+
+    // Updates tab: force an immediate re-check of the vendor checksum a stuck auto-deploy is
+    // waiting on, instead of waiting for the next 10-minute cycle.
+    if (req.method === 'POST' && p === '/api/vendor-checksums/recheck') {
+      try { await verifyVendorChecksums(); return sendJson(res, 200, { ok: true }); }
+      catch (e) { return sendJson(res, 500, { error: e.message }); }
+    }
+
+    // Updates tab: a human looked at a halted auto-deploy canary and wants it tried again right
+    // now, on a fresh eligible machine — the same thing runAutoDeploy would do on its own once the
+    // window opens, just asked for explicitly instead of waited for.
+    if (req.method === 'POST' && p === '/api/auto-deploy/retry') {
+      const b = await readBody(req);
+      const key = String(b.key || ''), os = String(b.os || '');
+      const rec = _autoDeployState.get(`${key}|${os}`);
+      if (!rec || rec.state !== 'halted') return sendJson(res, 400, { error: 'Nothing halted for that app right now.' });
+      const prod = db.prepare('SELECT * FROM products WHERE key = ?').get(key);
+      if (!prod) return sendJson(res, 404, { error: 'No such app.' });
+      const node = db.prepare(
+        'SELECT n.* FROM nodes n LEFT JOIN software s ON s.node_id = n.id AND s.product_key = ? WHERE n.os = ? AND n.hostname = ?'
+      ).get(key, os, rec.sample[0]);
+      if (!node) return sendJson(res, 404, { error: 'That machine is no longer available.' });
+      const pkg = db.prepare('SELECT * FROM packages WHERE product_key=? AND version=? AND os=? ORDER BY id DESC LIMIT 1').get(key, rec.version, os);
+      if (!pkg) return sendJson(res, 404, { error: 'No installer package to retry.' });
+      if (pkg.kind !== 'command' && !installerAllowed(pkg)) {
+        return sendJson(res, 409, { error: `${pkg.filename} still hasn't matched the vendor's published checksum.` });
+      }
+      db.prepare('INSERT INTO jobs (package_id, node_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+        .run(pkg.id, node.id, 'pending', Date.now(), Date.now());
+      _autoDeployState.delete(`${key}|${os}`);
+      logEvent('deploy', `Auto-deploy: retrying ${prod.name} ${rec.version} (${os}) on ${node.hostname} — requested from the Updates tab`);
+      return sendJson(res, 200, { ok: true, hostname: node.hostname });
     }
 
     if (req.method === 'POST' && p === '/api/settings') {

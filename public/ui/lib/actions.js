@@ -128,4 +128,18 @@ export async function checkVersions() {
   refresh();
 }
 
+export async function retryAutoDeploy(issue) {
+  try {
+    const r = await post('/api/auto-deploy/retry', { key: issue.key, os: issue.os });
+    toast(`Retrying ${issue.name} ${issue.version} on ${r.hostname}.`, 'success');
+  } catch (e) { toast(`Couldn't retry: ${e.message}`, 'error', 8000); }
+  refresh();
+}
+
+export async function recheckVendorChecksum() {
+  try { await post('/api/vendor-checksums/recheck'); toast('Re-checked against the vendor.', 'success'); }
+  catch (e) { toast(`Check failed: ${e.message}`, 'error'); }
+  refresh();
+}
+
 export { api, post, put, del };
