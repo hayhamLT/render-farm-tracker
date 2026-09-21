@@ -1,28 +1,14 @@
 // Run command: pick machines, send one shell command, watch each machine's answer come back.
-// Guarded by the admin key (config.adminKey on the server) — this runs code on every render node.
+// Open like the rest of the dashboard — see the note on POST /api/run in server.js. Every
+// command and the machines it went to are written to the activity log.
 import { html } from '../lib/html.js';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { farm } from '../lib/store.js';
-import { url } from '../lib/api.js';
+import { get, post } from '../lib/api.js';
 import { openDialog, toast } from '../lib/ui.js';
 import { cmpVersion, plural } from '../lib/format.js';
 import { Icon, Bar } from '../components/common.js';
 import { PageHeader } from '../components/page.js';
-
-const KEY = 'tracker.adminKey';
-const getKey = () => { try { return sessionStorage.getItem(KEY) || ''; } catch { return ''; } };
-const setKey = (v) => { try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch { /* private mode */ } };
-
-async function call(method, path, body) {
-  const res = await fetch(url(path), {
-    method,
-    headers: { 'Content-Type': 'application/json', 'X-Admin-Key': getKey() },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) { const e = new Error(data.error || `HTTP ${res.status}`); e.status = res.status; throw e; }
-  return data;
-}
 
 // The agent versions each mode needs — the same gates the server enforces, so a machine that
 // would be refused is shown as not-ready here instead of failing after you press Run.
@@ -86,29 +72,6 @@ function groupRuns(runs) {
   });
   groups.sort((a, b) => (a.exit === 0) - (b.exit === 0) || b.members.length - a.members.length);
   return { groups, waiting };
-}
-
-// ------------------------------------------------------------------ unlock --
-function Unlock({ onUnlocked }) {
-  const [k, setK] = useState('');
-  const [busy, setBusy] = useState(false);
-  const go = async () => {
-    setBusy(true);
-    setKey(k.trim());
-    try { await call('GET', '/api/run/check'); onUnlocked(); } catch (e) { setKey(''); toast(e.message, 'error'); }
-    setBusy(false);
-  };
-  return html`<div class="stack">
-    <${PageHeader} title="Run command" subtitle="Send a command to chosen machines and read what each one says back." />
-    <section class="card card-pad stack" style="max-width:520px">
-      <p class="dim" style="margin:0">This runs commands on the render nodes, so it needs the admin key — <code>adminKey</code> in the tracker's config.json. It is kept for this browser tab only.</p>
-      <div class="row">
-        <input class="field grow" type="password" placeholder="Admin key" autofocus value=${k}
-          onInput=${(e) => setK(e.currentTarget.value)} onKeyDown=${(e) => e.key === 'Enter' && k.trim() && go()} />
-        <button class="btn primary" disabled=${busy || !k.trim()} onClick=${go}>Unlock</button>
-      </div>
-    </section>
-  </div>`;
 }
 
 // ------------------------------------------------------------------- picker --
@@ -247,7 +210,6 @@ function Results({ runs, skipped, onRerun }) {
 // --------------------------------------------------------------------- view --
 export function RunView() {
   const s = farm.value;
-  const [unlocked, setUnlocked] = useState(false);
   const [picked, setPicked] = useState(new Set());
   const [cmd, setCmd] = useState('');
   const [asUser, setAsUser] = useState(true);
@@ -257,7 +219,6 @@ export function RunView() {
   const timer = useRef(null);
   const resultsRef = useRef(null);
 
-  useEffect(() => { if (getKey()) call('GET', '/api/run/check').then(() => setUnlocked(true)).catch(() => setKey('')); }, []);
   useEffect(() => () => clearInterval(timer.current), []);
 
   const nodes = (s ? s.nodes : []).filter((n) => n.os === 'windows');
@@ -271,7 +232,7 @@ export function RunView() {
     clearInterval(timer.current);
     const tick = async () => {
       try {
-        const r = await call('GET', `/api/run?ids=${ids.join(',')}`);
+        const r = await get(`/api/run?ids=${ids.join(',')}`);
         setRuns(r.runs);
         if (r.runs.every((x) => x.status === 'done')) clearInterval(timer.current);
       } catch { /* keep trying */ }
@@ -301,7 +262,7 @@ export function RunView() {
     if (!ok) return;
     setBusy(true); setRuns([]); setSkipped([]);
     try {
-      const r = await call('POST', '/api/run', { hostnames: hosts, command, asUser });
+      const r = await post('/api/run', { hostnames: hosts, command, asUser });
       setSkipped(r.skipped || []);
       setRuns(r.runs.map((x) => ({ ...x, status: 'pending' })));
       if (r.runs.length) {
@@ -309,20 +270,14 @@ export function RunView() {
         setTimeout(() => resultsRef.current && resultsRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
       } else toast('No machine could take the command.', 'error');
     } catch (e) {
-      if (e.status === 401 || e.status === 403) { setUnlocked(false); setKey(''); }
       toast(e.message, 'error');
     }
     setBusy(false);
   };
 
-  if (!unlocked) return html`<${Unlock} onUnlocked=${() => setUnlocked(true)} />`;
-
   const canRun = !busy && picked.size > 0 && cmd.trim().length > 0;
   return html`<div class="stack">
-    <${PageHeader} title="Run command" subtitle="Pick machines, type a command, send it. Each machine runs it and reports back what happened.">
-      <button class="btn ghost" title="Forget the admin key in this tab" onClick=${() => { setKey(''); setUnlocked(false); }}>
-        <${Icon} name="key" />Lock</button>
-    </${PageHeader}>
+    <${PageHeader} title="Run command" subtitle="Pick machines, type a command, send it. Each machine runs it and reports back what happened." />
 
     <${Picker} nodes=${nodes} picked=${picked} setPicked=${setPicked} asUser=${asUser} />
 

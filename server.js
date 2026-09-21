@@ -3066,17 +3066,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Run a one-off shell command on chosen machines through the tracker's own agent.
-    // This is remote code execution as SYSTEM, and the dashboard has no login — so it is
-    // locked behind config.adminKey (X-Admin-Key header), and every command is logged.
-    //   POST /api/run {hostnames:[..], command, timeoutSec?}  ->  {runs:[{id,hostname}], skipped}
-    //   GET  /api/run?ids=1,2,3                               ->  status, exit code, output
-    if (p === '/api/run' || p === '/api/run/check') {
-      if (!config.adminKey) return sendJson(res, 503, { error: 'Run command is off: set "adminKey" in config.json first.' });
-      const given = String(req.headers['x-admin-key'] || '');
-      const a = Buffer.from(given), k = Buffer.from(config.adminKey);
-      if (a.length !== k.length || !require('crypto').timingSafeEqual(a, k)) return sendJson(res, 403, { error: 'Wrong admin key.' });
-      if (p === '/api/run/check') return sendJson(res, 200, { ok: true });
-    }
+    //   POST /api/run {hostnames:[..], command, asUser?, timeoutSec?}  ->  {runs:[{id,hostname}], skipped}
+    //   GET  /api/run?ids=1,2,3                                        ->  status, exit code, output
+    // Unauthenticated, like every other dashboard route: /api/packages already takes an
+    // arbitrary install_command and /api/deployments already sends it to any machine, so a key
+    // here would have closed one door and left the identical one beside it open. Every command
+    // and target still goes to the activity log.
     if (req.method === 'POST' && p === '/api/run') {
       const b = await readBody(req);
       const command = String(b.command || '').trim();
