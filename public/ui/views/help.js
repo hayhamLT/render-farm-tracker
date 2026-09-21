@@ -10,7 +10,7 @@ import { GettingStarted } from '../components/getting-started.js';
 const topic = pref('help.topic', 'start');
 
 const TOPICS = [
-  ['start', 'Getting started', 'beacon'],
+  ['start', 'Add a machine', 'beacon'],
   ['updates', 'Updating machines', 'download'],
   ['schedule', 'Scheduling & rollouts', 'clock'],
   ['apps', 'Apps & installers', 'package'],
