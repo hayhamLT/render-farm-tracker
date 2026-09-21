@@ -1090,3 +1090,19 @@ details.quiet[open] > summary { margin-bottom: 10px; }
 .ok-text { color: var(--ok); }
 .warn-text { color: var(--warn); }
 .bad-text { color: var(--bad-text); }
+
+/* ---- Run command: results grouped by what the machines actually said ---- */
+.run-group { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 13px 15px; background: var(--surface); }
+.run-group.waiting { opacity: 0.8; }
+.run-group-head { display: flex; align-items: center; gap: 9px; }
+.run-dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+.run-dot.ok { background: var(--ok); }
+.run-dot.bad { background: var(--bad); }
+.run-dot.wait { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+.run-hosts { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0; }
+.host-chip { font-size: 0.78rem; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-2); background: var(--surface-2); }
+.run-out { white-space: pre-wrap; margin: 11px 0 0; padding: 10px 12px; max-height: 240px; overflow: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; color: var(--text-2); }
+.run-note { margin: 8px 0 0; font-size: 0.79rem; }
+.run-summary { font-variant-numeric: tabular-nums; }

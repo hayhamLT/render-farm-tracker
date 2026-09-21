@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.40.0"
+AGENT_VERSION = "2.41.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1398,6 +1398,51 @@ def handle_directives(resp):
         _PENDING["reboot"] = True
     if resp.get("shutdown"):
         _PENDING["shutdown"] = True
+    # One-off commands the tracker's "Run command" panel sent this machine (agents 2.41.0+).
+    for r in resp.get("run") or []:
+        threading.Thread(target=_run_remote, args=(r,), daemon=True).start()
+
+
+_RUN_SERVER = {"server": None}
+_RUN_SEEN = set()
+
+
+def _run_remote(r):
+    """Run one command the tracker sent, capture exit code + output, report it back. Kept apart
+    from install jobs (no version check), so a command that changes no installed version — a
+    license assignment, say — still reports what it actually did."""
+    rid = r.get("id")
+    if rid is None or rid in _RUN_SEEN:
+        return
+    _RUN_SEEN.add(rid)
+    timeout = int(r.get("timeout") or 300)
+    kw = {"shell": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+          "stdin": subprocess.DEVNULL, "text": True, "errors": "replace"}
+    if IS_WINDOWS:
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(r["command"], **kw)
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            out, _ = proc.communicate()
+            out = (out or "") + "\n[timed out after %ds]" % timeout
+            code = -1
+    except Exception as e:
+        out, code = "Could not start: %s" % e, -1
+    print("  > run #%s exited %s" % (rid, code))
+    body = {"id": rid, "exit_code": code, "output": (out or "")[-8000:]}
+    for attempt in range(4):
+        try:
+            _RUN_SERVER["server"]._request("POST", "/api/agent/run-result", body)
+            return
+        except Exception as e:
+            print("  ! could not report run #%s: %s" % (rid, e))
+            time.sleep(5 * (attempt + 1))
 
 
 def _run_cancellable(cmd, timeout):
@@ -2297,6 +2342,7 @@ def main():
 
     server = Server(server_url, key)
     server.on_response = handle_directives
+    _RUN_SERVER["server"] = server
     print("Tracker agent %s on %s (%s) -> %s"
           % (AGENT_VERSION, socket.gethostname(), platform.system(), server_url))
 

@@ -2230,6 +2230,8 @@ function handleCheckin(body) {
     shutdown: cmds.some((c) => c.kind === 'shutdown') || undefined,
     // Make Deadline start by itself (dashboard "Fix Deadline startup"), agents 2.31.0+.
     deadlineFix: cmds.some((c) => c.kind === 'deadline_fix') || undefined,
+    // One-off shell commands from the "Run command" panel (POST /api/run), agents 2.41.0+.
+    run: cmds.filter((c) => c.kind === 'run').map((c) => c.payload),
     // One-time fleet migration to a new tracker server (gated by config.rehome).
     rehome: rehomeFor(hostname),
     // User-added (custom) products + their detection patterns, so the agent can detect them
@@ -2308,6 +2310,14 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         body.ip = body.ip || req.socket.remoteAddress;
         return sendJson(res, 200, handleCheckin(body));
+      }
+
+      // Result of a one-off command (see POST /api/run).
+      if (req.method === 'POST' && p === '/api/agent/run-result') {
+        const b = await readBody(req);
+        db.prepare("UPDATE remote_runs SET status = 'done', exit_code = ?, output = ?, done_at = ? WHERE id = ?")
+          .run(Number.isFinite(Number(b.exit_code)) ? Number(b.exit_code) : -1, String(b.output || '').slice(-8000), Date.now(), Number(b.id));
+        return sendJson(res, 200, { ok: true });
       }
 
       // Stage-once: a node uploads an installer it fetched (e.g. via mx1) into
@@ -3053,6 +3063,48 @@ const server = http.createServer(async (req, res) => {
       commands.queue(node.id, 'deadline_fix');
       logEvent('node', `Deadline startup fix requested for ${node.hostname}`);
       return sendJson(res, 200, { ok: true, hostname: node.hostname });
+    }
+
+    // Run a one-off shell command on chosen machines through the tracker's own agent.
+    // This is remote code execution as SYSTEM, and the dashboard has no login — so it is
+    // locked behind config.adminKey (X-Admin-Key header), and every command is logged.
+    //   POST /api/run {hostnames:[..], command, timeoutSec?}  ->  {runs:[{id,hostname}], skipped}
+    //   GET  /api/run?ids=1,2,3                               ->  status, exit code, output
+    if (p === '/api/run' || p === '/api/run/check') {
+      if (!config.adminKey) return sendJson(res, 503, { error: 'Run command is off: set "adminKey" in config.json first.' });
+      const given = String(req.headers['x-admin-key'] || '');
+      const a = Buffer.from(given), k = Buffer.from(config.adminKey);
+      if (a.length !== k.length || !require('crypto').timingSafeEqual(a, k)) return sendJson(res, 403, { error: 'Wrong admin key.' });
+      if (p === '/api/run/check') return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && p === '/api/run') {
+      const b = await readBody(req);
+      const command = String(b.command || '').trim();
+      if (!command || !Array.isArray(b.hostnames) || !b.hostnames.length) {
+        return sendJson(res, 400, { error: 'hostnames[] and command required' });
+      }
+      const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
+      const runs = [], skipped = [];
+      for (const h of b.hostnames) {
+        const node = db.prepare('SELECT * FROM nodes WHERE hostname = ? COLLATE NOCASE').get(String(h));
+        if (!node) { skipped.push({ hostname: h, reason: 'unknown machine' }); continue; }
+        if (!(node.last_seen != null && Date.now() - node.last_seen < offlineMs)) { skipped.push({ hostname: node.hostname, reason: 'offline' }); continue; }
+        if (!node.agent_version || cmpVersionServer(node.agent_version, '2.41.0') < 0) { skipped.push({ hostname: node.hostname, reason: `agent ${node.agent_version || 'unknown'} is too old; it updates itself within minutes` }); continue; }
+        const info = db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at) VALUES (?, ?, 'pending', ?)")
+          .run(node.id, command, Date.now());
+        const id = Number(info.lastInsertRowid);
+        commands.queue(node.id, 'run', { id, command, timeout: Math.min(3600, Number(b.timeoutSec) || 300) });
+        runs.push({ id, hostname: node.hostname });
+      }
+      logEvent('node', `Command run on ${runs.map((r) => r.hostname).join(', ') || '(no machines)'}: ${command.slice(0, 200)}`);
+      return sendJson(res, 200, { ok: true, runs, skipped });
+    }
+    if (req.method === 'GET' && p === '/api/run') {
+      const ids = String(url.searchParams.get('ids') || '').split(',').map(Number).filter(Boolean);
+      if (!ids.length) return sendJson(res, 400, { error: 'ids required' });
+      const rows = db.prepare(`SELECT r.id, n.hostname, r.status, r.exit_code, r.output, r.created_at, r.done_at
+        FROM remote_runs r JOIN nodes n ON n.id = r.node_id WHERE r.id IN (${ids.map(() => '?').join(',')}) ORDER BY r.id`).all(...ids);
+      return sendJson(res, 200, { runs: rows });
     }
 
     const nodeWake = p.match(/^\/api\/nodes\/(\d+)\/wake$/);

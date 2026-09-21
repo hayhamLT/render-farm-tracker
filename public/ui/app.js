@@ -15,6 +15,7 @@ import { HistoryView } from './views/history.js';
 import { CatalogView } from './views/catalog.js';
 import { SettingsView } from './views/settings.js';
 import { HelpView } from './views/help.js';
+import { RunView } from './views/run.js';
 import { Palette } from './components/palette.js';
 import { AskPanel, askOpen, askShortcut } from './components/ask.js';
 import { startAlerts } from './lib/alerts.js';
@@ -28,6 +29,7 @@ const ROUTES = [
   { name: 'machines', label: 'Machines', icon: 'server', key: 'm', view: () => html`<${MachinesView} />` },
   { name: 'history', label: 'History', icon: 'activity', key: 'h', view: () => html`<${HistoryView} />` },
   { name: 'catalog', label: 'Apps', icon: 'package', key: 'a', view: () => html`<${CatalogView} />` },
+  { name: 'run', label: 'Run', icon: 'zap', key: 'r', view: () => html`<${RunView} />` },
   { name: 'settings', label: 'Settings', icon: 'sliders', key: 's', view: () => html`<${SettingsView} />` },
   { name: 'help', label: 'Help', icon: 'help', key: '?', view: () => html`<${HelpView} />` },
 ];
