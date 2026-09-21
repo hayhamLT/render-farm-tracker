@@ -691,11 +691,18 @@ function runAutoDeploy() {
       if (!eligible.length) continue;
       // canary state for this product@version
       const vjobs = db.prepare(
-        'SELECT j.status FROM jobs j JOIN packages p ON p.id = j.package_id WHERE p.product_key = ? AND p.version = ? AND p.os = ?'
+        'SELECT j.status, j.log FROM jobs j JOIN packages p ON p.id = j.package_id WHERE p.product_key = ? AND p.version = ? AND p.os = ?'
       ).all(prod.key, V, os);
       const proven = nodes.some((n) => n.iv && cmpVersionServer(n.iv, V) >= 0) || vjobs.some((j) => j.status === 'success');
       const inflight = vjobs.some((j) => ['pending', 'downloading', 'installing'].includes(j.status));
-      const halted = !proven && !inflight && vjobs.some((j) => ['failed', 'cancelled'].includes(j.status));
+      // A job the agent refused BEFORE running anything (unverified installer) says nothing about
+      // this version — the machines never tried it. Counting it as a failed canary is what stopped
+      // FFmpeg 9.0.2 on Windows for a day (Sep 20): the canary was queued three minutes after the
+      // zip landed, before its checksum had been verified against gyan.dev, and the halt stuck even
+      // after the checksum verified. A refusal is a "not yet", not a failure.
+      const preflightRefusal = (j) => j.status === 'failed' && /^Refused:/m.test(j.log || '');
+      const halted = !proven && !inflight
+        && vjobs.some((j) => j.status === 'cancelled' || (j.status === 'failed' && !preflightRefusal(j)));
       let target;
       if (proven) { _haltAlerted.delete(`${prod.key}|${V}|${os}`); target = eligible; } // validated → fan out
       else if (inflight) continue;              // canary running → wait
@@ -732,6 +739,20 @@ function runAutoDeploy() {
         ).run(prod.key, V, os, filename, install_command, kind, now).lastInsertRowid);
         pkg = db.prepare('SELECT * FROM packages WHERE id=?').get(id);
       }
+      // Don't roll out an installer the agents are going to refuse. The server can check one
+      // thing up front: FFmpeg's Windows zip is an archive, so it carries no signature and is
+      // only allowed when it matches the SHA-256 gyan.dev publishes. Hashing a fresh 100 MB
+      // download takes a few minutes, so right after a new build lands this is briefly false —
+      // wait for it instead of spending the canary on it.
+      if (pkg.kind !== 'command' && !installerAllowed(pkg)) {
+        const wk = `${prod.key}|${V}|${os}`;
+        if (!_waitAlerted.has(wk)) {
+          _waitAlerted.add(wk);
+          logEvent('deploy', `Auto-deploy is waiting for ${prod.name} ${V} (${os}): ${pkg.filename} hasn't been checked against the vendor's published checksum yet`);
+        }
+        continue;
+      }
+      _waitAlerted.delete(`${prod.key}|${V}|${os}`);
       const queued = [];
       for (const n of target) {
         if (activeJobForProduct(n.id, prod.key)) continue;
@@ -1913,6 +1934,18 @@ function fetchTextHttps(url, redirects = 0) {
   });
 }
 setTimeout(() => { verifyVendorChecksums().catch(() => {}); }, 60 * 1000);
+// A newly downloaded zip can't be verified until its own SHA-256 has been computed, which takes
+// a few minutes for a 100 MB file — so don't wait six hours for the next version check. This is
+// free when nothing is new: a file whose verified hash still matches is skipped without a fetch.
+setInterval(() => { verifyVendorChecksums().catch(() => {}); }, 10 * 60 * 1000).unref();
+
+// What the SERVER can rule out before queueing anything: an installer whose vendor check hasn't
+// passed yet. (Signatures are checked on the machine itself — only it can see the file it got.)
+const _waitAlerted = new Set();
+function installerAllowed(pkg) {
+  if (pkg.product_key === 'ffmpeg' && pkg.os === 'windows') return vendorChecksumOk(pkg.filename);
+  return true;
+}
 
 function signaturePolicy(job) {
   if (job.product_key === 'ffmpeg') {
