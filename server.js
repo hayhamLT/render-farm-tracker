@@ -1068,6 +1068,13 @@ function lanAddress() {
   return 'localhost';
 }
 
+// The state every viewer reads carries only where the webhook points and its last 4 characters.
+const WEBHOOK_MASK = '\u2026';
+function maskWebhook(u) {
+  if (!u) return '';
+  try { const x = new URL(u); return `${x.protocol}//${x.host}/${WEBHOOK_MASK}${String(u).slice(-4)}`; } catch { return WEBHOOK_MASK; }
+}
+
 // ---- Slack alerts --------------------------------------------------------
 // Post a message to the configured Slack incoming webhook (no-op if none set).
 function notifySlack(text) {
@@ -1766,7 +1773,7 @@ function fullState() {
     versionSources: sourceHealth.all(),          // per app: did its version source answer, and since when
     autoDeployIssues: autoDeployIssues(),        // auto-deploy stuck on a real failure or a long checksum wait
     maxConcurrentInstalls: config.maxConcurrentInstalls || 4,
-    slackWebhook: config.slackWebhook || '',
+    slackWebhook: maskWebhook(config.slackWebhook),   // never the secret itself: whoever can look is not whoever can post
     maintenanceWindow: config.maintenanceWindow || { enabled: false, start: '22:00', end: '06:00' },
     rollouts: rollouts.list(),
     downloadDir: downloadDir() || config.downloadDir,
@@ -2620,7 +2627,7 @@ const server = http.createServer(async (req, res) => {
         saveConfig();
         logEvent('monitoring', `${label} download folder set to ${dir}`);
       }
-      if (typeof b.slackWebhook === 'string') {
+      if (typeof b.slackWebhook === 'string' && !b.slackWebhook.includes(WEBHOOK_MASK)) {   // a masked value sent back = unchanged
         config.slackWebhook = b.slackWebhook.trim() || null;
         saveConfig();
         logEvent('monitoring', config.slackWebhook ? 'Slack alerts enabled' : 'Slack alerts disabled');
@@ -3336,7 +3343,7 @@ const LISTEN_HOST = process.env.HOST || config.listenHost || undefined;
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.log(`Render Farm Update Tracker`);
   console.log(`  Dashboard : http://localhost:${LISTEN_PORT}`);
-  console.log(`  Agent key : ${config.agentKey}`);
+  console.log(`  Agent key : ${config.agentKey ? 'set (config.json)' : 'NOT SET'}`);   // never the key itself: logs get shared
   console.log(`  Installers: ${config.downloadDir}${downloadDir() ? '' : ' (NOT MOUNTED)'}`);
   // Automated DB + config backups (one now, then nightly) — see lib/backup.js.
   scheduleBackups(config);
