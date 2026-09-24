@@ -1046,8 +1046,24 @@ function readBody(req) {
   });
 }
 
+// Machines reach the tracker two ways: directly on :4400 with the shared agent key (how they were
+// enrolled), or through Farmly (http://<server>:4500/beacon), which checks each machine's OWN key and
+// forwards from this computer, naming the machine: X-Farmly-Relay-Host / X-Farmly-Relay-Ip. A relayed
+// request needs no shared key (the shared key then never has to live on a machine), but it may only
+// speak for the machine Farmly vouched for.
+function relayOf(req) {
+  const host = String(req.headers['x-farmly-relay-host'] || '').trim().toUpperCase();
+  if (!host || !fromThisComputer(req)) return null;
+  const ip = String(req.headers['x-farmly-relay-ip'] || '').trim();
+  return { host, ip: /^[0-9a-fA-F.:]{3,45}$/.test(ip) ? ip : null };
+}
+const shortHost = (h) => String(h || '').split('.')[0].toUpperCase();
+const VIA = new Map();   // HOSTNAME -> 'farmly' | 'direct': how its last check-in arrived (shown on each node)
 function agentAuthorized(req) {
-  return req.headers['x-agent-key'] === config.agentKey;
+  if (relayOf(req)) return true;
+  const got = Buffer.from(String(req.headers['x-agent-key'] || ''));
+  const want = Buffer.from(String(config.agentKey || ''));
+  return want.length > 0 && got.length === want.length && crypto.timingSafeEqual(got, want);
 }
 
 // The address machines use to reach the tracker. Pinned in config.agentServerUrl (e.g.
@@ -1747,6 +1763,10 @@ function fullState() {
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     wake: wakesNow.get(n.id) || null,
     last_install: lastInstall.get(n.id) || null,
+    // How its agent reaches us: 'farmly' (through Farmly, its own key) or 'direct' (the shared key);
+    // null until it checks in after a restart. `moving`: a move to Farmly (or back) is on its way.
+    via: VIA.get(shortHost(n.hostname)) || null,
+    moving: (config.rehomeHosts || {})[shortHost(n.hostname)] ? ((config.rehomeHosts || {})[shortHost(n.hostname)].back ? 'back' : 'farmly') : null,
     // Only set while a machine looks offline: whether the network still answers for it.
     reach: reachability.get(n.id),
     software: db
@@ -1831,6 +1851,9 @@ function fullState() {
 // Only rehome-capable agents (>= 2.27.0) act on it; older ones ignore the field. Default
 // (no config.rehome): never emitted. config.json is read at startup, so reload to apply.
 function rehomeFor(hostname) {
+  // Farmly moves machines one at a time (POST /api/rehome-hosts): each gets its OWN server + key.
+  const per = (config.rehomeHosts || {})[shortHost(hostname)];
+  if (per && per.server && per.key) return { server: String(per.server).replace(/\/+$/, ''), key: per.key };
   const r = config.rehome;
   if (!r || !r.enabled || !r.server || !r.key) return undefined;
   const hn = String(hostname).toUpperCase();
@@ -2354,8 +2377,25 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/agent/')) {
       if (!agentAuthorized(req)) return sendJson(res, 401, { error: 'bad agent key' });
 
+      const relay = relayOf(req);
       if (req.method === 'POST' && p === '/api/agent/checkin') {
         const body = await readBody(req);
+        if (relay) {
+          if (shortHost(body.hostname) !== relay.host) return sendJson(res, 403, { error: `this key belongs to ${relay.host}` });
+          body.ip = relay.ip || body.ip;
+          // It arrived through Farmly: the move is done, forget the one-time instruction (and its key).
+          // (A "back" instruction is still on its way to the machine: that one stays until it arrives direct.)
+          if (config.rehomeHosts && config.rehomeHosts[relay.host] && !config.rehomeHosts[relay.host].back) {
+            delete config.rehomeHosts[relay.host];
+            saveConfig();
+            logEvent('node', `${relay.host} now reports through Farmly`);
+          }
+        }
+        else if (config.rehomeHosts && config.rehomeHosts[shortHost(body.hostname)] && config.rehomeHosts[shortHost(body.hostname)].back) {
+          delete config.rehomeHosts[shortHost(body.hostname)];   // moved back: it reports direct again
+          saveConfig();
+        }
+        VIA.set(shortHost(body.hostname), relay ? 'farmly' : 'direct');
         body.ip = body.ip || req.socket.remoteAddress;
         return sendJson(res, 200, handleCheckin(body));
       }
@@ -2363,6 +2403,10 @@ const server = http.createServer(async (req, res) => {
       // Result of a one-off command (see POST /api/run).
       if (req.method === 'POST' && p === '/api/agent/run-result') {
         const b = await readBody(req);
+        if (relay) {
+          const own = db.prepare('SELECT n.hostname FROM remote_runs r JOIN nodes n ON n.id = r.node_id WHERE r.id = ?').get(Number(b.id));
+          if (!own || shortHost(own.hostname) !== relay.host) return sendJson(res, 403, { error: 'not this machine\'s command' });
+        }
         db.prepare("UPDATE remote_runs SET status = 'done', exit_code = ?, output = ?, done_at = ? WHERE id = ?")
           .run(Number.isFinite(Number(b.exit_code)) ? Number(b.exit_code) : -1, String(b.output || '').slice(-8000), Date.now(), Number(b.id));
         return sendJson(res, 200, { ok: true });
@@ -2398,6 +2442,10 @@ const server = http.createServer(async (req, res) => {
         const id = Number(jobStatus[1]);
         const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
         if (!job) return sendJson(res, 404, { error: 'no such job' });
+        if (relay) {
+          const own = db.prepare('SELECT hostname FROM nodes WHERE id = ?').get(job.node_id);
+          if (!own || shortHost(own.hostname) !== relay.host) return sendJson(res, 403, { error: 'not this machine\'s job' });
+        }
         // 'pending' lets an agent defer its own job (node is rendering — retry next
         // check-in) without it counting as a failure.
         const ok = ['pending', 'downloading', 'installing', 'success', 'failed', 'cancelled'];
@@ -2459,7 +2507,9 @@ const server = http.createServer(async (req, res) => {
         });
         // Identify which job this transfer belongs to (by requester IP + package),
         // so the dashboard can show a REAL download progress bar — no agent change.
-        const node = db.prepare('SELECT id FROM nodes WHERE ip = ?').get(req.socket.remoteAddress);
+        const node = relay
+          ? db.prepare('SELECT id FROM nodes WHERE upper(hostname) = ?').get(relay.host)
+          : db.prepare('SELECT id FROM nodes WHERE ip = ?').get(req.socket.remoteAddress);
         const job = node && db.prepare(
           "SELECT id FROM jobs WHERE node_id = ? AND package_id = ? AND status = 'downloading' ORDER BY id DESC"
         ).get(node.id, pkg.id);
@@ -2479,6 +2529,29 @@ const server = http.createServer(async (req, res) => {
     // -------- dashboard endpoints --------
     // Farmly's gate (lib/farm_gate.js): it posts which machines may install now, and asks which
     // machines have an install ready and waiting, so it can let their renders finish and hold them.
+    // Farmly moves a machine's agent onto itself (or back): one host at a time, its own key.
+    // {host, server, key} = move there; {host, back: true} = back to this tracker with the shared key.
+    if (req.method === 'GET' && p === '/api/rehome-hosts') {
+      return sendJson(res, 200, { hosts: Object.keys(config.rehomeHosts || {}).map((h) => ({ host: h, server: config.rehomeHosts[h].server, back: !!config.rehomeHosts[h].back })) });
+    }
+    if (req.method === 'POST' && p === '/api/rehome-hosts') {
+      const b = await readBody(req);
+      const host = shortHost(b.host);
+      if (!host) return sendJson(res, 400, { error: 'host required' });
+      config.rehomeHosts = config.rehomeHosts || {};
+      if (b.back) config.rehomeHosts[host] = { server: agentBaseUrl(), key: config.agentKey, back: true };
+      else if (b.server && b.key) config.rehomeHosts[host] = { server: String(b.server), key: String(b.key) };
+      else return sendJson(res, 400, { error: 'server and key (or back) required' });
+      saveConfig();
+      logEvent('node', b.back ? `${host}: moving back to the tracker` : `${host}: moving to Farmly`);
+      return sendJson(res, 200, { ok: true });
+    }
+    const rehomeDel = p.match(/^\/api\/rehome-hosts\/([A-Za-z0-9._-]+)$/);
+    if (req.method === 'DELETE' && rehomeDel) {
+      const host = shortHost(rehomeDel[1]);
+      if (config.rehomeHosts && config.rehomeHosts[host]) { delete config.rehomeHosts[host]; saveConfig(); }
+      return sendJson(res, 200, { ok: true });
+    }
     if (req.method === 'POST' && p === '/api/farm-gate') {
       const b = await readBody(req);
       try { return sendJson(res, 200, farmGate.set(b)); } catch (e) { return sendJson(res, 400, { error: e.message }); }
