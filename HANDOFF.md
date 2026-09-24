@@ -6,6 +6,38 @@
 
 ---
 
+## 0. Now part of Farmly (2026-09-24) — read this first
+
+The tracker is being merged into **Farmly**, the studio's render farm manager on the same server
+(repo `hayhamLT/farmly`; its handoff is `docs/APPTRACKER_MERGE.md` there). What changed here for it:
+
+- **The dashboard/admin API answers only the server itself.** A guard in the router
+  (`fromThisComputer(req)`: 127.0.0.1, ::1, or any of this computer's own interface addresses) turns
+  away everything that is not the **agent surface** — `/agent`, `/setup.sh|ps1`, `/enroll.sh|ps1`,
+  `/elevate.ps1`, `/stage.bat`, `/mac_elevate.sh`, `/api/agent/*` (`AGENT_SURFACE`). A LAN browser is
+  302'd to `config.publicUrl` (Farmly's Apps page, `https://renderfarmly.com/apps`); any other LAN
+  request gets 403. People use the tracker inside Farmly (Apps, before Help), which relays
+  `/tracker/*` to `127.0.0.1:4400` behind Farmly's sign-in, power mode and audit log. Agents are
+  unchanged: they keep talking to `:4400` on the LAN with `X-Agent-Key`. No agent had to be re-pointed.
+  `/api/agent-setup` is NOT agent surface (it hands out the key; only the dashboard uses it).
+  Scripts on the server that call `http://<LAN IP>:4400` (e.g. `tracker_ops/auto_enroll.sh`) still
+  work: they arrive from one of this computer's own addresses.
+- **Farmly decides WHEN a machine installs** (`lib/farm_gate.js`). Farmly posts
+  `POST /api/farm-gate {hosts: {HOSTNAME: {ok, why}}}` every ~10 s; the check-in hands out an install
+  only when the machine's entry is `ok` (or missing, or the gate is older than `STALE_MS`, 2 min, so a
+  stopped Farmly never freezes updates). `GET /api/farm-gate` returns the gate plus `waiting` (machines
+  with an install ready to hand out, computed by `readyJob()`, the same function the check-in uses:
+  rollout window, idle-GPU rule, circuit breaker, canary slot, known checksum) and `installing` (jobs
+  in flight). Farmly holds a waiting machine off its own dispatch, lets its render finish, then marks
+  it ok; it keeps the machine off the farm until the install is done. Hostnames compare upper-cased.
+- **`HOST` env / `config.listenHost`** picks the listen address (default: all interfaces, because the
+  agents need the LAN).
+
+Not changed yet (Farmly's plan, phases 3–4): one agent (Farmly's runner) plus a small privileged
+helper instead of the Beacon, then this server's logic ported into Farmly and Node retired.
+
+---
+
 ## 1. Overview
 
 The Render Farm Tracker keeps software up to date across **~28 render nodes**. It has three parts, all with **zero npm dependencies**:
@@ -139,7 +171,12 @@ Six application tables (`lib/db.js:12-64`):
 
 ## 5. HTTP API reference
 
-Router parses the URL, then matches method + pathname. **Auth = `X-Agent-Key` header equality, applied ONLY inside the `/api/agent/` block. Everything else is open.**
+Router parses the URL, then matches method + pathname. **Auth = `X-Agent-Key` header equality, applied ONLY inside the `/api/agent/` block.** Since 2026-09-24 everything outside the agent surface answers **only this computer** (section 0): the "UNAUTHENTICATED" routes below are reachable from the server itself and through Farmly's signed-in relay, not from the LAN.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/farm-gate` | Farmly: `{hosts: {HOSTNAME: {ok, why}}}` — which machines may install now. |
+| GET | `/api/farm-gate` | The gate + `waiting` (install ready, held only by the gate) + `installing` (in flight). |
 
 ### Agent routes — authenticated (`X-Agent-Key`)
 
@@ -296,7 +333,7 @@ Prioritized:
 
 ### CRITICAL
 
-1. **The entire dashboard/admin API is unauthenticated.** The key check runs only for `/api/agent/*`; every other route has no auth. Because deploys queue install commands that agents run via `shell=True` as root/SYSTEM, an unauthenticated request = **farm-wide RCE**, not just data tampering.
+1. **The entire dashboard/admin API is unauthenticated.** *(Mitigated 2026-09-24: it answers only the server itself; people reach it through Farmly's sign-in. See section 0.)* The key check runs only for `/api/agent/*`; every other route has no auth. Because deploys queue install commands that agents run via `shell=True` as root/SYSTEM, an unauthenticated request = **farm-wide RCE**, not just data tampering.
    **Fix:** Put the **whole app** behind the larger project's auth (reverse-proxy auth / SSO / VPN / IP allowlist). Do NOT rely on the agent-key gate for the dashboard. Allow the background polling XHRs (`/api/state`, `/api/downloads`) through the auth layer or the UI silently goes "stale".
 
 2. **The shared agent key is disclosed by unauthenticated endpoints.** `GET /api/agent-setup` returns `{agentKey,...}`; the bootstrap scripts embed it verbatim and are served unauthenticated; and it is committed in `config.json:3`. The single security boundary is therefore effectively zero.

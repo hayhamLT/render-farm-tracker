@@ -21,6 +21,7 @@ const reachability = require('./lib/reachability');
 const sourceHealth = require('./lib/source_health');
 sourceHealth.init(db);
 const { createRollouts } = require('./lib/rollouts');
+const { createFarmGate } = require('./lib/farm_gate');
 const { createAsk } = require('./lib/ask');
 const installerFiles = require('./lib/installer_files');
 const { createLibrary } = require('./lib/installer_library');
@@ -2011,6 +2012,37 @@ function signaturePolicy(job) {
   return policy;
 }
 
+// The first queued job this machine may run now, or null. A job belonging to a rollout waits for
+// the rollout's start time / window, and for an idle GPU when the rollout asks for that. Shared by
+// the check-in (which hands it out) and GET /api/farm-gate (which tells Farmly to make room for it),
+// so the two cannot disagree. Farmly's own gate is NOT asked here: that is the caller's business.
+function readyJob(node, { flagHalt = false } = {}) {
+  const jobCols = `j.id, j.status, j.rollout_id, p.id AS package_id, p.product_key, p.version, p.filename, p.install_command, p.kind`;
+  const fresh = db.prepare('SELECT gpu_util FROM nodes WHERE id = ?').get(node.id) || node;
+  const queuedJobs = db.prepare(
+    `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
+      WHERE j.node_id = ? AND j.status = 'pending' ORDER BY j.id`
+  ).all(node.id);
+  for (const next of queuedJobs) {
+    if (!rollouts.allows(next, fresh)) continue;
+    // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
+    // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
+    if (rolloutHalted(next.product_key, next.version)) { if (flagHalt) flagRolloutHalt(next.product_key, next.version); return null; }
+    if (!dispatchSlotFree(next)) return null;
+    // Hand out an installer job only once its checksum is known (computed in the background
+    // the first time — a big installer can take a minute); until then it stays queued.
+    if (next.kind !== 'command' && next.filename) {
+      const full = resolveInstaller(next.filename);
+      if (full && !installerSha256(full)) return null;
+    }
+    return next;
+  }
+  return null;
+}
+
+// Farmly says when a machine may install (lib/farm_gate.js).
+const farmGate = createFarmGate();
+
 function handleCheckin(body) {
   // Strip the DNS/mDNS suffix: macOS flips between "<name>.lan" (DHCP) and
   // "<name>.local" (Bonjour), which would register the same machine twice.
@@ -2158,6 +2190,8 @@ function handleCheckin(body) {
   //    before a broken update reaches every machine. After one success, everyone goes.
   //  • Vendor-download commands (Adobe RUM, Maxon App CLI) pull from the internet, so only
   //    `maxConcurrentInstalls` of those run farm-wide.
+  //  • Farmly: a machine it is rendering on (or someone is using) waits until Farmly has let it
+  //    finish and marked it free (lib/farm_gate.js, POST /api/farm-gate).
   const jobCols = `j.id, j.status, j.rollout_id, p.id AS package_id, p.product_key, p.version, p.filename, p.install_command, p.kind`;
   // This node's already-running jobs always come back (so it keeps reporting).
   const jobs = db.prepare(
@@ -2165,28 +2199,8 @@ function handleCheckin(body) {
       WHERE j.node_id = ? AND j.status IN ('downloading', 'installing') ORDER BY j.id`
   ).all(node.id);
   if (jobs.length === 0) {
-    // First queued job this machine may run now. A job belonging to a rollout waits for the
-    // rollout's start time / window, and for an idle GPU when the rollout asks for that.
-    const fresh = db.prepare('SELECT gpu_util FROM nodes WHERE id = ?').get(node.id) || node;
-    const queuedJobs = db.prepare(
-      `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
-        WHERE j.node_id = ? AND j.status = 'pending' ORDER BY j.id`
-    ).all(node.id);
-    for (const next of queuedJobs) {
-      if (!rollouts.allows(next, fresh)) continue;
-      // Circuit breaker: don't hand out a job whose rollout has failed enough to be halted —
-      // leave it queued so a broken update can't sweep the fleet. (Retry/clear lifts it.)
-      if (rolloutHalted(next.product_key, next.version)) { flagRolloutHalt(next.product_key, next.version); break; }
-      if (!dispatchSlotFree(next)) break;
-      // Hand out an installer job only once its checksum is known (computed in the background
-      // the first time — a big installer can take a minute); until then it stays queued.
-      if (next.kind !== 'command' && next.filename) {
-        const full = resolveInstaller(next.filename);
-        if (full && !installerSha256(full)) break;
-      }
-      jobs.push(next);
-      break;
-    }
+    const next = readyJob(node, { flagHalt: true });
+    if (next && !farmGate.holds(node.hostname)) jobs.push(next);
   }
 
   // Attach the installer's SHA256 (when known) so the agent verifies integrity before running.
@@ -2246,6 +2260,27 @@ function handleCheckin(body) {
   };
 }
 
+// ------------------------------------------------------- this computer only --
+// What machines on the LAN may still reach directly: the agent API and the scripts that enrol one.
+// (/api/agent-setup is NOT here: it hands out the agent key, and only the dashboard uses it.)
+const AGENT_SURFACE = /^\/(agent|setup\.(sh|ps1)|enroll\.(sh|ps1)|elevate\.ps1|stage\.bat|mac_elevate\.sh)$|^\/api\/agent\//;
+let _own = { at: 0, set: new Set() };
+function ownAddresses() {
+  // Every address this computer answers on: a script here that calls http://<LAN IP>:4400 (e.g.
+  // auto_enroll.sh) arrives from that address, not from 127.0.0.1. Re-read every minute (DHCP).
+  if (Date.now() - _own.at > 60000) {
+    const set = new Set(['127.0.0.1', '::1']);
+    for (const ifaces of Object.values(os.networkInterfaces())) for (const i of ifaces || []) set.add(i.address);
+    _own = { at: Date.now(), set };
+  }
+  return _own.set;
+}
+function fromThisComputer(req) {
+  let ra = String(req.socket.remoteAddress || '');
+  if (ra.startsWith('::ffff:')) ra = ra.slice(7);
+  return ownAddresses().has(ra);
+}
+
 // ----------------------------------------------------------------- router --
 const live = createLive({ buildState: () => fullState() });
 metrics.startSampling({ offlineAfterMs: (config.offlineAfterSeconds || 180) * 1000, hiddenHost: (h) => isHiddenHost(h) });
@@ -2277,20 +2312,26 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // -------- static UI --------
-    // The human dashboard lives at the styled, authenticated appTracker. Only the
-    // LOCAL reverse proxy (127.0.0.1) gets the raw SPA; a LAN browser hitting
-    // :4400 directly is redirected there. Agent endpoints (/api/agent/*, /agent,
-    // /setup.* …) are above/below this and are NEVER redirected.
-    if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
-      const ra = String(req.socket.remoteAddress || '');
-      const local = ra.includes('127.0.0.1') || ra === '::1' || ra.includes('::ffff:127.0.0.1');
-      if (!local && config.publicUrl) {
-        res.writeHead(302, { Location: config.publicUrl });
+    // -------- who may use the rest --------
+    // The dashboard/admin API has no login of its own, and a deploy or "Run command" runs as
+    // SYSTEM/root on every machine. So everything below answers only THIS computer: Farmly's relay
+    // (/tracker/ on :4500, behind Farmly's sign-in) and scripts on the server itself. Machines on the
+    // LAN keep the agent surface above and below (/agent, the enrolment scripts, /api/agent/*); a
+    // browser on the LAN is sent to Farmly's Apps page instead.
+    if (!AGENT_SURFACE.test(p) && !fromThisComputer(req)) {
+      req.resume();
+      const farmly = String(config.publicUrl || '').trim();   // where people use the tracker: Farmly's Apps page
+      if ((req.method === 'GET' || req.method === 'HEAD') && !p.startsWith('/api/') && farmly) {
+        res.writeHead(302, { Location: farmly, 'Cache-Control': 'no-store' });
         return res.end();
       }
-      // The dashboard lives at ui/. A RELATIVE redirect, so it resolves under the watcher's
-      // /tracker/ prefix as well as directly on :4400.
+      return sendJson(res, 403, { error: `The appTracker answers only on the farm server. Use it in Farmly${farmly ? ': ' + farmly : ' (Apps)'}.` });
+    }
+
+    // -------- static UI --------
+    // Only this computer gets here (Farmly's relay, see above); the dashboard lives at ui/.
+    if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+      // A RELATIVE redirect, so it resolves under Farmly's /tracker/ prefix too.
       res.writeHead(302, { Location: 'ui/', 'Cache-Control': 'no-store' });
       return res.end();
     }
@@ -2429,6 +2470,31 @@ const server = http.createServer(async (req, res) => {
     }
 
     // -------- dashboard endpoints --------
+    // Farmly's gate (lib/farm_gate.js): it posts which machines may install now, and asks which
+    // machines have an install ready and waiting, so it can let their renders finish and hold them.
+    if (req.method === 'POST' && p === '/api/farm-gate') {
+      const b = await readBody(req);
+      try { return sendJson(res, 200, farmGate.set(b)); } catch (e) { return sendJson(res, 400, { error: e.message }); }
+    }
+    if (req.method === 'GET' && p === '/api/farm-gate') {
+      const waiting = {}, installing = {};
+      const inFlight = db.prepare(
+        `SELECT j.id, j.status, j.node_id, j.started_at, j.updated_at, p.product_key, p.version FROM jobs j JOIN packages p ON p.id = j.package_id
+          WHERE j.status IN ${RUNNING} ORDER BY j.id`).all();
+      const names = Object.fromEntries(db.prepare('SELECT key, name FROM products').all().map((r) => [r.key, r.name]));
+      for (const n of db.prepare('SELECT * FROM nodes').all()) {
+        if (isHiddenHost(n.hostname)) continue;
+        const mine = inFlight.filter((j) => j.node_id === n.id);
+        if (mine.length) {
+          installing[n.hostname] = mine.map((j) => ({ job: j.id, status: j.status, product_key: j.product_key,
+            product: names[j.product_key] || j.product_key, version: j.version, since: j.started_at || j.updated_at }));
+          continue;
+        }
+        const next = readyJob(n);
+        if (next) waiting[n.hostname] = { job: next.id, product_key: next.product_key, product: names[next.product_key] || next.product_key, version: next.version };
+      }
+      return sendJson(res, 200, { ...farmGate.status(), waiting, installing });
+    }
     if (req.method === 'GET' && p === '/api/state') return sendJson(res, 200, fullState());
     // Live updates stream (Server-Sent Events): a snapshot, then only what changes.
     if (req.method === 'GET' && p === '/api/live') return live.handle(req, res);
@@ -3264,7 +3330,10 @@ const server = http.createServer(async (req, res) => {
 // PORT env overrides config.json — lets a second instance (e.g. UI preview)
 // run beside the production server without stealing its port.
 const LISTEN_PORT = Number(process.env.PORT) || config.port;
-server.listen(LISTEN_PORT, () => {
+// HOST env / config.listenHost: all interfaces by default, because the machines' agents reach
+// this server over the LAN. The guard in the router keeps everything else to this computer.
+const LISTEN_HOST = process.env.HOST || config.listenHost || undefined;
+server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.log(`Render Farm Update Tracker`);
   console.log(`  Dashboard : http://localhost:${LISTEN_PORT}`);
   console.log(`  Agent key : ${config.agentKey}`);
