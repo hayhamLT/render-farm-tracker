@@ -1059,12 +1059,18 @@ function relayOf(req) {
 }
 const shortHost = (h) => String(h || '').split('.')[0].toUpperCase();
 const VIA = new Map();   // HOSTNAME -> 'farmly' | 'direct': how its last check-in arrived (shown on each node)
+const sameKey = (a, b) => {
+  const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || ''));
+  return y.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
+};
 function agentAuthorized(req) {
   if (relayOf(req)) return true;
-  const got = Buffer.from(String(req.headers['x-agent-key'] || ''));
-  const want = Buffer.from(String(config.agentKey || ''));
-  return want.length > 0 && got.length === want.length && crypto.timingSafeEqual(got, want);
+  return sameKey(req.headers['x-agent-key'], config.agentKey);
 }
+// After the shared key is rotated (POST /api/rotate-agent-key), the OLD key still opens exactly one
+// door: a check-in from a machine that has a move to Farmly waiting, so a machine that was switched
+// off during the move can still collect it. Nothing else, and never for a machine with no move.
+const retiredKeyUsed = (req) => (config.retiredAgentKeys || []).some((k) => sameKey(req.headers['x-agent-key'], k));
 
 // The address machines use to reach the tracker. Pinned in config.agentServerUrl (e.g.
 // "http://10.10.10.55:4400") so the enrol commands and the one-click installer files always
@@ -2375,7 +2381,15 @@ const server = http.createServer(async (req, res) => {
 
     // -------- agent endpoints (X-Agent-Key) --------
     if (p.startsWith('/api/agent/')) {
-      if (!agentAuthorized(req)) return sendJson(res, 401, { error: 'bad agent key' });
+      if (!agentAuthorized(req)) {
+        if (req.method === 'POST' && p === '/api/agent/checkin' && retiredKeyUsed(req)) {
+          const body = await readBody(req);
+          const per = (config.rehomeHosts || {})[shortHost(body.hostname)];
+          if (!per || per.back) return sendJson(res, 401, { error: 'bad agent key' });
+          return sendJson(res, 200, { nodeId: null, active: true, jobs: [], pollSeconds: 60, rehome: rehomeFor(body.hostname) });
+        }
+        return sendJson(res, 401, { error: 'bad agent key' });
+      }
 
       const relay = relayOf(req);
       if (req.method === 'POST' && p === '/api/agent/checkin') {
@@ -2531,6 +2545,16 @@ const server = http.createServer(async (req, res) => {
     // machines have an install ready and waiting, so it can let their renders finish and hold them.
     // Farmly moves a machine's agent onto itself (or back): one host at a time, its own key.
     // {host, server, key} = move there; {host, back: true} = back to this tracker with the shared key.
+    // Rotate the shared agent key: once every machine reports through Farmly with its own key, the
+    // shared one only matters to machines that have not moved yet. The old key stays usable for
+    // collecting a waiting move (see retiredKeyUsed) and nothing else. Never returns the key.
+    if (req.method === 'POST' && p === '/api/rotate-agent-key') {
+      config.retiredAgentKeys = [...new Set([...(config.retiredAgentKeys || []), config.agentKey].filter(Boolean))].slice(-3);
+      config.agentKey = crypto.randomBytes(24).toString('hex');
+      saveConfig();
+      logEvent('node', 'Shared agent key rotated: machines on their own key (through Farmly) are not affected');
+      return sendJson(res, 200, { ok: true, retired: config.retiredAgentKeys.length });
+    }
     if (req.method === 'GET' && p === '/api/rehome-hosts') {
       return sendJson(res, 200, { hosts: Object.keys(config.rehomeHosts || {}).map((h) => ({ host: h, server: config.rehomeHosts[h].server, back: !!config.rehomeHosts[h].back })) });
     }
