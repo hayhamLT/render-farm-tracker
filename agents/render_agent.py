@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.45.0"
+AGENT_VERSION = "2.46.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -2310,6 +2310,47 @@ def _report_rehome_failure(cur_server, detail):
         pass
 
 
+_SYNCED = {"done": False}
+
+
+def sync_own_launch(server_url, key, interval):
+    """Make every scheduled task / LaunchDaemon that launches this agent start it the way it is running
+    now. Called once, after a check-in through Farmly's relay succeeded (so this key is live and this
+    machine's own). On 2026-09-24 every PC's move to Farmly had rewritten TrackerAgent but left
+    TrackerAgentElevated on the old server and key: a second agent waiting for the next reboot, where
+    either could start first. Rewrites only what differs; never restarts anything."""
+    script = os.path.abspath(__file__)
+    try:
+        if IS_WINDOWS:
+            arg = '"%s" --server "%s" --key "%s" --interval %d' % (script, server_url, key, interval)
+            py_ps, arg_ps = sys.executable.replace("'", "''"), arg.replace("'", "''")
+            srv_ps, key_ps = server_url.replace("'", "''"), key.replace("'", "''")
+            out = _ps(
+                "Get-ScheduledTask | ForEach-Object { $t=$_;"
+                "$a=$t.Actions | Where-Object { $_.Arguments -like '*render_agent.py*' } | Select-Object -First 1;"
+                "if($a -and -not ($a.Arguments.Contains('%s') -and $a.Arguments.Contains('%s'))){"
+                "try{$n=New-ScheduledTaskAction -Execute '%s' -Argument '%s';"
+                "Set-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Action $n -ErrorAction Stop | Out-Null;"
+                "Write-Output ('SYNCED:'+$t.TaskName)}"
+                "catch{Write-Output ('SYNCERR:'+$t.TaskName+':'+$_.Exception.Message)}}}"
+                % (srv_ps, key_ps, py_ps, arg_ps))
+            for line in out.split():
+                if line.startswith("SYNC"):
+                    print("  launch config: %s" % line)
+        elif IS_MACOS:
+            import plistlib
+            for pl in _plist_paths():
+                if not os.path.exists(pl):
+                    continue
+                with open(pl, "rb") as f:
+                    args = list((plistlib.load(f) or {}).get("ProgramArguments") or [])
+                have = dict(zip(args, args[1:]))
+                if "--server" in have and (have.get("--server") != server_url or have.get("--key") != key):
+                    print("  launch config: %s %s" % ("SYNCED" if _rewrite_plist(pl, server_url, key) else "SYNCERR", pl))
+    except Exception as e:
+        print("  ! launch config sync failed: %s" % e)
+
+
 def rehome(new_server, new_key, interval, cur_server=None):
     """Migrate this agent to new_server: rewrite durable launch config, then relaunch."""
     new_server = (new_server or "").rstrip("/")
@@ -2478,6 +2519,9 @@ def main():
             watch_state["busy_since"] = (watch_state["busy_since"] or time.time()) if busy else None
             # Lightweight heartbeat first — learn whether monitoring is switched on.
             resp = server.checkin(None)
+            if not _SYNCED["done"] and "/beacon" in server_url:
+                _SYNCED["done"] = True           # this key just worked through Farmly: make the launch config match it
+                threading.Thread(target=sync_own_launch, args=(server_url, key, interval), daemon=True).start()
             # Server asked us to reboot (fallback when Deadline RemoteControl can't reach us).
             if _PENDING["reboot"]:
                 _PENDING["reboot"] = False
