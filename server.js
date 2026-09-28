@@ -1063,9 +1063,14 @@ const sameKey = (a, b) => {
   const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || ''));
   return y.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
 };
+// Every agent reports through Farmly on its own key (2026-09-28), so the shared key no longer opens
+// the agent API: anyone on the LAN could fetch it from the enrolment scripts and then speak as ANY
+// machine (take its commands, rewrite its inventory, stage files on the installer share).
+// config.directAgents: true puts the old direct path back, if machines ever have to report here again.
+const directAgents = () => config.directAgents === true;
 function agentAuthorized(req) {
   if (relayOf(req)) return true;
-  return sameKey(req.headers['x-agent-key'], config.agentKey);
+  return directAgents() && sameKey(req.headers['x-agent-key'], config.agentKey);
 }
 // After the shared key is rotated (POST /api/rotate-agent-key), the OLD key still opens exactly one
 // door: a check-in from a machine that has a move to Farmly waiting, so a machine that was switched
@@ -2341,6 +2346,14 @@ const server = http.createServer(async (req, res) => {
         p === '/enroll.sh' || p === '/enroll.ps1' || p === '/elevate.ps1' || p === '/stage.bat')) {
       const base = `http://${req.headers.host || lanAddress() + ':' + config.port}`;
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      if (!directAgents()) {
+        // These scripts carried the shared agent key to anyone who asked. Farmly installs the agent now,
+        // each machine with its own key: say so, and stop.
+        const say = "This machine's updates agent is installed by Farmly now: add the machine from Farmly > Fleet > Add machine.";
+        if (p.endsWith('.ps1')) return res.end(`Write-Host "${say}"\nexit 1\n`);
+        if (p.endsWith('.bat')) return res.end(`@echo ${say}\r\n@exit /b 1\r\n`);
+        return res.end(`#!/bin/sh\necho "${say}" >&2\nexit 1\n`);
+      }
       const fn = { '/setup.sh': macSetupScript, '/setup.ps1': winSetupScript,
                    '/enroll.sh': macEnrollUser, '/enroll.ps1': winEnrollUser,
                    '/elevate.ps1': winElevateScript, '/stage.bat': winStageScript }[p];
@@ -2382,7 +2395,8 @@ const server = http.createServer(async (req, res) => {
     // -------- agent endpoints (X-Agent-Key) --------
     if (p.startsWith('/api/agent/')) {
       if (!agentAuthorized(req)) {
-        if (req.method === 'POST' && p === '/api/agent/checkin' && retiredKeyUsed(req)) {
+        // The shared key (current or retired) still lets a machine with a move waiting collect it.
+        if (req.method === 'POST' && p === '/api/agent/checkin' && (retiredKeyUsed(req) || sameKey(req.headers['x-agent-key'], config.agentKey))) {
           const body = await readBody(req);
           const per = (config.rehomeHosts || {})[shortHost(body.hostname)];
           if (!per || per.back) return sendJson(res, 401, { error: 'bad agent key' });
@@ -2432,6 +2446,13 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && p === '/api/agent/upload') {
         const filename = path.basename(url.searchParams.get('filename') || '');
         if (!filename) return sendJson(res, 400, { error: 'filename required' });
+        // An agent only ever sends one thing now: its own "rehome failed" note. Nothing else lands on the
+        // installer share this way, so no machine (or stolen key) can swap an installer the fleet runs.
+        const note = filename.match(/^rehome_([A-Za-z0-9._-]+)\.txt$/);
+        if (!note || (relay && shortHost(note[1]) !== relay.host)) {
+          req.resume();
+          return sendJson(res, 403, { error: 'agents may only send their own rehome note; add installers in Farmly > Apps > Installers' });
+        }
         const dir = downloadDir();
         if (!dir) { req.resume(); return sendJson(res, 503, { error: `installer share ${config.downloadDir || SHARED_INSTALLERS} is not mounted on the tracker server` }); }
         const dest = path.join(installerLibrary.destinationFor(dir, filename), filename);
@@ -2563,6 +2584,7 @@ const server = http.createServer(async (req, res) => {
       const host = shortHost(b.host);
       if (!host) return sendJson(res, 400, { error: 'host required' });
       config.rehomeHosts = config.rehomeHosts || {};
+      if (b.back && !directAgents()) return sendJson(res, 409, { error: 'machines cannot report to the tracker directly any more (config.directAgents is off): a move back would leave this one silent' });
       if (b.back) config.rehomeHosts[host] = { server: agentBaseUrl(), key: config.agentKey, back: true };
       else if (b.server && b.key) config.rehomeHosts[host] = { server: String(b.server), key: String(b.key) };
       else return sendJson(res, 400, { error: 'server and key (or back) required' });

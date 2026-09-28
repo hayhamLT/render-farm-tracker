@@ -18,10 +18,11 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   302'd to `config.publicUrl` (Farmly's Apps page, `https://renderfarmly.com/apps`); any other LAN
   request gets 403. People use the tracker inside Farmly (Apps, before Help), which relays
   `/tracker/*` to `127.0.0.1:4400` behind Farmly's sign-in, power mode and audit log. Agents are
-  unchanged: they keep talking to `:4400` on the LAN with `X-Agent-Key`. No agent had to be re-pointed.
+  now report through Farmly instead (next point but one).
   `/api/agent-setup` is NOT agent surface (it hands out the key; only the dashboard uses it).
-  Scripts on the server that call `http://<LAN IP>:4400` (e.g. `tracker_ops/auto_enroll.sh`) still
-  work: they arrive from one of this computer's own addresses.
+  Scripts on the server that call `http://<LAN IP>:4400` still reach the admin API: they arrive from one
+  of this computer's own addresses. (`tracker_ops/auto_enroll.sh`, which enrolled new Deadline workers
+  with the shared key, was retired on 2026-09-28: Farmly's installer adds machines now.)
 - **Farmly decides WHEN a machine installs** (`lib/farm_gate.js`). Farmly posts
   `POST /api/farm-gate {hosts: {HOSTNAME: {ok, why}}}` every ~10 s; the check-in hands out an install
   only when the machine's entry is `ok` (or missing, or the gate is older than `STALE_MS`, 2 min, so a
@@ -32,6 +33,16 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   it ok; it keeps the machine off the farm until the install is done. Hostnames compare upper-cased.
 - **`HOST` env / `config.listenHost`** picks the listen address (default: all interfaces, because the
   agents need the LAN).
+- **The agent API is Farmly-only (2026-09-28).** Every agent reports through Farmly's `/beacon` on its
+  own key, and Farmly forwards from this computer naming the machine (`X-Farmly-Relay-Host`). The shared
+  `agentKey` no longer opens `/api/agent/*`: it was in every enrolment script, so anyone on the LAN could
+  fetch it and speak as ANY machine (take its commands, rewrite its inventory, stage files on the installer
+  share). Now: a direct request is refused unless it is a check-in collecting a waiting move (shared or
+  retired key); the enrolment scripts carry no key and say to add the machine from Farmly; an upload may
+  only be the agent's own `rehome_<HOST>.txt` note (never an installer); a move *back* to direct is
+  refused (409). `config.directAgents: true` restores all of the old direct behaviour (restart to apply).
+  Anything that relays to this tracker from 127.0.0.1 must drop client-sent `X-Farmly-*` headers
+  (Farmly's `/tracker` relay and deadlinefarm's old proxy both do).
 
 Not changed yet (Farmly's plan, phases 3–4): one agent (Farmly's runner) plus a small privileged
 helper instead of the Beacon, then this server's logic ported into Farmly and Node retired.
