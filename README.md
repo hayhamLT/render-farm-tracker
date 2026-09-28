@@ -100,7 +100,7 @@ python3 render_agent.py --server http://TRACKER-HOST:4400 --key <AGENT_KEY> --on
 ## 3. Track latest versions
 
 Most products auto-detect "latest" server-side (Maxon Zendesk feed, NVIDIA's
-public driver lookup, Adobe RUM for After Effects, gyan.dev/evermeet for
+public driver lookup, Adobe RUM for After Effects, gyan.dev / martin-riedl.de (Mac, arm64) for
 FFmpeg). The **Catalog** tab lets you override versions, set install sources,
 and toggle per-product **auto-deploy** (canary-first).
 

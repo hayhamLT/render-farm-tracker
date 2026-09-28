@@ -27,6 +27,7 @@ const installerFiles = require('./lib/installer_files');
 const { createLibrary } = require('./lib/installer_library');
 const { checkMaxonVersions, fetchInstallerUrls, pickInstallerUrl, INSTALLER_KEYWORDS } = require('./lib/maxon_versions');
 const { fetchExtraLatest } = require('./lib/extra_versions');
+const { checkZippedBinary } = require('./lib/mac_zip_signature');
 const { backupNow, scheduleBackups, lastBackup, listBackups } = require('./lib/backup');
 
 // In-memory progress for server-side installer downloads (URL -> cache file).
@@ -404,7 +405,7 @@ function isTracked(prod) {
 }
 
 // Blender + FFmpeg + NotchLC: detect latest from public sources and auto-fetch their
-// installers (Blender .msi/.dmg; FFmpeg gyan/evermeet static builds; NotchLC .exe/.pkg),
+// installers (Blender .msi/.dmg; FFmpeg gyan.dev / martin-riedl.de static builds; NotchLC .exe/.pkg),
 // saved under versioned, OS-tagged names so the normal staging pipeline matches. Per-OS
 // versions are stored (latest_win/latest_mac) for apps that differ by OS (NotchLC).
 async function checkExtraVersions() {
@@ -1977,12 +1978,17 @@ const VENDOR_SIGNERS = {
 // the job log says so.
 const ADMIN_CONSOLE_PKG = /^Adobe_.*(No-Apps|_en_US_)/i;
 
-// FFmpeg ships as a zip — nothing to sign — so it's checked against the vendor's own published
-// checksum instead. gyan.dev (Windows) publishes a SHA-256 per build; evermeet.cx (Mac) doesn't
-// publish one the tracker can check, so the Mac build is allowed but explicitly recorded as NOT
-// vendor-verified rather than quietly trusted.
+// FFmpeg ships as a zip — the zip itself carries no signature — so the server vouches for it
+// instead. Windows: gyan.dev publishes a SHA-256 per build and the file must match it. Mac: the
+// build comes from Martin Riedl's build server (arm64, since 2026-09-28; evermeet.cx's was Intel
+// only), and the ffmpeg INSIDE the zip must be validly signed by his Developer ID team
+// (FFMPEG_MAC_TEAM), notarized and built for Apple Silicon; this server (a Mac) unpacks and checks it.
+// A zip nobody vouched for is refused by the agents, the old Intel Mac zips included.
 db.exec(`CREATE TABLE IF NOT EXISTS vendor_checksums (
   filename TEXT PRIMARY KEY, sha256 TEXT NOT NULL, source TEXT, verified_at INTEGER)`);
+const FFMPEG_MAC_TEAM = 'KU3N25YGLU';            // Developer ID Application: Martin Riedl
+const FFMPEG_MAC_ZIP = /^ffmpeg-[\d.]+-macos-arm64\.zip$/i;
+const _macSigReported = new Set();               // name|sha already reported as refused (once, not every 10 min)
 function vendorChecksumOk(filename) {
   const row = db.prepare('SELECT sha256 FROM vendor_checksums WHERE filename = ?').get(path.basename(filename || ''));
   if (!row) return false;
@@ -1995,14 +2001,29 @@ function vendorChecksumOk(filename) {
 // (no verified row) and reported.
 async function verifyVendorChecksums() {
   let files = [];
-  try { files = listInstallerFiles().map((f) => f.name).filter((n) => /^ffmpeg-[\d.]+-windows-x64\.zip$/i.test(n)); } catch { return; }
+  try { files = listInstallerFiles().map((f) => f.name).filter((n) => /^ffmpeg-[\d.]+-windows-x64\.zip$/i.test(n) || FFMPEG_MAC_ZIP.test(n)); } catch { return; }
   for (const name of files) {
-    const v = name.match(/^ffmpeg-([\d.]+)-windows/i)[1];
+    const v = name.match(/^ffmpeg-([\d.]+)-/i)[1];
     const full = resolveInstaller(name);
     const sha = full && installerSha256(full);
     if (!sha) continue;                                   // still hashing — next run
     const known = db.prepare('SELECT sha256 FROM vendor_checksums WHERE filename = ?').get(name);
     if (known && known.sha256 === sha) continue;
+    if (FFMPEG_MAC_ZIP.test(name)) {
+      const r = await checkZippedBinary(full, 'ffmpeg', FFMPEG_MAC_TEAM);
+      if (r.ok) {
+        db.prepare('INSERT OR REPLACE INTO vendor_checksums (filename, sha256, source, verified_at) VALUES (?,?,?,?)').run(name, sha, r.label, Date.now());
+        logEvent('package', `${name}: ffmpeg inside is signed by ${r.label}, built for Apple Silicon: vendor-verified`);
+      } else {
+        db.prepare('DELETE FROM vendor_checksums WHERE filename = ?').run(name);
+        if (!_macSigReported.has(`${name}|${sha}`)) {
+          _macSigReported.add(`${name}|${sha}`);
+          logEvent('package', `${name}: refused, ${r.why}. Agents will not install it`);
+          notifySlack(`🛑 ${name} on the share failed the Mac FFmpeg check (${r.why}). Agents will refuse to install it. Delete it and let the tracker download it again.`);
+        }
+      }
+      continue;
+    }
     try {
       const published = (await fetchTextHttps(`https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-${v}-essentials_build.zip.sha256`)).trim().split(/\s+/)[0].toLowerCase();
       if (!/^[0-9a-f]{64}$/.test(published)) continue;
@@ -2044,7 +2065,7 @@ setInterval(() => { verifyVendorChecksums().catch(() => {}); }, 10 * 60 * 1000).
 // What the SERVER can rule out before queueing anything: an installer whose vendor check hasn't
 // passed yet. (Signatures are checked on the machine itself — only it can see the file it got.)
 function installerAllowed(pkg) {
-  if (pkg.product_key === 'ffmpeg' && pkg.os === 'windows') return vendorChecksumOk(pkg.filename);
+  if (pkg.product_key === 'ffmpeg') return vendorChecksumOk(pkg.filename);   // both OSes: see vendor_checksums
   return true;
 }
 
@@ -2055,7 +2076,9 @@ function signaturePolicy(job) {
         ? { unsigned_ok: 'matches the SHA-256 gyan.dev publishes for this build' }
         : { signers: ["gyan.dev's published checksum"] };   // an archive nobody vouched for → refused
     }
-    return { unsigned_ok: 'NOT vendor-verified — evermeet.cx publishes no checksum the tracker can check' };
+    return vendorChecksumOk(job.filename)
+      ? { unsigned_ok: 'the ffmpeg inside is signed by Martin Riedl (KU3N25YGLU) and notarized: checked on the server' }
+      : { signers: ['Martin Riedl (KU3N25YGLU), checked on the server'] };   // e.g. the old Intel evermeet.cx zips → refused
   }
   const want = VENDOR_SIGNERS[job.product_key];
   if (!want) return null;
