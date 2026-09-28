@@ -43,6 +43,12 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   refused (409). `config.directAgents: true` restores all of the old direct behaviour (restart to apply).
   Anything that relays to this tracker from 127.0.0.1 must drop client-sent `X-Farmly-*` headers
   (Farmly's `/tracker` relay and deadlinefarm's old proxy both do).
+- **Agents roll out through a canary (2026-09-28).** `config.agentCanary: ["HOST", ...]` offers a newer
+  agent to those machines only (empty/absent = everyone); set it and restart BEFORE replacing
+  `agents/render_agent.py`, which is re-read every 60 s. Every offer carries `latestAgentSha256`; agent
+  2.47.0+ installs a self-update only if the download hashes to it, compiles, and names the offered version.
+  2.47.0 also stages its asUser scripts in the desktop user's own `AppData\Local\Temp\tracker-run`
+  (was the world-writable `C:\Users\Public\.tracker-run`).
 
 Not changed yet (Farmly's plan, phases 3–4): one agent (Farmly's runner) plus a small privileged
 helper instead of the Beacon, then this server's logic ported into Farmly and Node retired.
