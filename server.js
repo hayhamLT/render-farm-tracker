@@ -47,11 +47,22 @@ const DL_PROGRESS = new Map();
 // Powers the install progress bar: elapsed vs what this product usually takes.
 const INSTALL_EMA = new Map();
 
+// ...and its SHA-256, offered with the version: agent 2.47.0+ installs a self-update only if the bytes it
+// downloaded hash to this (a truncated or swapped download is refused instead of replacing the agent).
+function readAgentSha() {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname, 'agents', 'render_agent.py'))).digest('hex'); }
+  catch { return null; }
+}
+
 let LATEST_AGENT_VERSION = readAgentVersion();
+let LATEST_AGENT_SHA = readAgentSha();
 // Agent-side reboot / shutdown / wake-relay instructions are durable rows in
 // node_commands (lib/commands.js), handed out on the node's next check-in.
 // Re-read periodically so dropping in a new render_agent.py rolls out with no restart.
-setInterval(() => { LATEST_AGENT_VERSION = readAgentVersion() || LATEST_AGENT_VERSION; }, 60 * 1000);
+setInterval(() => {
+  LATEST_AGENT_VERSION = readAgentVersion() || LATEST_AGENT_VERSION;
+  LATEST_AGENT_SHA = readAgentSha() || LATEST_AGENT_SHA;
+}, 60 * 1000);
 
 // Compare dotted versions numerically: -1 | 0 | 1.
 function cmpVersionServer(a, b) {
@@ -2263,6 +2274,10 @@ function handleCheckin(body) {
   const SAFE_SELFUPDATE_FROM = '2.1.0';
   const av = body.agentVersion || node.agent_version;
   const selfUpdateOk = av && cmpVersionServer(av, SAFE_SELFUPDATE_FROM) >= 0;
+  // config.agentCanary: ["HOST", ...] offers a new agent to those machines only, so a new build is proven
+  // on one Windows PC and one Mac before the whole fleet (every agent runs as SYSTEM/root). Empty = everyone.
+  const canary = (config.agentCanary || []).map((h) => shortHost(h));
+  const offered = selfUpdateOk && (!canary.length || canary.includes(shortHost(body.hostname)));
 
   // Instructions waiting for this machine, and which jobs it must stop.
   const cmds = commands.take(node.id);
@@ -2272,7 +2287,8 @@ function handleCheckin(body) {
     nodeId: node.id,
     active: true, // monitoring is always on (no master toggle)
     // Only advertise a target to agents that can apply it safely.
-    latestAgent: selfUpdateOk ? LATEST_AGENT_VERSION : av,
+    latestAgent: offered ? LATEST_AGENT_VERSION : av,
+    latestAgentSha256: offered ? LATEST_AGENT_SHA : undefined,
     pollSeconds: Math.max(15, Math.floor(config.offlineAfterSeconds / 3)),
     jobs,
     // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
