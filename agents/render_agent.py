@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.46.0"
+AGENT_VERSION = "2.47.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1407,8 +1407,11 @@ _RUN_SERVER = {"server": None}
 _RUN_SEEN = set()
 
 
-# Public, so the desktop user can read the script SYSTEM writes for it.
-_RUN_DIR_WIN = r"C:\Users\Public\.tracker-run"
+# The script SYSTEM writes for the desktop user goes in THAT user's own profile (AppData\Local\Temp\
+# tracker-run: the user, SYSTEM and Administrators only). It used to be C:\Users\Public\.tracker-run,
+# which every signed-in user may write: another account could swap the .cmd between SYSTEM writing it
+# and the task running it elevated as the desktop user (agent < 2.47.0).
+_RUN_DIR_REL = r"AppData\Local\Temp\tracker-run"
 
 
 def _run_as_desktop_user(command, timeout, rid):
@@ -1424,12 +1427,34 @@ def _run_as_desktop_user(command, timeout, rid):
     LastTaskResult, which reports on the task rather than on the command inside it."""
     if not IS_WINDOWS:
         return -1, "Running as the logged-in user is Windows-only."
-    tag = "tracker_run_%s" % rid
-    cmdf = "%s\\%s.cmd" % (_RUN_DIR_WIN, tag)
-    outf = "%s\\%s.out" % (_RUN_DIR_WIN, tag)
-    codef = "%s\\%s.code" % (_RUN_DIR_WIN, tag)
+    # Where that user's own profile is (its SID's ProfileImagePath): the script is staged there.
+    find = r"""$ProgressPreference='SilentlyContinue'
+%s
+if (-not $du) { 'TRACKER_NO_USER'; exit 3 }
+try {
+  $sid = (New-Object System.Security.Principal.NTAccount($du)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+  $prof = (Get-ItemProperty ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid) -ErrorAction Stop).ProfileImagePath
+} catch { $prof = $null }
+if ($prof -and (Test-Path -LiteralPath $prof)) { 'TRACKER_DIR=' + (Join-Path $prof '%s') } else { 'TRACKER_NO_PROFILE' }
+""" % (_PS_DESKTOP_USER, _RUN_DIR_REL)
     try:
-        os.makedirs(_RUN_DIR_WIN, exist_ok=True)
+        found = _run_powershell(find, timeout=60).stdout or ""
+    except Exception as e:
+        return -1, "Could not reach the user session: %s" % e
+    if "TRACKER_NO_USER" in found:
+        return -1, ("Nobody is logged in on this machine, so there is no user session to run in. "
+                    "Log in once (or turn on automatic login), then try again.")
+    m = re.search(r"TRACKER_DIR=(.+)", found)
+    if not m:
+        return -1, "Could not find the signed-in user's profile folder, so the command was not run."
+    run_dir = m.group(1).strip()
+    q = lambda s: s.replace("'", "''")       # the paths go inside PowerShell's single quotes below
+    tag = "tracker_run_%s" % rid
+    cmdf = "%s\\%s.cmd" % (run_dir, tag)
+    outf = "%s\\%s.out" % (run_dir, tag)
+    codef = "%s\\%s.code" % (run_dir, tag)
+    try:
+        os.makedirs(run_dir, exist_ok=True)
         # call :__body keeps %ERRORLEVEL% the command's own, not the redirect's.
         with open(cmdf, "w") as f:
             f.write("@echo off\r\ncall :__body > \"%s\" 2>&1\r\n>\"%s\" echo %%ERRORLEVEL%%\r\n"
@@ -1455,7 +1480,7 @@ Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyCo
 "TRACKER_CODE=$code"
 'TRACKER_OUT_BEGIN'
 if (Test-Path '%s') { Get-Content '%s' -Raw }
-""" % (_PS_DESKTOP_USER, tag, cmdf, timeout, timeout + 15, codef, codef, codef, outf, outf)
+""" % (_PS_DESKTOP_USER, tag, q(cmdf), timeout, timeout + 15, q(codef), q(codef), q(codef), q(outf), q(outf))
     try:
         p = _run_powershell(ps, timeout=timeout + 60)
         text = (p.stdout or "").replace("\r\n", "\n")
@@ -2129,13 +2154,32 @@ def _run_job(server, job):
 # Self-update — keep every node's agent current with no manual push.
 # --------------------------------------------------------------------------
 
-def self_update(server, latest):
+def update_refusal(code, latest, sha=None):
+    """Why these downloaded bytes must NOT replace the agent, or None if they may. The server offers the
+    version with its SHA-256 (tracker 2026-09-28+), so a truncated, corrupted or swapped download is
+    refused instead of becoming the SYSTEM/root agent; the file must also compile and say it is `latest`."""
+    if sha and hashlib.sha256(code).hexdigest() != str(sha).lower():
+        return "its SHA-256 is not the one the server offered"
+    if b"AGENT_VERSION" not in code or b"def main" not in code or len(code) < 2000:
+        return "it does not look like the agent"
+    m = re.search(rb'^AGENT_VERSION = "([^"]+)"', code, re.M)
+    if not m or m.group(1).decode("ascii", "replace") != latest:
+        return "it is not version %s" % latest
+    try:
+        compile(code, "render_agent.py", "exec")
+    except (SyntaxError, ValueError) as e:
+        return "it does not compile (%s)" % e
+    return None
+
+
+def self_update(server, latest, sha=None):
     """Download the newer agent, replace this script, and relaunch."""
     try:
         code = server.get_agent_code()
-        # Sanity-check before overwriting, so a bad download can't brick the agent.
-        if b"AGENT_VERSION" not in code or b"def main" not in code or len(code) < 2000:
-            print("  ! self-update aborted: downloaded agent failed sanity check")
+        # Check before overwriting, so a bad download can't brick (or become) the agent.
+        why = update_refusal(code, latest, sha)
+        if why:
+            print("  ! self-update aborted: the downloaded agent was refused: %s" % why)
             return
         script = os.path.abspath(__file__)
         tmp = script + ".new"
@@ -2569,7 +2613,7 @@ def main():
             latest_agent = resp.get("latestAgent")
             if latest_agent and not busy and _version_tuple(latest_agent) > _version_tuple(AGENT_VERSION):
                 print("Newer agent available: %s (have %s)" % (latest_agent, AGENT_VERSION))
-                self_update(server, latest_agent)  # replaces process; only returns on failure
+                self_update(server, latest_agent, resp.get("latestAgentSha256"))  # replaces process; only returns on failure
 
             if active:
                 # Refresh latest-available versions ~every 30 min (hits Maxon, throttled).
