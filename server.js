@@ -5,6 +5,8 @@
  *
  *   node server.js            start on the port in config.json (default 4400)
  */
+// First, so every line in logs/tracker.log carries the time (lib modules print while loading too).
+require('./lib/logtime').stampConsole();
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
@@ -14,6 +16,7 @@ const crypto = require('node:crypto');
 const { db, logEvent } = require('./lib/db');
 const jobRules = require('./lib/job_rules');
 const hidden = require('./lib/hidden');
+const { createOfflineAlerts } = require('./lib/offline_alerts');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
@@ -1180,24 +1183,21 @@ function notifySlack(text) {
   } catch (e) { console.error('Slack notify error:', e.message); }
 }
 
-// Dedupe set so Slack gets ONE alert per event, not one per timer tick.
-// Alert (once) when a node stays offline a while, and once when it returns.
-const _offlineAlerted = new Set();
+// Alert (once) when a node stays offline a while, and once when it returns (lib/offline_alerts.js):
+// never for hidden machines, and the first look after a start is only a baseline, so machines that
+// were already long offline are not announced again on every restart.
+const offlineAlerts = createOfflineAlerts({
+  offlineMs: () => (config.offlineAfterSeconds || 180) * 1000,
+  isHidden: (h) => isHiddenHost(h),
+});
 function checkOfflineAlerts() {
+  const said = offlineAlerts.step(db.prepare('SELECT id, hostname, last_seen FROM nodes').all(), Date.now());
   if (!config.slackWebhook) return;
-  const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
-  const graceMs = 15 * 60 * 1000;
-  const now = Date.now();
-  for (const n of db.prepare('SELECT id, hostname, last_seen FROM nodes').all()) {
-    const longOff = n.last_seen != null && now - n.last_seen > graceMs;
-    const off = n.last_seen == null || now - n.last_seen > offlineMs;
-    if (off && longOff) {
-      if (!_offlineAlerted.has(n.id)) { _offlineAlerted.add(n.id); notifySlack(`⚠️ *${n.hostname}* has been offline for 15+ minutes.`); }
-    } else if (!off && _offlineAlerted.delete(n.id)) {
-      notifySlack(`✅ *${n.hostname}* is back online.`);
-    }
+  for (const a of said) {
+    notifySlack(a.kind === 'offline' ? `⚠️ *${a.hostname}* has been offline for 15+ minutes.` : `✅ *${a.hostname}* is back online.`);
   }
 }
+checkOfflineAlerts();   // the baseline, now
 setInterval(checkOfflineAlerts, 5 * 60 * 1000);
 
 // ---- Auto-deploy maintenance window -------------------------------------
@@ -3198,10 +3198,12 @@ const server = http.createServer(async (req, res) => {
         if (!node.agent_version || cmpVersionServer(node.agent_version, '2.41.0') < 0) { skipped.push({ hostname: node.hostname, reason: `agent ${node.agent_version || 'unknown'} is too old; it updates itself within minutes` }); continue; }
         // Running in the desktop user's own session needs the agent that can do it.
         if (asUser && cmpVersionServer(node.agent_version, '2.42.0') < 0) { skipped.push({ hostname: node.hostname, reason: `agent ${node.agent_version} can't run as the logged-in user yet; it updates itself within minutes` }); continue; }
-        const info = db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at) VALUES (?, ?, 'pending', ?)")
-          .run(node.id, command, Date.now());
+        const timeout = Math.min(3600, Number(b.timeoutSec) || 300);
+        // timeout_s lets a run whose result never comes be marked lost/expired (lib/run_expiry.js).
+        const info = db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at, timeout_s) VALUES (?, ?, 'pending', ?, ?)")
+          .run(node.id, command, Date.now(), timeout);
         const id = Number(info.lastInsertRowid);
-        commands.queue(node.id, 'run', { id, command, timeout: Math.min(3600, Number(b.timeoutSec) || 300), as_user: asUser || undefined });
+        commands.queue(node.id, 'run', { id, command, timeout, as_user: asUser || undefined });
         runs.push({ id, hostname: node.hostname });
       }
       logEvent('node', `Command run on ${runs.map((r) => r.hostname).join(', ') || '(no machines)'}${asUser ? ' (as the logged-in user)' : ''}: ${command.slice(0, 200)}`);
@@ -3210,7 +3212,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/run') {
       const ids = String(url.searchParams.get('ids') || '').split(',').map(Number).filter(Boolean);
       if (!ids.length) return sendJson(res, 400, { error: 'ids required' });
-      const rows = db.prepare(`SELECT r.id, n.hostname, r.status, r.exit_code, r.output, r.created_at, r.done_at
+      // status: pending | done | lost (picked up, no result came back) | expired (never picked up);
+      // done_at is set for all but pending (lib/run_expiry.js).
+      const rows = db.prepare(`SELECT r.id, n.hostname, r.status, r.exit_code, r.output, r.created_at, r.done_at, r.delivered_at, r.timeout_s
         FROM remote_runs r JOIN nodes n ON n.id = r.node_id WHERE r.id IN (${ids.map(() => '?').join(',')}) ORDER BY r.id`).all(...ids);
       return sendJson(res, 200, { runs: rows });
     }
@@ -3335,6 +3339,14 @@ const LISTEN_PORT = Number(process.env.PORT) || config.port;
 // HOST env / config.listenHost: all interfaces by default, because the machines' agents reach
 // this server over the LAN. The guard in the router keeps everything else to this computer.
 const LISTEN_HOST = process.env.HOST || config.listenHost || undefined;
+// The port already taken (a tracker already running) used to end in an unhandled 'error' event: a page
+// of stack trace in tracker.log each time. Say it in one line, and exit as before.
+server.on('error', (e) => {
+  console.error(e && e.code === 'EADDRINUSE'
+    ? `Port ${LISTEN_PORT} is already in use (is the tracker already running?): exiting.`
+    : `The server could not start: ${e && e.message}: exiting.`);
+  process.exit(1);
+});
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.log(`Render Farm Update Tracker`);
   console.log(`  Dashboard : http://localhost:${LISTEN_PORT}`);

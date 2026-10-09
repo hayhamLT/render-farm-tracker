@@ -50,10 +50,14 @@ function shape(r) {
   return `${r.exit_code}|${out}`;
 }
 
+// A run is finished once it is done, or the tracker gave up on it: lost (picked up, no result came back)
+// or expired (never picked up). Those two have no exit code; their output says what happened.
+const finished = (r) => r.status !== 'pending';
+
 function groupRuns(runs) {
-  const waiting = runs.filter((r) => r.status !== 'done');
+  const waiting = runs.filter((r) => !finished(r));
   const by = new Map();
-  for (const r of runs.filter((x) => x.status === 'done')) {
+  for (const r of runs.filter(finished)) {
     const k = shape(r);
     if (!by.has(k)) by.set(k, { key: k, exit: r.exit_code, members: [] });
     by.get(k).members.push(r);
@@ -178,7 +182,7 @@ function Results({ runs, skipped, onRerun }) {
       ${groups.map((g) => html`<div key=${g.key} class="run-group">
         <div class="run-group-head">
           <span class=${'run-dot ' + (g.exit === 0 ? 'ok' : 'bad')}></span>
-          <b>${g.exit === 0 ? 'Worked' : `Failed — exit ${g.exit}`}</b>
+          <b>${g.exit === 0 ? 'Worked' : g.exit == null ? 'No result' : `Failed — exit ${g.exit}`}</b>
           <span class="dim">${plural(g.members.length, 'machine')}</span>
           <span class="grow"></span>
           <button class="btn sm ghost" title="Copy these machine names"
@@ -234,7 +238,7 @@ export function RunView() {
       try {
         const r = await get(`/api/run?ids=${ids.join(',')}`);
         setRuns(r.runs);
-        if (r.runs.every((x) => x.status === 'done')) clearInterval(timer.current);
+        if (r.runs.every(finished)) clearInterval(timer.current);
       } catch { /* keep trying */ }
     };
     tick();

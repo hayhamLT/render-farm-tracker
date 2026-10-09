@@ -1,7 +1,7 @@
 'use strict';
-// node --test test/   — the one-time clean-ups in lib/db.js, on a database of its own (TRACKER_DB) laid out
-// like the live one before them: Deadline's columns and timeline rows, and jobs the old check-in
-// correction credited by mistake.
+// node --test test/   — the one-time clean-ups in lib/db.js and the run expiry in lib/commands.js, on a
+// database of its own (TRACKER_DB) laid out like the live one before them: Deadline's columns and
+// timeline rows, and jobs the old check-in correction credited by mistake.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -103,6 +103,34 @@ test('the clean-ups run once: a second boot changes nothing', () => {
   assert.deepEqual(db.prepare('SELECT id, log FROM jobs ORDER BY id').all(), before);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM events').get().c, events);
   assert.ok(cols('jobs').includes('agent_seen_at'));
+});
+
+test('runs: timeout and pick-up are recorded; a run with no result is marked lost, a late result still lands', () => {
+  const commands = require('../lib/commands');
+  assert.ok(cols('remote_runs').includes('timeout_s'));
+  assert.ok(cols('remote_runs').includes('delivered_at'));
+  const now = Date.now();
+  // #442: from before pick-up times were kept, two weeks old.
+  assert.equal(commands.expireRuns(now, { force: true }), 1);
+  const r442 = db.prepare('SELECT * FROM remote_runs WHERE id = 442').get();
+  assert.equal(r442.status, 'lost');
+  assert.equal(r442.exit_code, null);
+  assert.ok(r442.done_at >= now);
+  assert.match(r442.output, /No result ever came back from MINIPC-01/);
+  assert.equal(db.prepare('SELECT status FROM remote_runs WHERE id = 443').get().status, 'done');
+  // A new run is picked up on the machine's next check-in.
+  const id = Number(db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at, timeout_s) VALUES (11, 'hostname', 'pending', ?, 300)").run(now).lastInsertRowid);
+  commands.queue(11, 'run', { id, command: 'hostname', timeout: 300 });
+  const handed = commands.take(11);
+  assert.deepEqual(handed.map((c) => c.kind), ['run']);
+  const r = db.prepare('SELECT delivered_at FROM remote_runs WHERE id = ?').get(id);
+  assert.ok(r.delivered_at >= now);
+  assert.equal(commands.expireRuns(now + 5 * 60000, { force: true }), 0, 'still within its limit');
+  assert.equal(commands.expireRuns(now + 16 * 60000, { force: true }), 1);
+  assert.equal(db.prepare('SELECT status FROM remote_runs WHERE id = ?').get(id).status, 'lost');
+  // The same update /api/agent/run-result makes: a late result replaces the verdict.
+  db.prepare("UPDATE remote_runs SET status = 'done', exit_code = 0, output = 'NODE', done_at = ? WHERE id = ?").run(now, id);
+  assert.equal(db.prepare('SELECT status FROM remote_runs WHERE id = ?').get(id).status, 'done');
 });
 
 test.after(() => { try { db.close(); } catch { /* closed */ } fs.rmSync(dir, { recursive: true, force: true }); });
