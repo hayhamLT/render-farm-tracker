@@ -21,8 +21,8 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   now report through Farmly instead (next point but one).
   `/api/agent-setup` (it handed out the shared key), `/api/enroll-files` (it wrote one-click installers
   to the share), `/stage.bat` and `public/mac_elevate.sh` were removed on 2026-10-09 (section 0b).
-  Scripts on the server that call `http://<LAN IP>:4400` still reach the admin API: they arrive from one
-  of this computer's own addresses. (`tracker_ops/auto_enroll.sh`, which enrolled new machines
+  Since 2026-10-09 being on this computer is not enough either: the admin API needs its token, and the
+  tracker listens on 127.0.0.1 only (section 0c). (`tracker_ops/auto_enroll.sh`, which enrolled new machines
   with the shared key, was retired on 2026-09-28: Farmly's installer adds machines now.)
 - **Farmly decides WHEN a machine installs** (`lib/farm_gate.js`). Farmly posts
   `POST /api/farm-gate {hosts: {HOSTNAME: {ok, why}}}` every ~10 s; the check-in hands out an install
@@ -34,8 +34,8 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   rollout window, idle-GPU rule, circuit breaker, canary slot, known checksum) and `installing` (jobs
   in flight). Farmly holds a waiting machine off its own dispatch, lets its render finish, then marks
   it ok; it keeps the machine off the farm until the install is done. Hostnames compare upper-cased.
-- **`HOST` env / `config.listenHost`** picks the listen address (default: all interfaces, because the
-  agents need the LAN).
+- **`HOST` env / `config.listenHost`** picks the listen address (default `127.0.0.1` since 2026-10-09,
+  section 0c; all interfaces only with `config.directAgents`).
 - **The agent API is Farmly-only (2026-09-28).** Every agent reports through Farmly's `/beacon` on its
   own key, and Farmly forwards from this computer naming the machine (`X-Farmly-Relay-Host`). The shared
   `agentKey` no longer opens `/api/agent/*`: it was in every enrolment script, so anyone on the LAN could
@@ -107,6 +107,101 @@ helper instead of the Beacon, then this server's logic ported into Farmly and No
 - Tests: `node --test test/*.test.js` (pure decisions + the migrations on a database of their own, via
   `TRACKER_DB`), `python3 -m unittest test/test_agent_plist.py` (Apple's 3.9 and the newest).
   `test/e2e.sh` is stale and refuses to run without `TRACKER_URL` or against :4400.
+
+## 0c. The admin token, 2026-10-09
+
+Until now any process on the server could use the whole admin API with no credential: `POST /api/run`
+(a command as SYSTEM/root on every machine), deployments, uninstall, restart/shut-down, settings, the
+hidden machines, mkdir, download-url. Now (`lib/admin_auth.js`, tests in `test/admin_auth.test.js`):
+
+- **`config.adminToken`**: 32 random bytes, base64url (43 characters), made at the first start that finds
+  none and saved into `config.json` (0600; `saveConfig` now writes a temporary file and renames it over,
+  so a reader never sees half a file). Never printed. A good token is never replaced: Farmly holds a copy.
+  To change it, delete `adminToken` from `config.json` and restart; then Farmly must re-read it.
+- **Every request needs the header `X-Tracker-Admin: <adminToken>`** (compared in constant time: both
+  sides SHA-256'd, then `crypto.timingSafeEqual`) **except**:
+  - the agent surface (`/agent`, `/setup.sh|ps1`, `/enroll.sh|ps1`, `/elevate.ps1`, `/api/agent/*`): it has
+    its own check (Farmly's relay from this computer, or the agent key with `config.directAgents`);
+  - `GET`/`HEAD` of anything outside `/api/` (the static UI files and the `/`, `/classic` redirects; they
+    hold no data). There is no health route: Farmly.app's probe of `http://127.0.0.1:4400/` counts any
+    answer from 200 to 499 as "answering", and `/` stays an open 302.
+  So **every `/api/*` route outside `/api/agent/*` needs it, GETs included** (`/api/state`, `/api/live`,
+  `/api/run?ids=`, `/api/farm-gate`, `/api/list-dirs`, ...): a local script without the token gets nothing.
+  Without it: **401**, `{"error": "...needs its admin token: send it as the X-Tracker-Admin header...",
+  "code": "admin_token"}` and the response header `X-Tracker-Auth: admin_token` (a wrong token: "...is
+  wrong..."). The dashboards in `public/ui/` read that header so this 401 does not send the window to
+  `/login` as a Farmly sign-in 401 does (signing in again would not fix it).
+- **`config.requireAdminToken`**: only `true` enforces it. Absent/false (the default for an existing
+  `config.json`, so a deploy cannot lock Farmly out): requests without a good token are answered, and
+  `logs/tracker.log` says `Admin token missing|wrong on METHOD /path (from ADDR): answered, because
+  config.requireAdminToken is off`, at most once per method + path per 10 minutes. The start-up lines
+  say which mode is on (`Admin API : ...`). A brand-new `config.json` gets `requireAdminToken: true`.
+- **`POST /api/run` needs `reason`**: a non-empty string, at most 300 characters (400 otherwise), kept in
+  `remote_runs.reason`, returned by `GET /api/run`, and written to the activity log ("Command run on
+  HOSTS, because: REASON. Command: ..."), which the History view shows. The agent is not sent it. The
+  tracker's own Run view has a required "Why" field.
+- **Listens on `127.0.0.1` only by default** (`config.listenHost`, or `HOST` env). Nothing on the LAN
+  talks to :4400 any more: every agent reports through Farmly's `/beacon` (`farmly/beacon.py`), which
+  relays every agent path it allows (`/agent`, check-in, run results, uploads, job status, installer
+  downloads) to `127.0.0.1:4400`. `config.directAgents: true` makes the default all interfaces again,
+  because machines would then report here directly. Setting `"0.0.0.0"` by hand works, but then the admin
+  API is one stolen token from the LAN instead of from this computer (the `fromThisComputer` guard still
+  refuses LAN requests, but that is one check, not two). A script using `http://localhost:4400` may try
+  `::1` first: use `127.0.0.1`.
+- **The tracker's own dashboards (`public/ui/`, `/classic`)** get no token: they work only through
+  Farmly's `/tracker/` relay, which adds the header to every request. Opened directly at
+  `http://127.0.0.1:4400/ui/` they load but every API call gets the 401 above (once enforced).
+
+**The contract with Farmly**: Farmly reads `adminToken` from this `config.json`
+(`vendor/render-farm-tracker/config.json`, same account) and adds `X-Tracker-Admin` to every request it
+sends the tracker: the `/tracker/*` relay, `beacon.py`'s `_tracker()` calls (`/api/rehome-hosts`,
+`/api/rotate-agent-key`, ...), `tracker.py`'s gate posts and history reads. It should re-read the file when
+it changes (or on a 401 with `X-Tracker-Auth: admin_token`), so a token made at the tracker's next start
+is picked up without restarting Farmly, and keep sending no header while the file has none. It must
+never forward a client's own `X-Tracker-Admin` (or pass the token to a browser). Agent relays may carry
+it too: the agent API ignores it.
+
+**How a script on the server calls the tracker now**: through Farmly (signed in), or with the token:
+
+```python
+# The operator's helper pattern: read the token, send it on every call.
+import json, urllib.request
+CFG = "/Users/trm/farmproject/vendor/render-farm-tracker/config.json"
+TOKEN = json.load(open(CFG))["adminToken"]
+def tracker(path, body=None, method=None):
+    req = urllib.request.Request("http://127.0.0.1:4400" + path, method=method,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={"X-Tracker-Admin": TOKEN, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+tracker("/api/state")
+tracker("/api/run", {"hostnames": ["AVA-01"], "command": "query user", "reason": "who is signed in"})
+```
+
+or `curl -H "X-Tracker-Admin: $(python3 -c 'import json;print(json.load(open("config.json"))["adminToken"])')" http://127.0.0.1:4400/api/state`
+from the tracker's folder. Never print the token or paste it into a log or a chat. Farmly's
+`tools/rollout.py` and `tools/screen_rollout.py` call `:4400` directly with neither the token nor a
+reason: they need both before `requireAdminToken` is turned on (the reason already, from this deploy).
+
+**Deploy order** (the relay must send the token before the tracker requires it):
+1. Deploy Farmly's side (sends `X-Tracker-Admin` when `config.json` has a token, and a `reason` on
+   `/api/run`). The running tracker ignores both.
+2. Deploy this branch, restart the tracker (its stop script; Farmly.app starts it again). It makes the
+   token, listens on 127.0.0.1 only, and does not enforce it yet (`requireAdminToken` absent). Check
+   `lsof -nP -iTCP:4400 -sTCP:LISTEN` shows `127.0.0.1:4400`, and that Farmly picked up the token
+   (restart Farmly if it reads it only at start).
+3. Watch `logs/tracker.log` for `Admin token missing` / `wrong` lines for a few minutes (Farmly posts the
+   gate every ~10 s, so a relay without the token shows at once). Anything listed must be fixed first.
+4. Set `"requireAdminToken": true` in `config.json`, restart the tracker. Check Apps in Farmly (Machines,
+   Run, the gate) still works.
+   **Fallback**: set it back to `false` (or remove it) and restart: everything is answered again, still
+   logged. `listenHost: "0.0.0.0"` restores LAN listening if something turns out to need it.
+
+`config.adminKey` in the live `config.json` is a leftover of the Run command's first key (dropped in
+df35f15): nothing reads it; it can be removed by hand.
+
+Testing on a scratch copy: give it its own `sharedInstallers`/`downloadDir` folder and
+`autoFetchMaxonInstallers: false`, or within a minute it starts downloading vendor installers into it.
 
 ---
 
@@ -247,7 +342,7 @@ Six application tables (`lib/db.js:12-64`):
 
 ## 5. HTTP API reference
 
-Router parses the URL, then matches method + pathname. **Auth = `X-Agent-Key` header equality, applied ONLY inside the `/api/agent/` block.** Since 2026-09-24 everything outside the agent surface answers **only this computer** (section 0): the "UNAUTHENTICATED" routes below are reachable from the server itself and through Farmly's signed-in relay, not from the LAN.
+Router parses the URL, then matches method + pathname. **Auth = `X-Agent-Key` header equality, applied ONLY inside the `/api/agent/` block.** Since 2026-09-24 everything outside the agent surface answers **only this computer** (section 0), and since 2026-10-09 every `/api/*` route below that is not `/api/agent/*` needs the `X-Tracker-Admin` token (section 0c): the "UNAUTHENTICATED" marks below are history.
 
 | Method | Path | Purpose |
 |---|---|---|
