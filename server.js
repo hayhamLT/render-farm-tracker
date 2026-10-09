@@ -14,6 +14,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const jobRules = require('./lib/job_rules');
+const hidden = require('./lib/hidden');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
@@ -284,10 +285,13 @@ if (configDirty) saveConfig();
 // Hosts hidden from the dashboard (config.hiddenNodes) are ALSO excluded from
 // deploy targeting — so an infra box (e.g. this server, which runs an elevated
 // RUM-only reporter agent) can never be sent a job that installs as root. Hiding
-// must mean "not a render node", not just "not shown".
+// must mean "not a render node", not just "not shown" (lib/hidden.js).
 function isHiddenHost(hostname) {
-  const k = String(hostname || '').split('.')[0].toUpperCase();
-  return (config.hiddenNodes || []).some((h) => String(h).split('.')[0].toUpperCase() === k);
+  return hidden.isHidden(hostname, config.hiddenNodes);
+}
+// The words of the refusal when `action` must not be done to this machine because it is hidden, or null.
+function hiddenRefusal(node, action) {
+  return hidden.refusal(node, action, config.hiddenNodes);
 }
 
 // Scheduled / windowed rollouts with a Slack report (lib/rollouts.js).
@@ -2289,7 +2293,8 @@ function handleCheckin(body) {
     `SELECT ${jobCols} FROM jobs j JOIN packages p ON p.id = j.package_id
       WHERE j.node_id = ? AND j.status IN ('downloading', 'installing') ORDER BY j.id`
   ).all(node.id);
-  if (jobs.length === 0) {
+  // A hidden infrastructure host is never handed an install, even one queued before it was hidden.
+  if (jobs.length === 0 && !isHiddenHost(node.hostname)) {
     const next = readyJob(node, { flagHalt: true });
     if (next && !farmGate.holds(node.hostname)) jobs.push(next);
   }
@@ -2318,8 +2323,10 @@ function handleCheckin(body) {
   const canary = (config.agentCanary || []).map((h) => shortHost(h));
   const offered = selfUpdateOk && (!canary.length || canary.includes(shortHost(body.hostname)));
 
-  // Instructions waiting for this machine, and which jobs it must stop.
-  const cmds = commands.take(node.id);
+  // Instructions waiting for this machine, and which jobs it must stop. A hidden host never gets a
+  // restart or a shut-down (the routes refuse them; this also drops one queued before it was hidden).
+  const hiddenHost = isHiddenHost(node.hostname);
+  const cmds = commands.take(node.id).filter((c) => !(hiddenHost && (c.kind === 'reboot' || c.kind === 'shutdown')));
   const stopIds = reconcileRunning(node, body, now);
 
   return {
@@ -2760,6 +2767,8 @@ const server = http.createServer(async (req, res) => {
         'SELECT n.* FROM nodes n LEFT JOIN software s ON s.node_id = n.id AND s.product_key = ? WHERE n.os = ? AND n.hostname = ?'
       ).get(key, os, rec.sample[0]);
       if (!node) return sendJson(res, 404, { error: 'That machine is no longer available.' });
+      const hiddenNo = hiddenRefusal(node, 'install');
+      if (hiddenNo) return sendJson(res, 403, { error: hiddenNo });
       const pkg = db.prepare('SELECT * FROM packages WHERE product_key=? AND version=? AND os=? ORDER BY id DESC LIMIT 1').get(key, rec.version, os);
       if (!pkg) return sendJson(res, 404, { error: 'No installer package to retry.' });
       if (pkg.kind !== 'command' && !installerAllowed(pkg)) {
@@ -2931,10 +2940,14 @@ const server = http.createServer(async (req, res) => {
       if (!prod) return sendJson(res, 404, { error: 'no such product' });
       if (!Array.isArray(b.node_ids) || !b.node_ids.length) return sendJson(res, 400, { error: 'node_ids required' });
       const now = Date.now();
-      const queued = [], noCmd = [];
+      const queued = [], noCmd = [], refused = [];
+      let found = 0;
       for (const nid of b.node_ids) {
         const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nid));
         if (!node) continue;
+        found++;
+        const hiddenNo = hiddenRefusal(node, 'uninstall');
+        if (hiddenNo) { refused.push({ hostname: node.hostname, reason: hiddenNo }); continue; }
         const cmd = node.os === 'windows' ? prod.uninstall_cmd_win : prod.uninstall_cmd_mac;
         if (!cmd) { noCmd.push(node.hostname); continue; }
         if (activeJobForProduct(node.id, prod.key)) continue;
@@ -2946,7 +2959,9 @@ const server = http.createServer(async (req, res) => {
         queued.push(node.hostname);
       }
       if (queued.length) logEvent('deploy', `Uninstall queued: ${prod.name} → ${queued.join(', ')}`);
-      return sendJson(res, 200, { ok: true, queued, noCmd });
+      // Asked only for hidden machines: refuse the way the single-machine routes do.
+      if (refused.length && refused.length === found) return sendJson(res, 403, { error: refused[0].reason, refused });
+      return sendJson(res, 200, { ok: true, queued, noCmd, refused });
     }
 
     // Register a NEW custom product to track (no code change) — e.g. a plugin like X-Particles.
@@ -3093,12 +3108,13 @@ const server = http.createServer(async (req, res) => {
       if (!Array.isArray(b.node_ids) || !b.node_ids.length) {
         return sendJson(res, 400, { error: 'node_ids required' });
       }
-      const created = [], skippedNoDriver = [];
+      const created = [], skippedNoDriver = [], refused = [];
       const rolloutId = rolloutIdFrom(b);
       for (const nid of b.node_ids) {
         const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nid));
         if (!node || node.os !== pkg.os) continue; // never send a package to the wrong OS
-        if (isHiddenHost(node.hostname)) continue;  // never deploy to a hidden infra host
+        const hiddenNo = hiddenRefusal(node, 'install');   // never deploy to a hidden infra host
+        if (hiddenNo) { refused.push({ hostname: node.hostname, reason: hiddenNo }); continue; }
         // NVIDIA: deploy the driver track this GPU supports (Pascal → 581.x, not 610.x).
         const usePkg = packageForNode(node, pkg);
         if (!usePkg || node.os !== usePkg.os) { skippedNoDriver.push(node.hostname); continue; }
@@ -3110,7 +3126,7 @@ const server = http.createServer(async (req, res) => {
         created.push(node.hostname);
       }
       logEvent('deploy', `Deployment queued: ${pkg.product_key} ${pkg.version} → ${created.length ? created.join(', ') : '(no eligible nodes)'}`);
-      return sendJson(res, 200, { ok: true, queued: created, skippedNoDriver });
+      return sendJson(res, 200, { ok: true, queued: created, skippedNoDriver, refused });
     }
 
     // Update ONE node to a specific package (individual update button).
@@ -3119,7 +3135,8 @@ const server = http.createServer(async (req, res) => {
       const pkg = db.prepare('SELECT * FROM packages WHERE id = ?').get(Number(b.package_id));
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(b.node_id));
       if (!pkg || !node) return sendJson(res, 400, { error: 'bad node or package' });
-      if (isHiddenHost(node.hostname)) return sendJson(res, 400, { error: 'node is hidden from the dashboard and cannot be deployed to' });
+      const hiddenNo = hiddenRefusal(node, 'install');
+      if (hiddenNo) return sendJson(res, 403, { error: hiddenNo });
       const usePkg = packageForNode(node, pkg);   // NVIDIA: swap to this GPU's driver track
       if (!usePkg) return sendJson(res, 400, { error: `no supported NVIDIA driver is staged for ${node.hostname}'s GPU` });
       if (node.os !== usePkg.os) return sendJson(res, 400, { error: 'package OS does not match node OS' });
@@ -3221,7 +3238,9 @@ const server = http.createServer(async (req, res) => {
       if (!['failed', 'cancelled'].includes(job.status)) {
         return sendJson(res, 400, { error: `only failed/stopped jobs can retry (this one is ${job.status})` });
       }
-      db.prepare("UPDATE jobs SET status = 'pending', log = NULL, updated_at = ? WHERE id = ?")
+      const hiddenNo = hiddenRefusal(db.prepare('SELECT hostname FROM nodes WHERE id = ?').get(job.node_id), 'retry');
+      if (hiddenNo) return sendJson(res, 403, { error: hiddenNo });
+      db.prepare("UPDATE jobs SET status = 'pending', log = NULL, updated_at = ?, agent_seen_at = NULL WHERE id = ?")
         .run(Date.now(), id);
       logEvent('deploy', `Job #${id} retried by user`);
       return sendJson(res, 200, { ok: true });
@@ -3233,6 +3252,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && nodeReboot) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeReboot[1]));
       if (!node) return sendJson(res, 404, { error: 'no such node' });
+      // Never restart a hidden infrastructure host: POST /api/nodes/33/reboot would have restarted
+      // Farmly-Server, the farm's own server.
+      const hiddenNo = hiddenRefusal(node, 'reboot');
+      if (hiddenNo) return sendJson(res, 403, { error: hiddenNo });
       const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
       const agentCapable = online && node.agent_version && cmpVersionServer(node.agent_version, '2.17.3') >= 0;
       if (agentCapable) {
@@ -3260,8 +3283,8 @@ const server = http.createServer(async (req, res) => {
       if (!node) return sendJson(res, 404, { error: 'no such node' });
       // Never power off a hidden infrastructure host (e.g. the elevated box that
       // runs the server + RUM reporter) — same guard the deploy endpoints use.
-      if (isHiddenHost(node.hostname))
-        return sendJson(res, 403, { error: `${node.hostname} is a hidden infrastructure host and can't be shut down from here.` });
+      const hiddenNo = hiddenRefusal(node, 'shutdown');
+      if (hiddenNo) return sendJson(res, 403, { error: hiddenNo });
       const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
       // Macs need 2.29.0+, which SLEEPS instead of shutting down — a shut-down Mac can't be
       // woken by Wake-on-LAN, so an older Mac agent must not be told to power off.
@@ -3327,6 +3350,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && nodeWake) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeWake[1]));
       if (!node) return sendJson(res, 404, { error: 'no such node' });
+      const hiddenNo = hiddenRefusal(node, 'wake');
+      if (hiddenNo) return sendJson(res, 403, { error: hiddenNo });
       const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
       if (node.last_seen != null && Date.now() - node.last_seen < offlineMs) {
         return sendJson(res, 409, { error: `${node.hostname} is already online.` });
