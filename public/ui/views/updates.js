@@ -211,6 +211,13 @@ function Attention({ s, models }) {
       actions: [{ label: 'How', run: () => go('settings') }] },
     ...autoIssues.map((iss) => {
       const osLabel = iss.os === 'macos' ? 'Mac' : 'Windows';
+      // Machines auto-deploy leaves alone for a day after their install of this version failed.
+      if (iss.state === 'held') {
+        const held = iss.held || [];
+        return { tone: 'warn', icon: 'pause', text: `Auto-deploy skips ${held.map((h) => h.hostname).join(', ')} for ${iss.name} ${iss.version} (${osLabel})`,
+          detail: held.map((h) => `${h.hostname}: ${h.reason} (until ${new Date(h.until).toLocaleString()})`).join(' · ') + '. Retry the job in History to try sooner.',
+          actions: [{ label: 'View', run: () => go('history') }] };
+      }
       return iss.state === 'halted'
         ? { tone: 'bad', icon: 'alert', text: `Auto-deploy of ${iss.name} ${iss.version} (${osLabel}) needs a look`,
             detail: `Retried automatically and still failing — waiting since ${ago(iss.since, s.now)}. Ready for ${plural(iss.eligible, 'machine')}${iss.sample.length ? `: ${iss.sample.join(', ')}` : ''}.`,

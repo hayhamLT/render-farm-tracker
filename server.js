@@ -13,6 +13,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
+const jobRules = require('./lib/job_rules');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
 const metrics = require('./lib/metrics');
@@ -66,15 +67,7 @@ setInterval(() => {
 }, 60 * 1000);
 
 // Compare dotted versions numerically: -1 | 0 | 1.
-function cmpVersionServer(a, b) {
-  const pa = String(a).split(/[^0-9]+/).filter(Boolean).map(Number);
-  const pb = String(b).split(/[^0-9]+/).filter(Boolean).map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] || 0, y = pb[i] || 0;
-    if (x !== y) return x < y ? -1 : 1;
-  }
-  return 0;
-}
+const cmpVersionServer = jobRules.cmpVersion;
 // First numeric component = the "major" line (used to tell a safe in-place patch
 // from a new-major / fresh install, which is opt-in side-by-side).
 const verMajorServer = (v) => { const m = String(v || '').match(/\d+/); return m ? Number(m[0]) : 0; };
@@ -82,12 +75,15 @@ const verMajorServer = (v) => { const m = String(v || '').match(/\d+/); return m
 // True if a node already has an in-flight job for this PRODUCT (any package/version).
 // Dedup must key on product, not package_id: every "Update now" mints a fresh
 // package row, so a package-id check would let a second AE update queue while one
-// is already installing. This stops that.
+// is already installing. This stops that. A job marked failed that the machine's agent named as
+// running a moment ago counts too: the tracker gave up on it while its installer was still going
+// (AVA-01, 2026-10-06), and a second install of the app must not be queued behind it.
 function activeJobForProduct(nodeId, productKey) {
   return db.prepare(
     `SELECT j.id FROM jobs j JOIN packages p ON p.id = j.package_id
-      WHERE j.node_id = ? AND p.product_key = ? AND j.status IN ('pending','downloading','installing')`
-  ).get(nodeId, productKey);
+      WHERE j.node_id = ? AND p.product_key = ?
+        AND (j.status IN ('pending','downloading','installing') OR (j.status = 'failed' AND j.agent_seen_at > ?))`
+  ).get(nodeId, productKey, Date.now() - jobRules.SEEN_RUNNING_MS);
 }
 
 // Circuit breaker for a rolling rollout: if the first few installs of a product@version all
@@ -661,7 +657,10 @@ const MISSING_MIN_AGENT = { ffmpeg: '2.11.0', blender: '2.10.0', notchlc: '2.13.
 // up on the Updates tab the moment it happens rather than only when the next install would have
 // started. Key: "<product key>|<os>". Exposed (filtered) through /api/state as `autoDeployIssues`.
 const _autoDeployState = new Map();
-const RETRY_CAP = 3;   // how many "not really a failure" canary attempts before treating it as a real one
+const RETRY_CAP = jobRules.RETRY_CAP;   // how many "not really a failure" attempts count as one real one
+// Holds already written to the activity log ("product|os|version|host|job"), so a hold is said once, not
+// every 3-minute tick. In memory: after a restart a hold still in force is said once more.
+const _holdsSaid = new Set();
 
 function runAutoDeploy() {
   const canAct = inMaintenanceWindow();   // outside the window: keep watching, just don't queue
@@ -707,10 +706,31 @@ function runAutoDeploy() {
       // refuses them. Auto-deploy didn't check, so switching it on for an app the farm
       // has but they don't read as "missing here" and started installing Cinema 4D on
       // the tracker server itself (Sep 2026).
-      const eligible = nodes.filter((n) =>
+      const candidates = nodes.filter((n) =>
         !isHiddenHost(n.hostname)
         && needs(n) && gpuOk(n) && online(n) && !installed.has(n.id) && !activeJobForProduct(n.id, prod.key));
-      if (!eligible.length) { _autoDeployState.delete(statusKey); continue; }
+      // A machine whose install of THIS version failed (or ended RETRY_CAP times with no word from its
+      // agent) in the last day is left alone: a version proven elsewhere used to make it eligible again on
+      // the very next tick, so AVA-01 got NVIDIA 617.42 queued every 3 minutes all night (134 jobs, each
+      // failing "No space left on device", each a Slack alert). It is listed in autoDeployIssues with the
+      // reason; a person's Retry (History) or the day passing gives it back.
+      const recentJobs = db.prepare(
+        `SELECT j.id, j.node_id, j.status, j.log, j.updated_at FROM jobs j JOIN packages p ON p.id = j.package_id
+          WHERE p.product_key = ? AND p.version = ? AND p.os = ? AND j.updated_at > ?`
+      ).all(prod.key, V, os, now - jobRules.HOLD_MS);
+      const held = [];
+      const eligible = candidates.filter((n) => {
+        const h = jobRules.machineHold(recentJobs.filter((j) => j.node_id === n.id), now);
+        if (!h) return true;
+        held.push({ hostname: n.hostname, ...h });
+        const said = `${prod.key}|${os}|${V}|${n.hostname}|${h.job}`;
+        if (!_holdsSaid.has(said)) {
+          _holdsSaid.add(said);
+          logEvent('deploy', `Auto-deploy leaves ${n.hostname} alone for ${prod.name} ${V} (${os}) until ${new Date(h.until).toLocaleString()}: ${h.reason}`);
+        }
+        return false;
+      });
+      if (!eligible.length && !held.length) { _autoDeployState.delete(statusKey); continue; }
       seen.add(statusKey);
       // canary state for this product@version
       const vjobs = db.prepare(
@@ -719,24 +739,21 @@ function runAutoDeploy() {
       const proven = nodes.some((n) => n.iv && cmpVersionServer(n.iv, V) >= 0) || vjobs.some((j) => j.status === 'success');
       const inflight = vjobs.some((j) => ['pending', 'downloading', 'installing'].includes(j.status));
       // Two ways a canary can come back "failed" without the install itself being at fault: the
-      // agent lost contact mid-run (the reaper marks it failed after 45 quiet minutes — often just
-      // its own scheduled restart) or it refused a file whose vendor checksum hadn't verified yet
-      // (installerAllowed, below). Neither says the install is broken, so each gets retried
-      // automatically — capped, so a canary that keeps genuinely failing still stops for a look
-      // instead of retrying forever. This is what stopped FFmpeg 9.0.2 on Windows for a day
-      // (Sep 20): the canary was refused before the checksum finished, and that refusal alone
-      // halted the rollout with no retry.
-      const reaperTimeout = (j) => j.status === 'failed' && /likely agent restart/.test(j.log || '');
-      const preflightRefusal = (j) => j.status === 'failed' && /^Refused:/m.test(j.log || '');
-      const retryable = (j) => reaperTimeout(j) || preflightRefusal(j);
-      const retryableFails = vjobs.filter((j) => retryable(j)).length;
-      const realFail = vjobs.some((j) => j.status === 'cancelled' || (j.status === 'failed' && !retryable(j)));
+      // agent lost contact mid-run (the reaper gives up on it, or the agent dropped it) or it refused
+      // a file whose vendor checksum hadn't verified yet (installerAllowed, below). Neither says the
+      // install is broken, so each gets retried automatically — capped, so a canary that keeps
+      // genuinely failing still stops for a look instead of retrying forever. This is what stopped
+      // FFmpeg 9.0.2 on Windows for a day (Sep 20): the canary was refused before the checksum
+      // finished, and that refusal alone halted the rollout with no retry.
+      const retryableFails = vjobs.filter((j) => jobRules.classifyFailure(j) === 'soft').length;
+      const realFail = vjobs.some((j) => ['real', 'stopped'].includes(jobRules.classifyFailure(j)));
       const halted = !proven && !inflight && (realFail || retryableFails >= RETRY_CAP);
       let target, state;
-      if (proven) { target = eligible; state = 'fanning_out'; }              // validated → fan out
-      else if (inflight) { state = 'canary_running'; }                       // canary running → wait
-      else if (halted) { state = 'halted'; }                                 // needs a manual look
-      else { target = [eligible[0]]; state = 'canary_pending'; }             // first run, or worth another try
+      if (proven && eligible.length) { target = eligible; state = 'fanning_out'; }   // validated → fan out
+      else if (inflight) { state = 'canary_running'; }                            // canary running → wait
+      else if (halted) { state = 'halted'; }                                      // needs a manual look
+      else if (eligible.length) { target = [eligible[0]]; state = 'canary_pending'; }   // first run, or worth another try
+      else { state = 'held'; }                                                    // only held machines left
 
       // Track how long this product×OS has sat in its current state, and alert Slack once per
       // state (not once per 3-minute tick) — resets the moment the state changes, e.g. a halt
@@ -745,8 +762,9 @@ function runAutoDeploy() {
         const prev = _autoDeployState.get(statusKey);
         const carried = prev && prev.state === finalState;
         const rec = { key: prod.key, name: prod.name, os, version: V, state: finalState,
-          since: carried ? prev.since : now, escalated: carried ? !!prev.escalated : false,
-          eligible: eligible.length, sample: eligible.slice(0, 5).map((n) => n.hostname) };
+          since: carried ? prev.since : (finalState === 'held' && held.length ? Math.min(...held.map((h) => h.since)) : now),
+          escalated: carried ? !!prev.escalated : false,
+          eligible: eligible.length, sample: eligible.slice(0, 5).map((n) => n.hostname), held };
         _autoDeployState.set(statusKey, rec);
         return rec;
       };
@@ -759,7 +777,7 @@ function runAutoDeploy() {
         }
         continue;
       }
-      if (state === 'canary_running') { record('canary_running'); continue; }
+      if (state === 'canary_running' || state === 'held') { record(state); continue; }
 
       // find or create the package for this product@version+os (reuse a prior install command)
       let pkg = db.prepare('SELECT * FROM packages WHERE product_key=? AND version=? AND os=? ORDER BY id DESC LIMIT 1').get(prod.key, V, os);
@@ -814,7 +832,8 @@ function runAutoDeploy() {
       }
       if (queued.length) {
         logEvent('deploy', `Auto-deploy ${state === 'fanning_out' ? 'fan-out' : retryableFails ? 're-run' : 'canary'}: ${prod.name} ${V} (${os}) → ${queued.join(', ')}`);
-        _autoDeployState.delete(statusKey);   // just queued — nothing stuck to report right now
+        // Just queued: nothing stuck to report right now, except machines it left alone.
+        if (held.length) record(state); else _autoDeployState.delete(statusKey);
       } else {
         record(state);
       }
@@ -826,52 +845,79 @@ setTimeout(runAutoDeploy, 30 * 1000);
 setInterval(runAutoDeploy, 3 * 60 * 1000);
 
 // The Updates tab only needs to hear about the states a human might have to act on — a running
-// or about-to-run canary is normal and already visible on the app row itself.
+// or about-to-run canary is normal and already visible on the app row itself. Machines auto-deploy is
+// leaving alone are listed too: on their own (state 'held', with `reason`) when that is all there is
+// to say, else as `held` on the halted / checksum entry. held = [{hostname, reason, since, until, job}].
 function autoDeployIssues() {
-  return [..._autoDeployState.values()].filter((r) => r.state === 'halted' || r.state === 'waiting_checksum');
+  const out = [];
+  for (const r of _autoDeployState.values()) {
+    const held = r.held || [];
+    if (r.state === 'halted' || r.state === 'waiting_checksum') out.push({ ...r, held });
+    else if (held.length) {
+      out.push({ ...r, state: 'held', since: Math.min(...held.map((h) => h.since)), held,
+        reason: held.length === 1 ? `Skipped on ${held[0].hostname}: ${held[0].reason}`
+          : `Skipped on ${held.length} machines: ${held.map((h) => h.hostname).join(', ')}` });
+    }
+  }
+  return out;
 }
 
-// Reaper: a job whose agent died mid-run (e.g. agent restarted) would otherwise
-// sit "installing" forever. Mark any non-terminal job that hasn't been updated in
-// jobStaleMinutes as failed, so the dashboard never shows phantom activity.
-const JOB_STALE_MS = (config.jobStaleMinutes || 45) * 60 * 1000;
+// Reaper: a job whose agent died mid-run (e.g. agent restarted) would otherwise sit "installing"
+// forever. A job in flight with no word for longer than the agent itself allows an install (60 min,
+// plus a margin: lib/job_rules.js) is given up on, unless its agent named it as running a moment ago
+// (every check-in does, while it runs). One queued for a day and never started expires.
+// config.jobStaleMinutes can make the in-flight limit longer, never shorter.
+const JOB_STALE_MS = jobRules.reapLimitMs(config.jobStaleMinutes);
+if (config.jobStaleMinutes && config.jobStaleMinutes * 60 * 1000 < JOB_STALE_MS) {
+  console.log(`config.jobStaleMinutes (${config.jobStaleMinutes}) is shorter than the agent's own install limit; using ${JOB_STALE_MS / 60000} min`);
+}
 function reapStaleJobs() {
   const now = Date.now();
-  // Only IN-FLIGHT jobs go stale on the short clock (an agent died mid-job).
-  // Waiting in the queue is healthy — big rollouts queue for hours — so
-  // 'pending' is only reaped after a day (machine gone / never coming back).
-  // Pull the job's target product/version and the node's currently-detected
-  // version, so we can tell a genuinely-dead job from one that actually finished
-  // installing right before its agent restarted (and so never reported "done").
-  const stale = db.prepare(
-    `SELECT j.id, p.product_key, p.version AS target_version, j.node_id,
-            s.version AS installed_version
+  // Pull the job's target product/version and the node's currently-detected version, so we can tell a
+  // genuinely-dead job from one that actually finished installing right before its agent restarted
+  // (and so never reported "done").
+  const rows = db.prepare(
+    `SELECT j.id, j.status, j.updated_at, j.agent_seen_at, p.product_key, p.version AS target_version, j.node_id,
+            n.hostname, s.version AS installed_version
        FROM jobs j
        JOIN packages p ON p.id = j.package_id
+       LEFT JOIN nodes n ON n.id = j.node_id
        LEFT JOIN software s ON s.node_id = j.node_id AND s.product_key = p.product_key
-      WHERE (j.status IN ('downloading','installing') AND j.updated_at < ?)
-         OR (j.status = 'pending' AND j.updated_at < ?)`
-  ).all(now - JOB_STALE_MS, now - 24 * 3600 * 1000);
-  let verified = 0, failed = 0;
+      WHERE j.status IN ('pending','downloading','installing')`
+  ).all();
+  let verified = 0, failed = 0, expired = 0;
   const waiting = rollouts.waitingJobIds();   // queued for a rollout that hasn't started yet — not stuck
-  for (const j of stale) {
+  const host = (j) => j.hostname || 'the machine';
+  for (const j of rows) {
     if (waiting.has(j.id)) continue;
-    // If the machine already reports the target version (or newer), the install
-    // succeeded — the agent just restarted before it could acknowledge. Mark success.
-    const done = j.installed_version &&
-      cmpVersionServer(j.installed_version, j.target_version) >= 0;
-    if (done) {
+    const what = jobRules.reapDecision(j, now, { staleMs: JOB_STALE_MS });
+    if (!what) continue;
+    // The machine already reports the target version (or newer).
+    const done = j.installed_version && j.target_version !== 'uninstall'
+      && cmpVersionServer(j.installed_version, j.target_version) >= 0;
+    if (what === 'stale' && done) {
+      // The install succeeded — the agent just restarted before it could acknowledge.
       db.prepare("UPDATE jobs SET status='success', log=COALESCE(log,'')||?, updated_at=? WHERE id=?")
-        .run(`\n[verified: ${j.product_key} ${j.installed_version} is installed — install completed before the agent restarted]`, Date.now(), j.id);
+        .run(`\n[verified: ${j.product_key} ${j.installed_version} is installed — install completed before the agent restarted]`, now, j.id);
       verified++;
+    } else if (what === 'stale') {
+      db.prepare("UPDATE jobs SET status='failed', log=COALESCE(log,'')||?, updated_at=? WHERE id=?")
+        .run(`\n[timed out: no word from ${host(j)}'s agent for ${Math.round((now - j.updated_at) / 60000)} min, and it no longer names this job as running — likely agent restart]`, now, j.id);
+      failed++;
+    } else if (done) {
+      // Queued a day and never started, and the machine has the version anyway: nothing to do.
+      db.prepare("UPDATE jobs SET status='cancelled', log=COALESCE(log,'')||?, updated_at=? WHERE id=?")
+        .run(`\n[not needed: ${host(j)} already reports ${j.product_key} ${j.installed_version}; this job never started there]`, now, j.id);
+      expired++;
     } else {
       db.prepare("UPDATE jobs SET status='failed', log=COALESCE(log,'')||?, updated_at=? WHERE id=?")
-        .run('\n[timed out: no agent progress — likely agent restart]', Date.now(), j.id);
-      failed++;
+        .run(`\n[expired: queued ${Math.round((now - j.updated_at) / 3600000)} h and never started on ${host(j)}]`, now, j.id);
+      expired++;
     }
   }
   if (verified) logEvent('job', `Reaper verified ${verified} stalled job(s) as already installed`);
   if (failed) logEvent('job', `Reaped ${failed} stalled job(s) with no agent progress`);
+  if (expired) logEvent('job', `${expired} queued job(s) expired: they waited a day and never started`);
 }
 setInterval(reapStaleJobs, 5 * 60 * 1000);
 reapStaleJobs();
@@ -1873,37 +1919,34 @@ function rehomeFor(hostname) {
 }
 
 // A job is only "failed" if the software didn't actually land. Installers sometimes exit
-// non-zero after a good install (the NVIDIA driver returns 1 on a benign warning), and
-// agents older than 2.28.1 trusted the exit code alone. So on every check-in, compare
-// this node's REPORTED inventory against its recently failed jobs: if the node now runs
-// the job's version (or newer), the install worked — correct the job to success.
-const RECONCILE_WINDOW_MS = 24 * 3600 * 1000;
+// non-zero after a good install (the NVIDIA driver returns 1 on a benign warning), Creative
+// Cloud can finish in the background after the job ended, and agents older than 2.28.1 trusted
+// the exit code alone. So on every check-in, compare this node's REPORTED inventory against its
+// newest job for each app: if that job failed and the node now runs the job's version (or newer),
+// the install worked — correct the job to success. Only the NEWEST job for an app counts, and only
+// one that really ran on the machine (lib/job_rules.js creditable): the old rule rebuilt its
+// "already credited" set on every check-in, so each check-in (once a minute) credited the next
+// older failed try too — 135 false successes for NVIDIA 617.42 on AVA-01, 2026-10-07.
 function reconcileFailedJobs(node, software, now) {
   const installed = new Map();
   for (const s of software) if (s && s.product && s.version) installed.set(String(s.product), String(s.version));
   if (!installed.size) return;
-  // Newest first, and only ONE job per app gets the credit — the latest attempt, the one that can
-  // have done it. Crediting every failed attempt turned an earlier try that installed nothing
-  // (Node-03's Creative Cloud bootstrapper, Sep 18) into a false "success".
-  const failed = db.prepare(
-    `SELECT j.id, j.log, p.product_key, p.version FROM jobs j JOIN packages p ON p.id = j.package_id
-      WHERE j.node_id = ? AND j.status = 'failed' AND j.updated_at > ? ORDER BY j.id DESC`
-  ).all(node.id, now - RECONCILE_WINDOW_MS);
-  const credited = new Set();
-  for (const j of failed) {
-    if (credited.has(j.product_key)) continue;
-    const have = installed.get(j.product_key);
-    if (!have || !j.version || j.version === 'uninstall') continue;
-    if (cmpVersionServer(have, j.version) < 0) continue;
+  const newest = db.prepare(
+    `SELECT j.id, j.status, j.log, j.started_at, j.updated_at, p.product_key, p.version
+       FROM jobs j JOIN packages p ON p.id = j.package_id
+      WHERE j.id IN (SELECT MAX(j2.id) FROM jobs j2 JOIN packages p2 ON p2.id = j2.package_id
+                      WHERE j2.node_id = ? GROUP BY p2.product_key)`
+  ).all(node.id);
+  for (const { job: j, have } of jobRules.creditable(newest, installed, now)) {
     // Say only what's known: the machine now reports the target version. Why the job was marked
     // failed differs (a non-zero exit code, or — like Creative Cloud — the version changing after
     // the job had already ended), and the original report below keeps that detail.
     const note = `Verified on check-in: ${node.hostname} now reports ${j.product_key} ${have} `
       + `(target ${j.version}), so the install did take effect — later than the job's own check. `
       + `The original report is below.\n--- original report ---\n`;
-    db.prepare("UPDATE jobs SET status = 'success', log = ? WHERE id = ? AND status = 'failed'")
-      .run((note + (j.log || '')).slice(0, 20000), j.id);
-    credited.add(j.product_key);
+    const ch = db.prepare("UPDATE jobs SET status = 'success', log = ? WHERE id = ? AND status = 'failed'")
+      .run((note + (j.log || '')).slice(0, 20000), j.id).changes;
+    if (!ch) continue;
     clearRolloutHaltFlag(j.product_key, j.version);
     logEvent('job', `Job #${j.id} corrected to success: ${j.product_key} ${j.version} is installed on ${node.hostname} (${have})`);
   }
@@ -1915,7 +1958,9 @@ function reconcileFailedJobs(node, software, now) {
 //  • jobs the machine is running that the tracker no longer considers active — cleared,
 //    deleted, or already cancelled while the installer kept going.
 // And a job the tracker shows as running that the machine is NOT running (agent restarted
-// or crashed mid-install) is marked failed instead of spinning forever.
+// or crashed mid-install) is marked failed instead of spinning forever. Every job the machine
+// names is stamped (agent_seen_at): the reaper never gives up on a job named a moment ago, and
+// no second install of that app is queued for the machine meanwhile.
 const LOST_JOB_GRACE_MS = 2 * 60 * 1000;
 function reconcileRunning(node, body, now) {
   const stop = new Set(db.prepare(
@@ -1924,6 +1969,7 @@ function reconcileRunning(node, body, now) {
   if (!Array.isArray(body.running)) return [...stop];
   const running = body.running.map(Number).filter(Number.isFinite);
   for (const id of running) {
+    db.prepare('UPDATE jobs SET agent_seen_at = ? WHERE id = ? AND node_id = ?').run(now, id, node.id);
     const j = db.prepare('SELECT status FROM jobs WHERE id = ?').get(id);
     // Only stop what the tracker has actually let go of. A job the machine itself already
     // reported as success/failed is just wrapping up (e.g. restarting Creative Cloud).
