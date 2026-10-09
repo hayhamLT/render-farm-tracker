@@ -67,8 +67,8 @@ node server.js
 ```
 
 - Dashboard: **http://localhost:4400** (LAN: `http://<this-machine>:4400`).
-- First start writes `config.json` with a generated **agent key** (printed to
-  the console; also at `GET /api/agent-setup`).
+- First start writes `config.json` with a generated **agent key** (never printed;
+  `config.json` is readable by this account only).
 - State lives in `tracker.db`. Delete it to start fresh.
 
 Keep it running with a LaunchAgent/systemd unit, or
@@ -76,26 +76,11 @@ Keep it running with a LaunchAgent/systemd unit, or
 
 ## 2. Enrol the render nodes
 
-The **Help** tab shows copy-paste one-liners (they fetch a generated installer
-that embeds the server URL + agent key):
-
-- **macOS** — `curl -fsSL http://TRACKER-HOST:4400/enroll.sh | bash`, then once
-  with admin rights: `curl -fsSL http://TRACKER-HOST:4400/setup.sh | sudo bash`
-- **Windows** (PowerShell) — `irm http://TRACKER-HOST:4400/enroll.ps1 | iex`,
-  then once elevated: `irm http://TRACKER-HOST:4400/elevate.ps1 | iex`
-
-The elevation step installs the agent as a SYSTEM scheduled task (Windows) /
-root LaunchDaemon (macOS) so it can run installers headlessly. Nodes appear on
-the Dashboard within seconds with detected versions.
-
-> ⚠️ The enrol/setup scripts **embed the agent key in plaintext** — serve them
-> only on a trusted LAN, never expose them publicly. (See HANDOFF §8.)
-
-Quick manual test on a node:
-
-```sh
-python3 render_agent.py --server http://TRACKER-HOST:4400 --key <AGENT_KEY> --once
-```
+On the farm, **Farmly installs the agent**: Fleet ▸ Add machine. Its installer sets the agent up as a
+SYSTEM scheduled task (Windows) / root LaunchDaemon (macOS) with the machine's **own key**, and the agent
+reports through Farmly's relay (`/beacon`). The tracker's agent API answers only that relay; the old
+one-liners (`/setup.sh`, `/enroll.ps1`, `/elevate.ps1`…) only say so, unless `config.directAgents` is
+set (the old direct path with the shared key; see HANDOFF §0).
 
 ## 3. Track latest versions
 
@@ -117,9 +102,9 @@ flags per product are in HANDOFF and the in-app Catalog presets.
 
 ## Notes & limits
 
-- **Security**: agent endpoints require the agent key; **the dashboard/admin API
-  has no login** — run it on a trusted LAN or behind a VPN/reverse-proxy auth.
-  Anyone who can reach the dashboard can deploy. (Full list: HANDOFF §8.)
+- **Security**: the agent API answers only Farmly's relay; **the dashboard/admin API
+  has no login** and answers only this computer (people use it inside Farmly, behind
+  its sign-in). (History and the full list: HANDOFF §0 and §8.)
 - Adobe After Effects updates via **RUM** (patch-only within the installed
   major); the Creative Cloud desktop app self-updates and is not managed here.
 - A node shows **offline** after ~3 missed check-ins (`offlineAfterSeconds`,
@@ -132,11 +117,12 @@ server.js                       HTTP server + all API routes (zero-dep Node)
 lib/db.js                       SQLite schema + migrations (tracker.db)
 lib/extra_versions.js           NVIDIA driver latest-version detection
 lib/maxon_versions.js           Maxon release-notes feed parsing
+lib/job_rules.js                reaper / auto-deploy / check-in correction decisions (pure, tested)
 public/                         dashboard UI (vanilla JS — app.js / index.html / style.css)
 agents/render_agent.py          cross-platform "Beacon" node agent (self-updating)
 agents/com.tracker.agent.plist  macOS LaunchDaemon template
 agents/install-windows-task.ps1 Windows scheduled-task installer
-deploy/                         fleet enrol/elevate helper scripts
+test/                           node --test test/*.test.js; python3 -m unittest test/test_agent_plist.py
 installers/                     drop installer files here (gitignored)
 config.json                     port + agent key (created on first run; gitignored)
 config.example.json             reference shape for config.json

@@ -14,19 +14,22 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
 - **The dashboard/admin API answers only the server itself.** A guard in the router
   (`fromThisComputer(req)`: 127.0.0.1, ::1, or any of this computer's own interface addresses) turns
   away everything that is not the **agent surface** — `/agent`, `/setup.sh|ps1`, `/enroll.sh|ps1`,
-  `/elevate.ps1`, `/stage.bat`, `/mac_elevate.sh`, `/api/agent/*` (`AGENT_SURFACE`). A LAN browser is
+  `/elevate.ps1`, `/api/agent/*` (`AGENT_SURFACE`). A LAN browser is
   302'd to `config.publicUrl` (Farmly's Apps page, `https://renderfarmly.com/apps`); any other LAN
   request gets 403. People use the tracker inside Farmly (Apps, before Help), which relays
   `/tracker/*` to `127.0.0.1:4400` behind Farmly's sign-in, power mode and audit log. Agents are
   now report through Farmly instead (next point but one).
-  `/api/agent-setup` is NOT agent surface (it hands out the key; only the dashboard uses it).
+  `/api/agent-setup` (it handed out the shared key), `/api/enroll-files` (it wrote one-click installers
+  to the share), `/stage.bat` and `public/mac_elevate.sh` were removed on 2026-10-09 (section 0b).
   Scripts on the server that call `http://<LAN IP>:4400` still reach the admin API: they arrive from one
   of this computer's own addresses. (`tracker_ops/auto_enroll.sh`, which enrolled new machines
   with the shared key, was retired on 2026-09-28: Farmly's installer adds machines now.)
 - **Farmly decides WHEN a machine installs** (`lib/farm_gate.js`). Farmly posts
   `POST /api/farm-gate {hosts: {HOSTNAME: {ok, why}}}` every ~10 s; the check-in hands out an install
   only when the machine's entry is `ok` (or missing, or the gate is older than `STALE_MS`, 2 min, so a
-  stopped Farmly never freezes updates). `GET /api/farm-gate` returns the gate plus `waiting` (machines
+  stopped Farmly never freezes updates). From a tracker start until Farmly's first post (or `STALE_MS`
+  if none comes) every machine is held (`starting: true` in the GET): the empty gate used to let every
+  install through for the 10-20 s before Farmly's first post. `GET /api/farm-gate` returns the gate plus `waiting` (machines
   with an install ready to hand out, computed by `readyJob()`, the same function the check-in uses:
   rollout window, idle-GPU rule, circuit breaker, canary slot, known checksum) and `installing` (jobs
   in flight). Farmly holds a waiting machine off its own dispatch, lets its render finish, then marks
@@ -53,9 +56,64 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
 Not changed yet (Farmly's plan, phases 3–4): one agent (Farmly's runner) plus a small privileged
 helper instead of the Beacon, then this server's logic ported into Farmly and Node retired.
 
+## 0b. Review fixes, 2026-10-09
+
+- **Auto-deploy leaves a failing machine alone** (`runAutoDeploy`, `lib/job_rules.js` `machineHold`). On
+  2026-10-06/07 a version proven elsewhere made AVA-01 eligible again on every 3-minute tick after its
+  NVIDIA 617.42 install failed: 134 jobs (#588-#721), each "No space left on device", each a Slack alert. A
+  machine with a real failure (or `RETRY_CAP` = 3 lost-contact/refused-before-running tries, or a stop) of
+  that product@version in the last 24 h is skipped, said once in the activity log, and listed in
+  `autoDeployIssues`: state `held` with `reason` and `held: [{hostname, reason, since, until, job}]` (or as
+  `held` on a `halted` / `waiting_checksum` entry). A Retry in History, or the day passing, gives it back.
+  **UIs must render `state: 'held'`**: the tracker's own `ui/` does; Farmly's Apps pages treated every
+  non-`halted` issue as the vendor-checksum wait.
+- **The reaper waits past the agent's own limit**: an install in flight is given up on after 75 min
+  without word (the agent allows 60; `config.jobStaleMinutes` can only lengthen it), and never while its
+  agent named it as running in the last 5 min. Every check-in names the running job (`body.running`), and
+  the tracker stamps it in `jobs.agent_seen_at`. A failed job its agent still names also counts as active
+  for the app (`activeJobForProduct`), so nothing is queued behind it. A job queued 24 h and never started
+  expires (`failed`, "[expired: …]", or `cancelled` "[not needed: …]" when the machine has the version).
+- **The check-in correction credits only the newest job for an app** (`reconcileFailedJobs`,
+  `creditable`): it must have run on the machine (started, its own report not a download failure or
+  refusal), ended within 24 h, and the machine must now report the target version; once credited it is a
+  success, so nothing is credited twice. The old rule credited one more failed try every minute: 136
+  false "Verified on check-in" successes for NVIDIA 617.42 (135 on AVA-01, #725 on Node-04, which never
+  ran). A one-time migration (`lib/db.js` `noteMiscredited`) puts "[Not this attempt (noted …)]" at the
+  top of such jobs' logs (142 on the live data: those 136 and 6 from September). Their status is left as
+  it was, because Farmly's `tracker.import_history` announces every status change of the newest 200 jobs
+  as a new install result; to set them to failed later, once Farmly no longer re-announces:
+  `UPDATE jobs SET status='failed' WHERE status='success' AND log LIKE '[Not this attempt%'`.
+- **Hidden machines are refused everywhere** (`lib/hidden.js`, 403 with the reason): restart, shut-down,
+  wake, uninstall, quick-update, deployments (listed in `refused`), job retry, auto-deploy retry; the
+  check-in never hands a hidden host a job, a restart or a shut-down (even one queued before it was hidden).
+  `POST /api/nodes/33/reboot` would have restarted Farmly-Server.
+- **Deadline's data is gone** (`lib/db.js` `clearDeadline`, idempotent, runs at start): `nodes.deadline_info`,
+  `nodes.deadline_fix`, `metric_farm.deadline_down` dropped (emptied instead if SQLite refused), the
+  timeline's `deadline` and `fix` rows deleted (`fix` was only ever the Deadline startup fix's result).
+- **Remote runs that never answer** are marked by the sweep, once a minute (`lib/run_expiry.js`): `expired` (never
+  picked up within the command's 30 min) or `lost` (picked up, no result within its timeout + 10 min);
+  `done_at` is set, `exit_code` stays null, the output says what happened; a late result still lands as
+  `done`. `remote_runs` gained `timeout_s` and `delivered_at`. **UIs: `pending` is the only unfinished
+  status now** (the tracker's own `ui/` Run view knows; Farmly's Run page waited for `done`).
+- **Offline alerts** skip hidden machines, and the first look after a start only takes a baseline
+  (`lib/offline_alerts.js`), so a restart no longer re-announces Node-00, MARS-JUICY and RAZER-01.
+- **Every line in `logs/tracker.log` starts with the local ISO time** (`lib/logtime.js`), and a port already
+  in use ends in one line and exit 1 instead of a stack trace (3,134 of them in the September log).
+- **Agent 2.49.0** (`_rewrite_plist`, `_private_plist`): the LaunchDaemon plist that holds the machine's
+  Farmly key stays 0600 (agents before it rewrote it 0644 on every move to Farmly and every launch-config
+  sync), and the sync after a good check-in tightens one left readable. Windows unchanged: its task is
+  readable by signed-in users on purpose (they may start it to revive the agent). **2.49.0 is NOT live:
+  ship it through the canary protocol above (`config.agentCanary`).** The self-update code is unchanged.
+- Tests: `node --test test/*.test.js` (pure decisions + the migrations on a database of their own, via
+  `TRACKER_DB`), `python3 -m unittest test/test_agent_plist.py` (Apple's 3.9 and the newest).
+  `test/e2e.sh` is stale and refuses to run without `TRACKER_URL` or against :4400.
+
 ---
 
 ## 1. Overview
+
+> Sections 1-10 describe the tracker as it was first written and handed over (September 2026: the
+> 10.10.10.96 address, the shared key, the merge plan). Where they disagree with sections 0 and 0b, those are right.
 
 The Render Farm Tracker keeps software up to date across **~28 render nodes**. It has three parts, all with **zero npm dependencies**:
 
@@ -138,11 +196,12 @@ Data flow: **agents push** inventory and **pull** jobs/installers from the serve
 | `agents/install-windows-task.ps1` | Windows scheduled-task installer for the agent (`README.md:129`). |
 | `public/index.html` | SPA shell (5 tabs). Relative asset links (`style.css`, `app.js`); **no `<base>` tag**; a cosmetic hardcoded share path `\\THIS-server\INSTALLERS` in the Setup tab. |
 | `public/app.js` | All UI logic (~1200 lines). `api()` helper uses **root-relative** fetch paths; `esc()` HTML-escaper; polling loops; enrol-command UI; the themed `toast()`/`uiConfirm()` dialogs. |
-| `public/style.css`, `public/icons/`, `public/mac_elevate.sh` | Styles, real product icons, and the mac elevation helper. `mac_elevate.sh:11` hardcodes `http://10.10.10.96:4400`. |
+| `public/style.css`, `public/icons/` | Styles and real product icons. (`public/mac_elevate.sh`, the old Mac elevation helper, was removed on 2026-10-09.) |
 | `config.json` | `port` (4400), `agentKey` (`27b99007...` — **secret, in plaintext**), `installerSources` (`/Volumes/THIS-server/INSTALLERS`), `maxConcurrentInstalls`, `monitoringActive`, `offlineAfterSeconds`. Read AND written at runtime (`/api/settings`, `/api/monitoring`). |
 | `tracker.db` (+ `.db-wal`, `.db-shm`) | The only datastore. WAL is uncheckpointed; **copy all three files together** or checkpoint first. Currently holds demo/test data; **no backups exist**. |
 | `installers/` | Staged installer binaries (~51 GB). Served over LAN via `GET /api/agent/download/:id`. |
-| Enrolment scripts | Generated **inline by `server.js`** as GET routes (`/setup.sh`, `/setup.ps1`, `/enroll.ps1`, `/elevate.ps1`, `/stage.bat`), plus the `agents/*` templates, `public/mac_elevate.sh`, and `deploy/` (elevation notes, the GPO task, `enroll_mac.sh`). |
+| Enrolment scripts | Generated **inline by `server.js`** as GET routes (`/setup.sh`, `/setup.ps1`, `/enroll.sh`, `/enroll.ps1`, `/elevate.ps1`), plus the `agents/*` templates. They only say "Farmly installs the agent now" unless `config.directAgents`. `/stage.bat`, `public/mac_elevate.sh` and `deploy/` (elevation notes, the GPO task, `enroll_mac.sh`: all pointing at 10.10.10.96 or the shared key) were removed on 2026-10-09. |
+| `lib/job_rules.js`, `lib/farm_gate.js`, `lib/hidden.js`, `lib/offline_alerts.js`, `lib/run_expiry.js`, `lib/logtime.js` | Decisions kept pure (no database), tested by `test/*.test.js` (section 0b). |
 | `/Users/trm/Library/LaunchAgents/com.tracker.server.plist` | The **live server LaunchAgent** (NOT in the repo). Per-user agent, so it runs only while user `trm` is logged in. |
 
 ---
@@ -159,7 +218,7 @@ Six application tables (`lib/db.js:12-64`):
 | `software` | Per-node detected installs. Composite PK `(node_id, product_key)`; `version`, `install_path`, `detected_at`. | `product_key` is free text, NOT FK-constrained. Fully replaced on each full check-in. |
 | `products` | Trackable-app catalog. `key` PK; `name`; `latest_version` (auto-bumped from agent reports); `notes`; `source_url_win`/`source_url_mac`. | Seeded with 6: `cinema4d`, `redshift`, `redgiant`, `aftereffects`, `maxonapp`, `creativecloud` (`lib/db.js:71-77`). |
 | `packages` | Deployable versions. `id` PK; `product_key`; `version`; `os`; `filename`; `install_command` (template, `{file}` = downloaded path); `kind` (`installer` or `command`). | `installer` = download + run a staged file; `command` = run a tool already on the node (RUM/mx1/winget). Binaries on disk, **not in the DB**. |
-| `jobs` | Deploy attempts. `id` PK; `package_id`; `node_id`; `status` (`pending`→`downloading`→`installing`→`success`/`failed`/`cancelled`); `log` (capped 20000 chars); `created_at`/`updated_at`. | A reaper (every 5 min) fails in-flight jobs idle >45 min and pending >24h; flips to success if the node already reports the target version. `dl_pct`/`inst_pct` are computed in-memory, never persisted. |
+| `jobs` | Deploy attempts. `id` PK; `package_id`; `node_id`; `status` (`pending`→`downloading`→`installing`→`success`/`failed`/`cancelled`); `log` (capped 20000 chars); `created_at`/`updated_at`. | A reaper (every 5 min) fails in-flight jobs with no word for >75 min (past the agent's own 60 min install limit) unless their agent named them as running in the last 5 min (`agent_seen_at`), and expires jobs pending >24h; flips an in-flight one to success if the node already reports the target version (section 0b). `dl_pct`/`inst_pct` are computed in-memory, never persisted. |
 | `events` | Bounded activity log. `id`, `ts`, `kind`, `message`. | Self-trims to newest 500 rows on every write. Kinds: `job`, `deploy`, `package`, `node`, `catalog`, `monitoring`. |
 
 ### `/api/state` shape (the single endpoint the UI polls)
@@ -209,8 +268,8 @@ Router parses the URL, then matches method + pathname. **Auth = `X-Agent-Key` he
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/agent` | ❌ **NONE** | Serves `agents/render_agent.py` as text. Used for enrolment + self-update. Anyone can fetch agent source. |
-| GET | `/setup.sh` `/setup.ps1` `/enroll.sh` `/enroll.ps1` `/elevate.ps1` `/stage.bat` | ❌ **NONE — EMBEDS `config.agentKey` IN PLAINTEXT** | Generated install scripts. Base URL built from `req.headers.host` but **hardcodes `http://`**. MUST NOT be exposed publicly. |
-| GET | `/api/agent-setup` | ❌ **NONE — RETURNS `{agentKey, port, lanUrl}`** | Hands the plaintext agent key to any caller. Critical to lock down. |
+| GET | `/setup.sh` `/setup.ps1` `/enroll.sh` `/enroll.ps1` `/elevate.ps1` | none | Answer "Farmly installs the agent now" and exit 1. Only with `config.directAgents` the old generated install scripts (they embed `config.agentKey`; MUST NOT be exposed publicly). `/stage.bat` was removed on 2026-10-09 (its upload is refused anyway). |
+| GET | `/api/agent-setup` | — | **Removed 2026-10-09** (it returned `{agentKey, port, lanUrl}`; only the old dashboards used it). So was `/api/enroll-files`. |
 
 ### Static UI — unauthenticated (GET, expected)
 
@@ -258,8 +317,8 @@ Everything below must be reviewed/parameterized for the merge.
 | `config.json` + `installers/` location | server ROOT | Anchored to repo ROOT, currently inside Dropbox. Move out of Dropbox and VCS. |
 | `installerSources` | `config.json:6` | `/Volumes/THIS-server/INSTALLERS` — a macOS SMB mount that won't exist on Linux → installer 404s. Re-point for the target host. |
 | Enrol base URL scheme | enrol-script generator | Built from `req.headers.host` but **hardcodes `http://`**. Behind HTTPS, generated scripts point agents at `http://`. Make proxy-aware (honor `X-Forwarded-Proto`). |
-| `lanUrl` for copy-enrol buttons | `/api/agent-setup` → `app.js` | Returns `http://<first non-internal IPv4>:config.port`, ignores Host. By design for LAN agent traffic — do NOT "fix" to the public domain. |
-| Hardcoded `10.10.10.96:4400` | every *deployed* node's launchd plist / scheduled task (baked at enrol time — confirmed on AVA-01); `public/mac_elevate.sh:11`. NOTE: the `agents/com.tracker.agent.plist` repo file is a `TRACKER-HOST` template, not the live IP. | Agents are physically pinned here with no in-band re-point. See Section 7. |
+| `lanUrl` for copy-enrol buttons | (removed 2026-10-09 with `/api/agent-setup`) | Machines are added from Farmly. |
+| Hardcoded `10.10.10.96:4400` | (history: every agent now reports through Farmly's `/beacon`, and 10.10.10.96 is another machine, MACBOOK-N29) every *deployed* node's launchd plist / scheduled task (baked at enrol time — confirmed on AVA-01). NOTE: the `agents/com.tracker.agent.plist` repo file is a `TRACKER-HOST` template, not the live IP. | Agents are physically pinned here with no in-band re-point. See Section 7. |
 | `\\THIS-server\INSTALLERS` | `public/index.html` (Setup tab) | Cosmetic Windows share path. |
 | External tool paths | `render_agent.py` (mx1, RUM) | Node-local; unaffected by the server move but required on each node. |
 | Node version | `lib/db.js:2` | Requires `node:sqlite` → **Node >= 22.5** (prefer >= 24 to avoid the experimental warning). No `package.json`/engines today. |
@@ -355,6 +414,7 @@ Prioritized:
 
 2. **The shared agent key is disclosed by unauthenticated endpoints.** `GET /api/agent-setup` returns `{agentKey,...}`; the bootstrap scripts embed it verbatim and are served unauthenticated; and it is committed in `config.json:3`. The single security boundary is therefore effectively zero.
    **Fix:** Lock down / remove `/api/agent-setup`, `/agent`, and `/setup.* /enroll.* /elevate.ps1 /stage.bat` behind admin auth or an internal-only path. **Rotate the key** and re-push to all nodes (see 7.3). Keep `config.json` out of any public artifact.
+   *(Done: the scripts carry no key since 2026-09-28, the key was rotated, and `/api/agent-setup` and `/stage.bat` were removed on 2026-10-09.)*
 
 ### HIGH
 
@@ -414,7 +474,7 @@ Work top to bottom.
 - [ ] **Stand up the service:** systemd (Linux) / NSSM (Windows). Bind Node to **loopback** (`127.0.0.1:4400`).
 - [ ] **Reverse proxy + TLS:** terminate HTTPS, forward to `127.0.0.1:4400`; forward `Host`, set `X-Forwarded-Proto`/`X-Forwarded-For`; `proxy_buffering off`, large body size, long read timeout for upload/download routes.
 - [ ] **Add an AUTH layer** in front of the dashboard + all `/api/*` (SSO/basic-auth/IP allowlist/VPN). Verify the polling XHRs (`/api/state`, `/api/downloads`) are allowed through.
-- [ ] **Lock down key-leaking routes:** `/api/agent-setup`, `/agent`, `/setup.* /enroll.* /elevate.ps1 /stage.bat` behind admin auth or an internal-only path.
+- [x] **Lock down key-leaking routes:** `/api/agent-setup`, `/agent`, `/setup.* /enroll.* /elevate.ps1 /stage.bat` behind admin auth or an internal-only path. *(The scripts carry no key; `/api/agent-setup` and `/stage.bat` are removed.)*
 - [ ] **Auth-gate + SSRF-harden** `POST /api/download-url` (block private/link-local/metadata IPs).
 - [ ] **Fix the enrol base URL:** make the enrol generator (and `/api/agent-setup`) honor `X-Forwarded-Proto`/`X-Forwarded-Host`, or enroll agents with an explicit `https://…` `--server`.
 - [ ] **Choose the agent re-point strategy (Section 7.3):** A) keep `10.10.10.96:4400` answering (no node changes), B) re-enrol all ~28 nodes, or C) re-enrol to a stable DNS name. If rotating the key, re-push `--key` at the same time.

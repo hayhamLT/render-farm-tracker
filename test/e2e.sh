@@ -1,9 +1,13 @@
 #!/bin/bash
-# End-to-end smoke test for the tracker.
-# Usage: test/e2e.sh  (expects the server already running on :4400)
+# End-to-end smoke test for the tracker. STALE: it predates the relay-only agent API (it uses the
+# shared key, so it needs config.directAgents) and it runs the real agent on this computer (step 6).
+# It registers fake machines and rewrites catalog versions: NEVER run it against the live tracker
+# (:4400 on the farm server). The pure decisions are covered by `node --test test/*.test.js`.
+# Usage: TRACKER_URL=http://127.0.0.1:<scratch port> test/e2e.sh   (from an isolated scratch copy)
 set -e
 cd "$(dirname "$0")/.."
-BASE=http://localhost:4400
+BASE=${TRACKER_URL:?set TRACKER_URL to an isolated scratch tracker, never the live one}
+case "$BASE" in *:4400*) echo "refusing to run against :4400 (the live tracker's port)" >&2; exit 1 ;; esac
 KEY=$(node -e "console.log(require('./config.json').agentKey)")
 J() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
