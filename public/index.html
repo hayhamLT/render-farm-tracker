@@ -293,62 +293,11 @@
     <div class="panel setup-hero">
       <div class="hero-ic" data-ic="check"></div>
       <div>
-        <h2>New machines join once the agent runs</h2>
-        <p class="hint">A machine shows up within a few minutes of the tracker agent running on it. Install the
-          agent once — via the commands below, or pushed to many machines at once with Group Policy / a startup script.</p>
+        <h2>Machines are added from Farmly</h2>
+        <p class="hint">In Farmly: <b>Fleet ▸ Add machine</b>. Farmly's installer sets up this tracker's agent too, with the
+          machine's own key, so installs run silently from the start. The machine shows up here within a minute.</p>
       </div>
     </div>
-
-    <div class="guide-grid">
-      <div class="panel guide-card">
-        <h3><span data-ic="windows"></span> New Windows machine</h3>
-        <p class="hint">Once it's on the dashboard, do this <b>once, in person</b> to allow silent installs (Windows can't enable this remotely):</p>
-        <ol class="steps">
-          <li>Open <code>\\THIS-server\INSTALLERS</code></li>
-          <li>Right-click <b>Elevate-Tracker.cmd</b> → <b>Run as administrator</b></li>
-          <li>Click <b>Yes</b> — done</li>
-        </ol>
-        <p class="hint">The green <span class="badge icon elev-ok demo" data-ic="shieldOk"></span> shield appears within a minute. (Not on the dashboard yet? See <i>Enroll a machine yourself</i> below.)</p>
-      </div>
-
-      <div class="panel guide-card">
-        <h3><span data-ic="apple"></span> New Mac</h3>
-        <p class="hint">Run the macOS commands below once (Step 1, then Step 2); the green shield appears on its own.</p>
-      </div>
-    </div>
-
-    <details class="panel">
-      <summary>Enroll a machine yourself</summary>
-      <p class="hint">Run on the machine: <b>Step 1</b> adds it to the dashboard, <b>Step 2</b> enables silent installs.
-        For many machines at once, run Step 1 as a <b>Group Policy / login startup script</b> — same command.</p>
-      <div class="enrol-step"><span class="enrol-n">1</span> Monitor <span class="hint">(no admin)</span></div>
-      <table>
-        <tr>
-          <td><span data-ic="apple"></span> macOS · Terminal</td>
-          <td><code id="cmd-mac">…</code></td>
-          <td><button class="link-btn" onclick="copyCmd('cmd-mac')">copy</button></td>
-        </tr>
-        <tr>
-          <td><span data-ic="windows"></span> Windows · PowerShell</td>
-          <td><code id="cmd-win">…</code></td>
-          <td><button class="link-btn" onclick="copyCmd('cmd-win')">copy</button></td>
-        </tr>
-      </table>
-      <div class="enrol-step"><span class="enrol-n">2</span> Enable updates <span class="hint">(admin, one time)</span></div>
-      <table>
-        <tr>
-          <td><span data-ic="apple"></span> macOS · Terminal (<b>admin</b>)</td>
-          <td><code id="cmd-mac-elev">…</code></td>
-          <td><button class="link-btn" onclick="copyCmd('cmd-mac-elev')">copy</button></td>
-        </tr>
-        <tr>
-          <td><span data-ic="windows"></span> Windows · <b>elevated</b> PowerShell</td>
-          <td><code id="cmd-win-elev">…</code></td>
-          <td><button class="link-btn" onclick="copyCmd('cmd-win-elev')">copy</button></td>
-        </tr>
-      </table>
-      <p class="hint">Windows needs Python 3 (the script offers winget). The node appears within a minute.</p>
-    </details>
     </div><!-- /sub-start -->
 
     <!-- ───────────── HOW UPDATES WORK ───────────── -->
@@ -440,7 +389,7 @@
         <tr><td><span class="os-status on" data-ic="windows"></span></td><td>Online — the machine's OS icon (Windows/Apple) shows <b>green</b> when it has checked in recently</td></tr>
         <tr><td><span class="os-status off" data-ic="apple"></span></td><td>Offline — the OS icon turns <b>red</b> (machine off, or its agent stopped; it self-heals)</td></tr>
         <tr><td><span class="badge icon elev-ok demo" data-ic="shieldOk"></span></td><td>Ready — updates install silently, no prompts</td></tr>
-        <tr><td><span class="badge icon elev-no demo" data-ic="shieldOff"></span></td><td>Needs elevation — run <b>Elevate-Tracker.cmd</b> on it once (see above)</td></tr>
+        <tr><td><span class="badge icon elev-no demo" data-ic="shieldOff"></span></td><td>Needs elevation — run Farmly's installer on it again (<b>Fleet ▸ Add machine</b>)</td></tr>
         <tr><td><span class="badge icon uptodate demo" data-ic="check"></span></td><td>Up to date — newest known version is installed</td></tr>
         <tr><td><span class="badge icon patch demo" data-ic="up"></span></td><td><b>Update available</b> — a newer build of the same major; click to patch (safe, in-place)</td></tr>
         <tr><td><span class="badge icon major demo" data-ic="up"></span></td><td><b>New major available</b> — a newer major version; opt-in side-by-side install</td></tr>
@@ -472,7 +421,7 @@
       <details class="qa"><summary>A machine is online but updates never run on it</summary>
         <p class="hint">The agent is stuck. It usually fixes itself; to fix it now, click the <b>⏻ Restart</b> button on its card. (A restart interrupts any render on that machine.)</p></details>
       <details class="qa"><summary>A machine never appears on the dashboard</summary>
-        <p class="hint">It needs the tracker agent installed. Install it once — the commands above, or pushed via Group Policy / a startup script.</p></details>
+        <p class="hint">It needs the tracker agent, which Farmly installs: add the machine from Farmly (<b>Fleet ▸ Add machine</b>).</p></details>
       <details class="qa"><summary>An update ran but the version didn't change</summary>
         <p class="hint">The tracker double-checks every install, so it flags one that didn't actually change. Usually it's Redshift bundled inside Cinema 4D — update Cinema 4D instead.</p></details>
       <details class="qa"><summary>An install is stuck or taking too long</summary>

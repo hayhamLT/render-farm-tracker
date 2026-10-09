@@ -504,7 +504,7 @@ function renderDashboard() {
   const grid = document.getElementById('node-grid');
   if (!nodes.length) {
     grid.className = '';
-    grid.innerHTML = `<div class="empty">No nodes yet. Enrol a render node using the panel below.</div>`;
+    grid.innerHTML = `<div class="empty">No nodes yet. Add one from Farmly (Fleet ▸ Add machine).</div>`;
     document.getElementById('f-count').textContent = '';
     return;
   }
@@ -1271,7 +1271,7 @@ function updateWizard() {
   if (needElev.length) {
     warn.style.display = '';
     warn.innerHTML = `${icon('shieldOff')} <b>${needElev.length} machine(s) not ready</b> — installs there
-      will wait at a permission prompt until elevated (one click, see the Setup tab):
+      will wait at a permission prompt until Farmly's installer is run on them again (Fleet ▸ Add machine):
       ${needElev.map((n) => esc(n.hostname)).join(', ')}`;
   } else warn.style.display = 'none';
   // Pre-flight: a selected product whose newer version has no staged installer can't deploy.
@@ -1575,7 +1575,7 @@ function renderDeploy() {
           const node = state.nodes.find((n) => n.hostname === j.hostname);
           let warn = '', hint = '';
           if (node && !node.online) { warn = 'machine offline'; hint = 'Runs when the machine is back online.'; }
-          else if (node && node.elevated === 0) { warn = 'needs elevation'; hint = 'Run Elevate-Tracker.cmd on it once (see Setup tab).'; }
+          else if (node && node.elevated === 0) { warn = 'needs elevation'; hint = 'Run Farmly’s installer on it again (Fleet ▸ Add machine).'; }
           else if (/deferr|rendering/i.test(j.log || '')) { warn = 'rendering'; hint = 'Held so it never interrupts a render — runs when the machine is idle.'; }
           // Not blocked — just waiting its turn. Say which kind of wait it is.
           const busyHere = jobs.some((o) => o.id !== j.id && o.hostname === j.hostname && active(o.status) && o.status !== 'pending');
@@ -2445,23 +2445,6 @@ async function refresh() {
   setLiveIndicator();
 }
 
-async function copyCmd(id) {
-  await navigator.clipboard.writeText(document.getElementById(id).textContent);
-}
-
-async function loadEnrolCommands() {
-  try {
-    const { lanUrl } = await api('GET', '/api/agent-setup');
-    const set = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
-    // Step 1 — enrol (no admin): monitoring agent.
-    set('cmd-mac', `curl -fsSL ${lanUrl}/enroll.sh | bash`);
-    set('cmd-win', `irm ${lanUrl}/enroll.ps1 | iex`);
-    // Step 2 — elevation (one-time, admin): root daemon (mac) / highest-priv task (win).
-    set('cmd-mac-elev', `curl -fsSL ${lanUrl}/setup.sh | sudo bash`);
-    set('cmd-win-elev', `irm ${lanUrl}/elevate.ps1 | iex`);
-  } catch { /* panel just keeps its placeholder */ }
-}
-
 // Paint all static icon placeholders (tabs, brand, search, labels).
 function paintIcons() {
   document.querySelectorAll('[data-ic]').forEach((el) => {
@@ -2476,7 +2459,6 @@ new MutationObserver(() => {
   document.body.classList.toggle('modal-open', !!document.querySelector('.modal-overlay'));
 }).observe(document.body, { childList: true });
 
-loadEnrolCommands();
 refresh();
 startLive();
 // Fallback only: poll while the live stream is disconnected or silent.

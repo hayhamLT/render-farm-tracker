@@ -207,8 +207,8 @@ function Attention({ s, models }) {
     broken.length && { tone: 'warn', icon: 'alert', text: `Can't check for new versions of ${broken.map((x) => x.m.p.name).join(', ')}`,
       detail: broken.map((x) => `${x.src.label}: ${x.src.error}${x.src.ok_at ? ` (last worked ${ago(x.src.ok_at, s.now)})` : ''}`).join(' · '),
       actions: [{ label: 'Check again', run: act.checkVersions }] },
-    notReady.length && { tone: 'warn', icon: 'shieldOff', text: `${plural(notReady.length, 'machine')} can't install silently yet`, detail: 'Run the elevate command once on them (Settings → Enroll a machine)',
-      actions: [{ label: 'How', run: () => go('settings') }] },
+    notReady.length && { tone: 'warn', icon: 'shieldOff', text: `${plural(notReady.length, 'machine')} can't install silently yet`, detail: `${notReady.slice(0, 5).map((n) => n.hostname).join(', ')}: run Farmly's installer on them again (Fleet ▸ Add machine) and click Yes on the admin prompt`,
+      actions: [] },
     ...autoIssues.map((iss) => {
       const osLabel = iss.os === 'macos' ? 'Mac' : 'Windows';
       // Machines auto-deploy leaves alone for a day after their install of this version failed.

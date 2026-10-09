@@ -11,7 +11,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { execFileSync } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const jobRules = require('./lib/job_rules');
 const hidden = require('./lib/hidden');
@@ -1476,131 +1475,6 @@ Write-Host "Elevated tracker agent installed as SYSTEM (headless, highest privil
 `;
 }
 
-// One-click installer files for the share (Settings → Enroll a machine → Save to the share):
-// double-click on a machine and it's enrolled AND elevated in one go. The tracker's address and
-// agent key are baked in, so regenerate them if either changes.
-function enrollFiles(base) {
-  const crlf = (t) => t.replace(/\r?\n/g, '\r\n');
-  const win = crlf(`@echo off
-REM ==== Render Farm Tracker: install the agent on this Windows machine ====
-REM Double-click, then click "Yes" when Windows asks for administrator rights. That's all.
-REM Tracker: ${base}   (re-running is safe: it updates the agent in place)
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-  echo Asking for administrator rights...
-  REM Run a local copy, so the elevated relaunch works even when started from the network share.
-  copy /y "%~f0" "%TEMP%\\Install-Tracker-Agent.cmd" >nul
-  powershell -NoProfile -Command "Start-Process -FilePath '%TEMP%\\Install-Tracker-Agent.cmd' -Verb RunAs"
-  exit /b
-)
-title Render Farm Tracker - agent setup
-echo Installing the Render Farm Tracker agent on %COMPUTERNAME% ...
-echo.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { irm ${base}/elevate.ps1 | iex; exit 0 } catch { Write-Host ''; Write-Host ('FAILED: ' + $_.Exception.Message) -ForegroundColor Red; exit 1 }"
-if %errorlevel% neq 0 (
-  echo.
-  echo Setup did not finish. Check that this machine can reach ${base}
-  echo and run this file again.
-  pause
-  exit /b 1
-)
-echo.
-echo Done. %COMPUTERNAME% appears in the tracker within a minute and installs updates with no prompts.
-timeout /t 15
-`);
-  const mac = `#!/bin/bash
-# ==== Render Farm Tracker: install the agent on this Mac ====
-# Double-click. Terminal opens and asks for this Mac's admin password once. That's all.
-# Tracker: ${base}   (re-running is safe: it updates the agent in place)
-clear
-echo "Installing the Render Farm Tracker agent on $(scutil --get ComputerName 2>/dev/null || hostname) ..."
-echo
-if ! curl -fsS --max-time 10 -o /dev/null "${base}/agent"; then
-  echo "Can't reach the tracker at ${base} — check the network, then run this again."
-  read -r -p "Press Return to close." _; exit 1
-fi
-if curl -fsSL "${base}/setup.sh" | sudo bash; then
-  echo
-  echo "Done. This Mac appears in the tracker within a minute and installs updates with no prompts."
-else
-  echo
-  echo "Setup did not finish — see the message above, then run this again."
-fi
-read -r -p "Press Return to close." _
-`;
-  const readme = crlf(`Render Farm Tracker — agent installers
-=====================================
-
-Double-click the file for the machine's OS. It installs the tracker agent and sets it up so
-updates install silently (no permission prompts) — enroll and elevate in one go.
-
-  Install Tracker Agent - Windows.cmd   click "Yes" on the administrator prompt
-  Install Tracker Agent - Mac.command   enter the Mac's admin password in Terminal
-
-The machine shows up on the tracker's Machines page within a minute. Running a file again on a
-machine that's already set up is safe — it just refreshes the agent.
-
-Tracker address baked into these files: ${base}
-If the tracker moves to another address, regenerate them: Settings → Enroll a machine →
-Save installers to the share.
-
-Generated ${new Date().toLocaleString()}.
-`);
-  return [
-    { name: 'Install Tracker Agent - Windows.cmd', content: win, mode: 0o755 },
-    { name: 'Install Tracker Agent - Mac.command', content: mac, mode: 0o755 },
-    { name: 'README.txt', content: readme, mode: 0o644 },
-  ];
-}
-
-// An smb:// address for a path on a mounted share, so the dashboard can offer "open the folder"
-// on the viewer's own machine (Finder/Explorer handle smb://). null when the path isn't on a share.
-function shareSmbUrl(target) {
-  try {
-    const out = execFileSync('/sbin/mount', [], { encoding: 'utf8', timeout: 4000 });
-    let best = null;
-    for (const line of out.split('\n')) {
-      const m = line.match(/^\/\/([^/]+)\/([^ ]+) on (.+?) \((smbfs|nfs|afpfs)[,)]/);
-      if (!m) continue;
-      const [, userHost, share, mountPoint] = m;
-      const host = userHost.includes('@') ? userHost.split('@').pop() : userHost;
-      const clean = host.replace(/\._smb\._tcp\.local$/, '');
-      if (target === mountPoint || target.startsWith(mountPoint + path.sep)) {
-        if (!best || mountPoint.length > best.mountPoint.length) best = { host: clean, share, mountPoint };
-      }
-    }
-    if (!best) return null;
-    const rel = target.slice(best.mountPoint.length).split(path.sep).filter(Boolean).map(encodeURIComponent).join('/');
-    return `smb://${best.host}/${best.share}${rel ? `/${rel}` : ''}`;
-  } catch { return null; }
-}
-
-// Staging batch (Windows): a node runs `mx1 package download <ident>` then
-// uploads the installer to the tracker cache, so the whole farm reuses one copy.
-// Usage on node:  trk_stage.bat <maxon-identifier>
-function winStageScript(base) {
-  return `@echo off
-setlocal enabledelayedexpansion
-set IDENT=%1
-if "%IDENT%"=="" (echo no identifier & exit /b 1)
-set D=%TEMP%\\trkstage_%RANDOM%
-mkdir "%D%" 2>nul
-pushd "%D%"
-echo Downloading %IDENT% via mx1 ...
-"C:\\Program Files\\Maxon\\Tools\\mx1.exe" package download %IDENT%
-set FOUND=0
-for %%F in ("%D%\\*.exe" "%D%\\*.dmg" "%D%\\*.pkg" "%D%\\*.msi") do (
-  echo Uploading %%~nxF to tracker ...
-  curl.exe -s -X POST -H "X-Agent-Key: ${config.agentKey}" --data-binary @"%%F" "${base}/api/agent/upload?filename=%%~nxF"
-  set FOUND=1
-)
-popd
-rmdir /s /q "%D%" 2>nul
-if "!FOUND!"=="0" (echo no installer produced & exit /b 2)
-echo staged OK
-`;
-}
-
 // ------------------------------------------------- node bootstrap scripts ---
 // One-line enrolment, served by this server with URL + key baked in:
 //   macOS:   curl -fsSL http://<server>/setup.sh | sudo bash
@@ -2360,9 +2234,9 @@ function handleCheckin(body) {
 }
 
 // ------------------------------------------------------- this computer only --
-// What machines on the LAN may still reach directly: the agent API and the scripts that enrol one.
-// (/api/agent-setup is NOT here: it hands out the agent key, and only the dashboard uses it.)
-const AGENT_SURFACE = /^\/(agent|setup\.(sh|ps1)|enroll\.(sh|ps1)|elevate\.ps1|stage\.bat|mac_elevate\.sh)$|^\/api\/agent\//;
+// What machines on the LAN may still reach directly: the agent API and the scripts that enrol one
+// (which only say "Farmly installs the agent now", unless config.directAgents).
+const AGENT_SURFACE = /^\/(agent|setup\.(sh|ps1)|enroll\.(sh|ps1)|elevate\.ps1)$|^\/api\/agent\//;
 let _own = { at: 0, set: new Set() };
 function ownAddresses() {
   // Every address this computer answers on: a script here that calls http://<LAN IP>:4400 (e.g.
@@ -2401,7 +2275,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && (p === '/setup.sh' || p === '/setup.ps1' ||
-        p === '/enroll.sh' || p === '/enroll.ps1' || p === '/elevate.ps1' || p === '/stage.bat')) {
+        p === '/enroll.sh' || p === '/enroll.ps1' || p === '/elevate.ps1')) {
       const base = `http://${req.headers.host || lanAddress() + ':' + config.port}`;
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       if (!directAgents()) {
@@ -2409,12 +2283,11 @@ const server = http.createServer(async (req, res) => {
         // each machine with its own key: say so, and stop.
         const say = "This machine's updates agent is installed by Farmly now: add the machine from Farmly > Fleet > Add machine.";
         if (p.endsWith('.ps1')) return res.end(`Write-Host "${say}"\nexit 1\n`);
-        if (p.endsWith('.bat')) return res.end(`@echo ${say}\r\n@exit /b 1\r\n`);
         return res.end(`#!/bin/sh\necho "${say}" >&2\nexit 1\n`);
       }
       const fn = { '/setup.sh': macSetupScript, '/setup.ps1': winSetupScript,
                    '/enroll.sh': macEnrollUser, '/enroll.ps1': winEnrollUser,
-                   '/elevate.ps1': winElevateScript, '/stage.bat': winStageScript }[p];
+                   '/elevate.ps1': winElevateScript }[p];
       res.end(fn(base));
       return;
     }
@@ -3374,54 +3247,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // Are the one-click installer files already on the share?
-    if (req.method === 'GET' && p === '/api/enroll-files') {
-      const share = downloadDir();
-      const dir = share ? path.join(share, 'Tracker Agent') : null;
-      const names = enrollFiles('http://x').map((f) => f.name);
-      let files = [];
-      let at = null;
-      try {
-        files = names.filter((n) => fs.existsSync(path.join(dir, n)));
-        const stats = files.map((n) => fs.statSync(path.join(dir, n)).mtimeMs);
-        at = stats.length ? Math.max(...stats) : null;
-      } catch { /* no share */ }
-      const current = files.length === names.length && (() => {
-        try { return fs.readFileSync(path.join(dir, names[0]), 'utf8').includes(agentBaseUrl()); } catch { return false; }
-      })();
-      return sendJson(res, 200, { dir, mounted: !!share, files, at, exists: files.length === names.length, current, base: agentBaseUrl(), smb: dir ? shareSmbUrl(dir) : null });
-    }
-
-    // Write the one-click installer files into "<installer share>/Tracker Agent/".
-    if (req.method === 'POST' && p === '/api/enroll-files') {
-      const share = downloadDir();
-      if (!share) return sendJson(res, 503, { error: `the installer share (${config.downloadDir || SHARED_INSTALLERS}) isn't mounted on the tracker server` });
-      const base = agentBaseUrl();
-      const dir = path.join(share, 'Tracker Agent');
-      try {
-        await fs.promises.mkdir(dir, { recursive: true });
-        const written = [];
-        for (const f of enrollFiles(base)) {
-          const full = path.join(dir, f.name);
-          await fs.promises.writeFile(full, f.content);
-          try { await fs.promises.chmod(full, f.mode); } catch { /* SMB may ignore modes */ }
-          written.push(f.name);
-        }
-        logEvent('monitoring', `Agent installer files saved to ${dir} (tracker ${base})`);
-        return sendJson(res, 200, { ok: true, dir, base, files: written, exists: true, current: true, at: Date.now(), smb: shareSmbUrl(dir) });
-      } catch (e) {
-        return sendJson(res, 500, { error: `couldn't write to ${dir}: ${e.message}` });
-      }
-    }
-
-    if (req.method === 'GET' && p === '/api/agent-setup') {
-      // Convenience: everything an admin needs to enrol a node.
-      return sendJson(res, 200, {
-        agentKey: config.agentKey,
-        port: config.port,
-        lanUrl: agentBaseUrl(),
-      });
-    }
+    // (/api/enroll-files and /api/agent-setup are gone: Farmly installs the agent on a new machine, with the
+    // machine's own key, and nothing hands out the shared agent key any more.)
 
     // Quick-access "places" for the folder picker sidebar (Finder-style).
     if (req.method === 'GET' && p === '/api/places') {

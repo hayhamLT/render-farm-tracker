@@ -1,5 +1,5 @@
 // Settings: where installers are downloaded, Slack alerts, the auto-deploy maintenance window,
-// vendor-download concurrency, backups, and how to enroll a machine.
+// vendor-download concurrency, backups, and where machines are added (Farmly).
 import { html } from '../lib/html.js';
 import { useEffect, useState } from 'preact/hooks';
 import { farm, refresh } from '../lib/store.js';
@@ -98,65 +98,6 @@ function FolderSetting({ field, label, hint, value, fallback }) {
   </div>`;
 }
 
-function Commands() {
-  const [setup, setSetup] = useState(null);
-  useEffect(() => { get('/api/agent-setup').then(setSetup).catch(() => setSetup({})); }, []);
-  const u = setup && setup.lanUrl;
-  const rows = u ? [
-    ['Windows — enroll', `irm ${u}/enroll.ps1 | iex`],
-    ['Windows — elevate (admin, once)', `irm ${u}/elevate.ps1 | iex`],
-    ['macOS — enroll', `curl -fsSL ${u}/enroll.sh | bash`],
-    ['macOS — elevate (once)', `curl -fsSL ${u}/setup.sh | sudo bash`],
-  ] : [];
-  const copy = async (t) => { try { await navigator.clipboard.writeText(t); toast('Copied.', 'success', 2000); } catch { toast('Copy failed — select the text instead.', 'error'); } };
-  if (!setup) return html`<p class="dim">Loading…</p>`;
-  if (!u) return html`<p class="dim">Couldn't load the enrollment commands.</p>`;
-  return html`<div class="stack" style="gap:12px">
-    <${EnrollFiles} url=${u} />
-    <p class="dim" style="margin:4px 0 0;font-size:.84rem">Or paste a command on the machine:</p>
-    <div class="stack" style="gap:8px">${rows.map(([l, c]) => html`<div key=${l} class="cmd"><span class="dim">${l}</span><code>${c}</code><button class="btn sm ghost icon" aria-label=${`Copy ${l}`} onClick=${() => copy(c)}><${Icon} name="copy" /></button></div>`)}</div>
-  </div>`;
-}
-
-// Double-click installers on the share: enroll + elevate in one go, tracker address baked in.
-// Once they're there, this is just a line with a way to open the folder.
-function EnrollFiles({ url }) {
-  const [state, setState] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const load = () => get('/api/enroll-files').then(setState).catch(() => setState({ mounted: false }));
-  useEffect(() => { load(); }, []);
-  const save = async () => {
-    setBusy(true);
-    try { const r = await post('/api/enroll-files'); setState(r); toast('Installer files saved to the share.', 'success'); } catch (e) { toast(e.message, 'error', 8000); }
-    setBusy(false);
-  };
-  const copyPath = async () => {
-    try { await navigator.clipboard.writeText(state.dir); toast('Folder path copied.', 'success', 2000); } catch { toast('Copy failed.', 'error'); }
-  };
-  if (!state) return null;
-  if (!state.mounted) return html`<div class="banner warn"><${Icon} name="alert" />The installer share isn't mounted on the tracker server, so the one-click installer files can't be saved.</div>`;
-
-  if (state.exists) {
-    return html`<div class="enroll-files done">
-      <${Icon} name="check" />
-      <div class="grow">
-        <b>One-click installers are on the share</b>
-        <p class="dim" style="margin:2px 0 0;font-size:.84rem"><span class="mono">${state.dir}</span>${state.current ? '' : html` · <span style="color:var(--warn)">they point at a different address — save them again</span>`}</p>
-      </div>
-      ${state.smb ? html`<a class="btn" href=${state.smb}><${Icon} name="folder" />Open folder</a>` : null}
-      <button class="btn ghost sm" onClick=${copyPath}><${Icon} name="copy" />Copy path</button>
-      <button class=${'btn ghost sm' + (state.current ? '' : ' primary')} disabled=${busy} onClick=${save}><${Icon} name=${busy ? 'spinner' : 'refresh'} cls=${busy ? 'spin' : ''} />Save again</button>
-    </div>`;
-  }
-  return html`<div class="enroll-files">
-    <div class="grow">
-      <b>One-click installers</b>
-      <p class="dim" style="margin:2px 0 0;font-size:.84rem">Double-click on a machine to install the agent and set up silent installs in one go — <span class="mono">Install Tracker Agent - Windows.cmd</span> and <span class="mono">Install Tracker Agent - Mac.command</span>, pointing at <span class="mono">${url}</span>.</p>
-    </div>
-    <button class="btn primary" disabled=${busy} onClick=${save}><${Icon} name=${busy ? 'spinner' : 'folder'} cls=${busy ? 'spin' : ''} />Save installers to the share</button>
-  </div>`;
-}
-
 export function SettingsView() {
   const s = farm.value;
   const [slack, setSlack] = useState(null);
@@ -172,7 +113,7 @@ export function SettingsView() {
     try { await post('/api/settings', body); toast(msg, 'success'); } catch (e) { toast(e.message, 'error'); }
     refresh();
   };
-  const NAV = [['downloads', 'Installer downloads', 'folder'], ['desktop', 'Desktop alerts', 'bell'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Enroll a machine', 'beacon']];
+  const NAV = [['downloads', 'Installer downloads', 'folder'], ['desktop', 'Desktop alerts', 'bell'], ['slack', 'Slack alerts', 'alert'], ['window', 'Auto-deploy window', 'clock'], ['vendor', 'Vendor downloads', 'download'], ['backups', 'Backups', 'server'], ['enroll', 'Add a machine', 'beacon']];
   return html`<div class="page settings-page">
     <${PageHeader} title="Settings" subtitle="How the tracker downloads, alerts, schedules and backs up." />
     <div class="settings-layout">
@@ -231,9 +172,8 @@ export function SettingsView() {
     </section>
 
     <section id="set-enroll" class="card card-pad stack">
-      <h2 class="card-title"><${Icon} name="beacon" />Enroll a machine</h2>
-      <p class="dim" style="margin:0">Add a machine to the tracker: run the one-click installer from the share, or the enroll command and then the elevate command once as an administrator, so installs never stop at a permission prompt.</p>
-      <${Commands} />
+      <h2 class="card-title"><${Icon} name="beacon" />Add a machine</h2>
+      <p class="dim" style="margin:0">Machines are added from Farmly: <b>Fleet ▸ Add machine</b>. Farmly's installer sets up this agent too, with the machine's own key, so installs never stop at a permission prompt.</p>
     </section>
     </div>
     </div>

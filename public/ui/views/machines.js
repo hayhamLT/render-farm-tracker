@@ -124,7 +124,7 @@ function StatusCell({ m }) {
   else if (a.key === 'rendering') tags.push(html`<span class="tag violet" title="Installs wait until it's idle">Rendering</span>`);
   else tags.push(html`<span class="tag muted">Idle</span>`);
   if (n.online && n.pending_reboot) tags.push(html`<span class="tag warn" title="Windows is waiting for a restart — some installs (NVIDIA) won't run until then">Restart pending</span>`);
-  if (n.elevated === 0) tags.push(html`<span class="tag warn" title="Run the elevate command once so installs don't stop at a permission prompt">Not set up</span>`);
+  if (n.elevated === 0) tags.push(html`<span class="tag warn" title="Run Farmly's installer on it again (Fleet ▸ Add machine) so installs don't stop at a permission prompt">Not set up</span>`);
   if (n.wake && n.wake.state === 'waking') tags.push(html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />Waking</span>`);
   return html`<span class="tags">${tags}</span>`;
 }
@@ -347,10 +347,10 @@ function MachineDrawer({ hostname, model }) {
     <div class="content">
       ${!n.online && n.reach && n.reach.ok ? html`<div class="banner warn"><${Icon} name="alert" /><span class="grow">
         <b>On the network, but its agent isn't reporting.</b> It answers at <span class="mono">${n.reach.addr}</span> (${n.reach.how}), yet nothing has checked in since ${ago(n.last_seen, s.now)}.
-        Run <span class="mono">Install Tracker Agent - Windows.cmd</span> (or the Mac one) on it from the installer share — that reinstalls and starts the agent.</span></div>` : null}
+        On a PC, Farmly restarts a silent agent through the machine's own runner within the hour; otherwise run Farmly's installer on it again (Fleet ▸ Add machine).</span></div>` : null}
       ${!n.online && !(n.reach && n.reach.ok) ? html`<div class="banner warn"><${Icon} name="power" /><span class="grow">Offline — last seen ${ago(n.last_seen, s.now)}. Updates wait until it's back.${wol && wol.note ? ` ${wol.note}` : ''}</span>
         <button class="btn sm" disabled=${n.wake && n.wake.state === 'waking'} onClick=${() => act.wake([n])}>${n.wake && n.wake.state === 'waking' ? 'Waking…' : 'Wake'}</button></div>` : null}
-      ${n.elevated === 0 ? html`<div class="banner warn"><${Icon} name="shieldOff" /><span class="grow">Not set up for silent installs — run the elevate command once on this machine (Settings → Enroll a machine).</span></div>` : null}
+      ${n.elevated === 0 ? html`<div class="banner warn"><${Icon} name="shieldOff" /><span class="grow">Not set up for silent installs — run Farmly's installer on this machine again (Fleet ▸ Add machine) and click Yes on the admin prompt.</span></div>` : null}
 
       <section>
         <h3 class="section-title">Apps</h3>
@@ -443,7 +443,7 @@ export function MachinesView() {
       <${HiddenMachines} />
     </div>
 
-    ${!nodes.length ? html`<${Empty}>No machines yet — enroll one from Settings → Enroll a machine.<//>`
+    ${!nodes.length ? html`<${Empty}>No machines yet — add one from Farmly (Fleet ▸ Add machine).<//>`
       : !rows.length ? html`<${Empty}>No machines match these filters.<//>`
       : quick.value === 'all' ? html`<${GroupedMachines} rows=${rows} model=${model} />`
       : view.value === 'grid' ? html`<${MachineList} rows=${rows} model=${model} />`
