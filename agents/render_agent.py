@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.48.0"
+AGENT_VERSION = "2.49.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -2102,7 +2102,12 @@ def _plist_paths():
 
 def _rewrite_plist(plist_path, new_server, new_key):
     """Point a plist's --server/--key ProgramArguments at the new server (atomic write).
-    Returns True only if the file on disk now actually contains BOTH new values."""
+    Returns True only if the file on disk now actually contains BOTH new values.
+
+    The plist holds this machine's agent key, so it is readable by its owner only (0600), as
+    Farmly's installer writes it: the new file is created 0600 (agents before 2.49.0 wrote it with
+    the default 0644, which undid the installer's chmod 600 on every move to Farmly and every
+    launch-config sync, so any local account could read the key)."""
     import plistlib
     with open(plist_path, "rb") as f:
         pl = plistlib.load(f)
@@ -2114,12 +2119,42 @@ def _rewrite_plist(plist_path, new_server, new_key):
             args[i + 1] = new_key
     pl["ProgramArguments"] = args
     tmp = plist_path + ".new"
-    with open(tmp, "wb") as f:
+    try:
+        os.unlink(tmp)                     # a left-over .new keeps its old mode: O_CREAT would not change it
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
         plistlib.dump(pl, f)
+        f.flush()
+        os.fsync(f.fileno())               # a power cut must not leave launchd an empty plist
     os.replace(tmp, plist_path)            # atomic swap
+    os.chmod(plist_path, 0o600)
     with open(plist_path, "rb") as f:
         chk = list(plistlib.load(f).get("ProgramArguments") or [])
     return new_server in chk and new_key in chk
+
+
+def _private_plist(plist_path):
+    """Make an existing launch plist that carries a --key readable by its owner only. Agents before
+    2.49.0 rewrote it world-readable (see _rewrite_plist); the sync after a good check-in repairs that
+    even when nothing else in the file has to change. Returns True when it changed the mode."""
+    import plistlib
+    try:
+        st = os.stat(plist_path)
+        if not (st.st_mode & 0o077):
+            return False
+        with open(plist_path, "rb") as f:
+            args = list((plistlib.load(f) or {}).get("ProgramArguments") or [])
+        if "--key" not in args:
+            return False
+        os.chmod(plist_path, 0o600)
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        print("  ! could not make %s private: %s" % (plist_path, e))
+        return False
 
 
 def _ps(cmd, timeout=90):
@@ -2254,6 +2289,8 @@ def sync_own_launch(server_url, key, interval):
                 have = dict(zip(args, args[1:]))
                 if "--server" in have and (have.get("--server") != server_url or have.get("--key") != key):
                     print("  launch config: %s %s" % ("SYNCED" if _rewrite_plist(pl, server_url, key) else "SYNCERR", pl))
+                elif _private_plist(pl):
+                    print("  launch config: PRIVATE %s (was readable by every account)" % pl)
     except Exception as e:
         print("  ! launch config sync failed: %s" % e)
 
