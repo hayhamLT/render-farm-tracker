@@ -23,7 +23,6 @@ function look(e) {
   if (e.kind === 'node') {
     if (/did not wake|failed/.test(m)) return { icon: 'power', tone: 'bad', label: 'Machine' };
     if (/woke up|: done/.test(m)) return { icon: 'power', tone: 'ok', label: 'Machine' };
-    if (/Deadline/.test(m)) return { icon: 'film', tone: 'violet', label: 'Deadline' };
     if (/Reboot|Restart|Shut down/i.test(m)) return { icon: 'refresh', tone: 'warn', label: 'Power' };
     return { icon: 'server', tone: 'info', label: 'Machine' };
   }

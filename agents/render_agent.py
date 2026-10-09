@@ -41,7 +41,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.47.1"
+AGENT_VERSION = "2.48.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -178,9 +178,9 @@ def ensure_task_watchdog():
 
     Also opens the task so a non-admin user can START it (it still RUNS as SYSTEM, and a
     standard user still can't change or delete it). A task registered by SYSTEM is
-    admin-only by default and isn't even visible to other users, so remote repair — a
-    Deadline job, which runs as whoever is logged in — died on "Access is denied" and a
-    machine whose agent had stopped could only be revived by hand (RAZER-01, Sep 2026).
+    admin-only by default and isn't even visible to other users, so a remote repair running
+    as whoever is logged in died on "Access is denied" and a machine whose agent had
+    stopped could only be revived by hand (RAZER-01, Sep 2026).
 
     And makes sure the task actually RUNS as SYSTEM. Nodes enrolled before elevate.ps1
     pinned the principal carry `UserId=<the desktop user>, LogonType=Interactive`, which
@@ -341,151 +341,6 @@ ConvertTo-Json -Compress -Depth 4 @($out)
     except Exception:
         return None
     return None
-
-
-# ---- Deadline health -------------------------------------------------------------------
-# A render node is only useful if Deadline's Launcher + Worker are running. On many farm
-# machines nothing starts them after a restart (someone started them by hand once), so a
-# reboot silently takes the machine out of the farm while the tracker still shows it online.
-_DEADLINE_TASK = "Deadline Launcher (auto-start)"
-_DEADLINE_BIN_WIN = r"C:\Program Files\Thinkbox\Deadline10\bin"
-
-# The user whose desktop Deadline should run in: whoever owns the logged-in desktop
-# (explorer.exe), else the automatic-login account. Works whether the agent runs as that
-# user or as SYSTEM.
-_PS_DESKTOP_USER = r"""
-$du = $null
-$ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($ex) { $o = Invoke-CimMethod -InputObject $ex -MethodName GetOwner -ErrorAction SilentlyContinue; if ($o -and $o.User) { $du = "$($o.Domain)\$($o.User)" } }
-$wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
-$autologon = ("$($wl.AutoAdminLogon)" -eq '1')
-if (-not $du -and $autologon -and $wl.DefaultUserName) { $d = if ($wl.DefaultDomainName) { $wl.DefaultDomainName } else { $env:COMPUTERNAME }; $du = "$d\$($wl.DefaultUserName)" }
-"""
-
-# That user's own deadline.ini ($uini). The Launcher runs as the desktop user and its per-user
-# settings OVERRIDE the machine-wide %ProgramData% ones — a user file with
-# LaunchSlaveAtStartup=0 keeps the Worker from starting even though the machine-wide file says
-# True (MARS-05, Sep 2026). $lsas = the value that actually applies.
-_PS_DEADLINE_INI = r"""
-$sini = "$env:ProgramData\Thinkbox\Deadline10\deadline.ini"
-$uini = $null
-if ($du) {
-  try {
-    $sid = (New-Object System.Security.Principal.NTAccount($du)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-    $prof = (Get-CimInstance Win32_UserProfile -Filter "SID='$sid'" -ErrorAction SilentlyContinue).LocalPath
-    if ($prof) { $uini = Join-Path $prof 'AppData\Local\Thinkbox\Deadline10\deadline.ini' }
-  } catch { }
-}
-function Get-IniValue($path, $key) {
-  if (-not $path -or -not (Test-Path $path)) { return $null }
-  $m = Select-String -Path $path -Pattern "^$key=(.*)$" | Select-Object -First 1
-  if ($m) { return $m.Matches[0].Groups[1].Value.Trim() } else { return $null }
-}
-$lsasUser = Get-IniValue $uini 'LaunchSlaveAtStartup'
-$lsasSys = Get-IniValue $sini 'LaunchSlaveAtStartup'
-$lsas = if ($lsasUser -ne $null) { $lsasUser } else { $lsasSys }
-"""
-
-
-def detect_deadline():
-    """{installed, launcher, worker, autostart, autologon, user, how} — read-only, best-effort."""
-    try:
-        if IS_WINDOWS:
-            ps = r"""$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='SilentlyContinue'
-%s
-$bin = '%s'
-$installed = Test-Path "$bin\deadlinelauncher.exe"
-$how = @()
-if (Get-ScheduledTask -TaskName '%s') { $how += 'task' }
-if (Get-Service | Where-Object { $_.Name -match 'deadline' -and $_.StartType -eq 'Automatic' }) { $how += 'service' }
-$startup = @('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp') + (Get-ChildItem C:\Users -Directory | ForEach-Object { "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup" })
-if ($startup | Where-Object { Get-ChildItem $_ -Filter '*deadline*' }) { $how += 'startup-folder' }
-foreach ($rk in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') { $v = Get-ItemProperty $rk; if ($v -and ($v.PSObject.Properties | Where-Object { "$($_.Value)" -match 'deadlinelauncher' })) { $how += 'run-key' } }
-%s
-[pscustomobject]@{ installed = $installed; launcher = [bool](Get-Process deadlinelauncher); worker = [bool](Get-Process deadlineworker);
-  starts_worker = ("$lsas" -match '^(1|true)$'); user_ini_off = ($lsasUser -ne $null -and "$lsasUser" -notmatch '^(1|true)$');
-  how = $how; autologon = $autologon; user = $du } | ConvertTo-Json -Compress
-""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK, _PS_DEADLINE_INI)
-            out = (_run_powershell(ps, timeout=60).stdout or "").strip()
-            d = json.loads(out) if out else None
-            if not d:
-                return None
-            d["how"] = d.get("how") or []
-            if isinstance(d["how"], str):
-                d["how"] = [d["how"]]
-            d["autostart"] = bool(d["how"]) and bool(d.get("starts_worker"))
-            return d
-        if IS_MACOS:
-            # On the Macs the Worker process is "DeadlineWorker10" and it's kept alive by a
-            # launchd-started "Deadline Watchdog" app rather than Deadline's Launcher — match by
-            # pattern, case-insensitively, instead of exact process names.
-            def running(pattern):
-                try:
-                    return subprocess.run(["pgrep", "-if", pattern], capture_output=True, timeout=15).returncode == 0
-                except Exception:
-                    return False
-            installed = os.path.isdir("/Applications/Thinkbox/Deadline10")
-            worker = running("deadlineworker")
-            launcher = running("deadlinelauncher|deadlinewatchdog")
-            plists = glob.glob("/Library/LaunchDaemons/*deadline*") + glob.glob("/Library/LaunchAgents/*deadline*")
-            return {"installed": installed, "launcher": launcher, "worker": worker,
-                    "autostart": bool(plists), "how": ["launchd"] if plists else [],
-                    "autologon": None, "user": None}
-    except Exception:
-        return None
-    return None
-
-
-def fix_deadline_startup():
-    """Make Deadline start by itself and start it now (Windows). Registers a scheduled task that
-    runs the Deadline Launcher at logon of the desktop user — in that user's own session, like
-    starting it by hand, so shares and licenses behave normally; no password involved — and
-    turns on LaunchSlaveAtStartup so the Launcher brings up the Worker — machine-wide AND in the
-    desktop user's own deadline.ini, which overrides the machine-wide one. If the Launcher is
-    already running without a Worker, it's restarted in the user's session so the corrected
-    setting takes effect (never touched while a Worker runs). Returns (ok, message)."""
-    if not IS_WINDOWS:
-        return False, "Automatic Deadline startup fix is Windows-only."
-    ps = r"""$ProgressPreference='SilentlyContinue'
-%s
-$bin = '%s'; $task = '%s'
-if (-not (Test-Path "$bin\deadlinelauncher.exe")) { 'ERROR: Deadline is not installed in ' + $bin; exit 2 }
-if (-not $du) { 'ERROR: nobody is logged in and automatic login is off, so there is no desktop session for Deadline to run in. Log in once (or enable automatic login), then try again.'; exit 3 }
-& "$bin\deadlinecommand.exe" -SetIniFileSetting LaunchSlaveAtStartup True 2>&1 | Out-Null
-%s
-$userFixed = $false
-if ($uini -and (Test-Path $uini) -and $lsasUser -ne $null -and "$lsasUser" -notmatch '^(1|true)$') {
-  $txt = [IO.File]::ReadAllText($uini)
-  $txt = [regex]::Replace($txt, '(?m)^LaunchSlaveAtStartup=.*$', 'LaunchSlaveAtStartup=True')
-  [IO.File]::WriteAllText($uini, $txt)
-  $userFixed = $true
-}
-$act = New-ScheduledTaskAction -Execute "$bin\deadlinelauncher.exe"
-$trg = New-ScheduledTaskTrigger -AtLogOn -User $du
-$pri = New-ScheduledTaskPrincipal -UserId $du -LogonType Interactive -RunLevel Highest
-$set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $task -Action $act -Trigger $trg -Principal $pri -Settings $set -Force | Out-Null
-$started = $false
-$restarted = $false
-$running = [bool](Get-Process deadlineworker -ErrorAction SilentlyContinue)
-if ($ex -and -not $running -and (Get-Process deadlinelauncher -ErrorAction SilentlyContinue)) {
-  # A Launcher that started with the Worker switched off won't start it until it's restarted.
-  Get-Process deadlinelauncher -ErrorAction SilentlyContinue | Stop-Process -Force
-  Start-Sleep 3
-  $restarted = $true
-}
-if (-not (Get-Process deadlinelauncher -ErrorAction SilentlyContinue)) { if ($ex) { Start-ScheduledTask -TaskName $task; $started = $true } }
-for ($i = 0; $i -lt 24 -and -not (Get-Process deadlineworker -ErrorAction SilentlyContinue); $i++) { Start-Sleep 5 }
-$w = [bool](Get-Process deadlineworker -ErrorAction SilentlyContinue)
-"OK: Deadline now starts at logon of $du (auto-login: $autologon)." + $(if ($userFixed) { " Turned on 'start the Worker' in $du's own Deadline settings (it was off there)." } else { "" }) + $(if ($restarted) { " Restarted the Launcher." } elseif ($started) { " Started it now." } else { "" }) + $(if ($w) { " Worker is running." } elseif ($ex) { " Worker hasn't appeared yet — check Deadline Monitor." } else { " Nobody is logged in right now, so it starts at the next logon." })
-""" % (_PS_DESKTOP_USER, _DEADLINE_BIN_WIN, _DEADLINE_TASK, _PS_DEADLINE_INI)
-    try:
-        p = _run_powershell(ps, timeout=240)
-        msg = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
-        msg = msg[-1] if msg else "no output"
-        return p.returncode == 0 and msg.startswith("OK"), msg
-    except Exception as e:
-        return False, "fix failed: %s" % e
 
 
 def send_magic_packets(macs, ip=None, rounds=3):
@@ -885,7 +740,7 @@ def _ffmpeg_candidates():
 def detect_ffmpeg():
     """FFmpeg is a standalone CLI binary (no registry/app entry). Find a real standalone
     install by running `ffmpeg -version` at the managed path or a standard location.
-    Render agents run under launchd / the Deadline service with a minimal PATH that omits
+    Render agents run under launchd / a scheduled task with a minimal PATH that omits
     /opt/homebrew/bin, so we probe explicit paths rather than relying on PATH alone.
     Returns (version, path) or None."""
     seen = set()
@@ -1027,8 +882,8 @@ def detect_nvidia_driver():
 
 def _gpu_rendering():
     """True only when the GPU is ACTIVELY computing a render (high utilization). We must
-    NOT use "is any process on the GPU" (compute-apps): on a Deadline farm the Worker
-    service holds a persistent CUDA context even when idle, so that would defer the driver
+    NOT use "is any process on the GPU" (compute-apps): on a render farm a worker process
+    can hold a persistent CUDA context even when idle, so that would defer the driver
     update forever and mislabel an idle node as "rendering". An actual render pins the GPU
     near 90-100%; an idle held context sits at ~0%. Windows render nodes only; if nvidia-smi
     can't run (broken/absent driver) we can't be rendering anyway, so don't block recovery."""
@@ -1346,7 +1201,7 @@ INSTALL_TIMEOUT = 3600  # seconds
 # check-in; a "cancel" directive for that id sets the event and kills the process tree.
 _JOB = {"id": None, "proc": None, "cancel": threading.Event()}
 _JOB_LOCK = threading.Lock()
-_PENDING = {"reboot": False, "shutdown": False, "deadline_fix": False}
+_PENDING = {"reboot": False, "shutdown": False}
 _UNSENT = {}   # job id -> (status, log): final results the tracker hasn't received yet
 
 
@@ -1392,8 +1247,6 @@ def handle_directives(resp):
         threading.Thread(target=send_magic_packets, args=(w.get("macs"), w.get("ip")),
                          daemon=True).start()
         print("  ⏻ sending Wake-on-LAN for %s" % w.get("hostname"))
-    if resp.get("deadlineFix"):
-        _PENDING["deadline_fix"] = True
     if resp.get("reboot"):
         _PENDING["reboot"] = True
     if resp.get("shutdown"):
@@ -1405,6 +1258,18 @@ def handle_directives(resp):
 
 _RUN_SERVER = {"server": None}
 _RUN_SEEN = set()
+
+
+# The logged-in desktop user ($du): whoever owns the desktop (explorer.exe), else the
+# automatic-login account. Works whether the agent runs as that user or as SYSTEM.
+_PS_DESKTOP_USER = r"""
+$du = $null
+$ex = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($ex) { $o = Invoke-CimMethod -InputObject $ex -MethodName GetOwner -ErrorAction SilentlyContinue; if ($o -and $o.User) { $du = "$($o.Domain)\$($o.User)" } }
+$wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+$autologon = ("$($wl.AutoAdminLogon)" -eq '1')
+if (-not $du -and $autologon -and $wl.DefaultUserName) { $d = if ($wl.DefaultDomainName) { $wl.DefaultDomainName } else { $env:COMPUTERNAME }; $du = "$d\$($wl.DefaultUserName)" }
+"""
 
 
 # The script SYSTEM writes for the desktop user goes in THAT user's own profile (AppData\Local\Temp\
@@ -1420,8 +1285,7 @@ def _run_as_desktop_user(command, timeout, rid):
     The agent is SYSTEM. Some tools only work inside a real user session — Maxon's mx1 above
     all, whose licensing is tied to the signed-in Maxon user, so from SYSTEM every licence
     call answers "service is not available" (checked on AVA-02, Sep 2026). A scheduled task
-    with an Interactive principal runs in that user's session without a password, the same
-    way fix_deadline_startup() starts the Deadline Launcher.
+    with an Interactive principal runs in that user's session without a password.
 
     The command's own exit code and output come back through files, not the task's
     LastTaskResult, which reports on the task rather than on the command inside it."""
@@ -1866,7 +1730,7 @@ def _blockers(product_key):
     ae_apps = (["AfterFX.exe", "AfterFX.com", "aerender.exe", "Adobe Media Encoder.exe", "AfterFXLib.dll"]
                if IS_WINDOWS else ["After Effects", "aerender", "Adobe Media Encoder"])
     ae_render = ["aerender.exe"] if IS_WINDOWS else ["aerender"]
-    # Cinema 4D renders on a farm run through the command-line renderer (Deadline launches
+    # Cinema 4D renders on a farm run through the command-line renderer (farm jobs launch
     # Commandline.exe), not the Cinema 4D GUI — both must block, or an install lands on top
     # of a live render. Redshift's standalone renderer counts too.
     c4d = (["Cinema 4D.exe", "Commandline.exe", "c4dpy.exe", "redshiftCmdLine.exe"] if IS_WINDOWS
@@ -1911,9 +1775,8 @@ def prepare_for_install(product_key):
 
 
 def _reboot_machine():
-    """Reboot this machine on the server's request — the agent-side fallback for when
-    Deadline RemoteControl can't reach the box. The agent runs elevated (Windows) / as root
-    (mac), so the OS reboot command works without a prompt."""
+    """Reboot this machine on the server's request. The agent runs elevated (Windows) / as
+    root (mac), so the OS reboot command works without a prompt."""
     try:
         if IS_WINDOWS:
             subprocess.Popen('shutdown /r /t 5 /f /c "Restart requested from the Render Farm tracker"', shell=True)
@@ -2566,26 +2429,12 @@ def main():
             if not _SYNCED["done"] and "/beacon" in server_url:
                 _SYNCED["done"] = True           # this key just worked through Farmly: make the launch config match it
                 threading.Thread(target=sync_own_launch, args=(server_url, key, interval), daemon=True).start()
-            # Server asked us to reboot (fallback when Deadline RemoteControl can't reach us).
+            # Server asked us to reboot.
             if _PENDING["reboot"]:
                 _PENDING["reboot"] = False
                 _reboot_machine()
                 time.sleep(30)   # let the OS begin shutting down; the process dies with it
                 continue
-            # Server asked us to make Deadline start by itself (the dashboard's "Fix Deadline
-            # startup" button). Runs in the background; the result goes out with a fresh health
-            # report so the dashboard updates right away.
-            if _PENDING["deadline_fix"]:
-                _PENDING["deadline_fix"] = False
-                def _do_fix():
-                    ok, msg = fix_deadline_startup()
-                    print("  Deadline startup fix: %s" % msg)
-                    try:
-                        server.checkin(None, health={"deadline": detect_deadline() or {},
-                                                     "deadlineFix": {"ok": ok, "message": msg, "at": int(time.time() * 1000)}})
-                    except Exception as e:
-                        print("  ! could not report Deadline fix result: %s" % e)
-                threading.Thread(target=_do_fix, daemon=True).start()
             # Server asked us to SHUT DOWN — full power-off (recover via Wake-on-LAN).
             if _PENDING["shutdown"]:
                 _PENDING["shutdown"] = False
@@ -2631,9 +2480,6 @@ def main():
                         wol_state["at"] = time.time()
                     if wol_state["status"]:
                         health["wol"] = wol_state["status"]
-                    dl = detect_deadline()
-                    if dl:
-                        health["deadline"] = dl
                 # Always report software so the dashboard shows us online, even mid-install.
                 resp = server.checkin(detect_software(), latest=latest, health=health)
                 if not busy:

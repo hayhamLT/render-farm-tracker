@@ -163,7 +163,6 @@ export const STATE_COLOR = {
   idle: 'var(--ok)',
   reboot: 'var(--warn)',
   offline: 'var(--text-3)',
-  deadline: 'var(--bad)',
 };
 
 // ---- donut with a clickable legend (filters the view it belongs to) ----

@@ -122,8 +122,6 @@ function Thinking({ started }) {
 function suggestions(s) {
   const out = ['What needs attention right now?'];
   if (!s) return out;
-  const dlDown = s.nodes.find((n) => { try { const d = JSON.parse(n.deadline_info || 'null'); return n.online && d && d.installed && !d.worker; } catch { return false; } });
-  if (dlDown) out.push(`Why is ${dlDown.hostname} out of Deadline, and how do I fix it?`);
   const failed = s.jobs.find((j) => j.status === 'failed');
   if (failed) out.push(`Why did the install on ${failed.hostname} fail?`);
   out.push('Which machines rendered the least in the last week?');
@@ -170,7 +168,7 @@ export function AskPanel() {
     </header>
     <div class="ask-body" ref=${scroller}>
       ${!list.length ? html`<div class="ask-empty">
-        <p class="muted">Ask anything about the farm — machines, Deadline, installs, rollouts, the last week. Answers come from the tracker's own data.</p>
+        <p class="muted">Ask anything about the farm — machines, installs, rollouts, the last week. Answers come from the tracker's own data.</p>
         <div class="ask-sugs">${suggestions(s).map((q) => html`<button key=${q} class="ask-sug" onClick=${() => ask(q)}><${Icon} name="sparkle" />${q}</button>`)}</div>
       </div>` : list.map((m, i) => (m.role === 'user'
         ? html`<div key=${i} class="ask-msg user">${m.content}</div>`
@@ -181,7 +179,7 @@ export function AskPanel() {
           </div>`))}
     </div>
     <footer class="ask-foot">
-      <textarea ref=${input} class="field" rows="2" placeholder="Ask about a machine, Deadline, installs…" value=${draft.value}
+      <textarea ref=${input} class="field" rows="2" placeholder="Ask about a machine, installs, rollouts…" value=${draft.value}
         onInput=${(e) => { draft.value = e.currentTarget.value; }}
         onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}></textarea>
       ${busy ? html`<button class="btn" onClick=${stop} title="Stop"><${Icon} name="stop" />Stop</button>`

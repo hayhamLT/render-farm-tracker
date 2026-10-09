@@ -21,7 +21,7 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   now report through Farmly instead (next point but one).
   `/api/agent-setup` is NOT agent surface (it hands out the key; only the dashboard uses it).
   Scripts on the server that call `http://<LAN IP>:4400` still reach the admin API: they arrive from one
-  of this computer's own addresses. (`tracker_ops/auto_enroll.sh`, which enrolled new Deadline workers
+  of this computer's own addresses. (`tracker_ops/auto_enroll.sh`, which enrolled new machines
   with the shared key, was retired on 2026-09-28: Farmly's installer adds machines now.)
 - **Farmly decides WHEN a machine installs** (`lib/farm_gate.js`). Farmly posts
   `POST /api/farm-gate {hosts: {HOSTNAME: {ok, why}}}` every ~10 s; the check-in hands out an install
@@ -42,7 +42,7 @@ The tracker is being merged into **Farmly**, the studio's render farm manager on
   only be the agent's own `rehome_<HOST>.txt` note (never an installer); a move *back* to direct is
   refused (409). `config.directAgents: true` restores all of the old direct behaviour (restart to apply).
   Anything that relays to this tracker from 127.0.0.1 must drop client-sent `X-Farmly-*` headers
-  (Farmly's `/tracker` relay and deadlinefarm's old proxy both do).
+  (Farmly's `/tracker` relay does).
 - **Agents roll out through a canary (2026-09-28).** `config.agentCanary: ["HOST", ...]` offers a newer
   agent to those machines only (empty/absent = everyone); set it and restart BEFORE replacing
   `agents/render_agent.py`, which is re-read every 60 s. Every offer carries `latestAgentSha256`; agent
@@ -63,7 +63,7 @@ The Render Farm Tracker keeps software up to date across **~28 render nodes**. I
 - **Agent** — a stdlib-only Python script `agents/render_agent.py` (`AGENT_VERSION="2.8.0"`) installed on each render node. Polls the server every 60s, reports detected software + latest-available versions, and executes install jobs.
 - **Dashboard** — a no-framework, vanilla-JS single-page app in `public/` (`index.html`, `app.js`, `style.css`, `icons/`). Polls `GET /api/state` and renders via `innerHTML`.
 
-It integrates three external tools that live **on each node** (not on the server): **Adobe RUM** (RemoteUpdateManager — After Effects updates), **Maxon mx1** CLI (Cinema 4D / Redshift / Red Giant — installed + latest versions), and **Thinkbox Deadline** (`deadlinecommand`, used by the enrolment scripts to push agents to nodes).
+It integrates two external tools that live **on each node** (not on the server): **Adobe RUM** (RemoteUpdateManager — After Effects updates) and **Maxon mx1** CLI (Cinema 4D / Redshift / Red Giant — installed + latest versions).
 
 The single security boundary is one **shared static agent key** (`config.agentKey`). Only `/api/agent/*` routes check it. **Every dashboard/admin route is unauthenticated.**
 
@@ -142,7 +142,7 @@ Data flow: **agents push** inventory and **pull** jobs/installers from the serve
 | `config.json` | `port` (4400), `agentKey` (`27b99007...` — **secret, in plaintext**), `installerSources` (`/Volumes/THIS-server/INSTALLERS`), `maxConcurrentInstalls`, `monitoringActive`, `offlineAfterSeconds`. Read AND written at runtime (`/api/settings`, `/api/monitoring`). |
 | `tracker.db` (+ `.db-wal`, `.db-shm`) | The only datastore. WAL is uncheckpointed; **copy all three files together** or checkpoint first. Currently holds demo/test data; **no backups exist**. |
 | `installers/` | Staged installer binaries (~51 GB). Served over LAN via `GET /api/agent/download/:id`. |
-| Enrolment scripts (**no `deploy/` folder exists**) | Generated **inline by `server.js`** as GET routes (`/setup.sh`, `/setup.ps1`, `/enroll.ps1`, `/elevate.ps1`, `/stage.bat`), plus the `agents/*` templates and `public/mac_elevate.sh`. These use Deadline `deadlinecommand` to push agents to nodes. |
+| Enrolment scripts | Generated **inline by `server.js`** as GET routes (`/setup.sh`, `/setup.ps1`, `/enroll.ps1`, `/elevate.ps1`, `/stage.bat`), plus the `agents/*` templates, `public/mac_elevate.sh`, and `deploy/` (elevation notes, the GPO task, `enroll_mac.sh`). |
 | `/Users/trm/Library/LaunchAgents/com.tracker.server.plist` | The **live server LaunchAgent** (NOT in the repo). Per-user agent, so it runs only while user `trm` is logged in. |
 
 ---
@@ -261,7 +261,7 @@ Everything below must be reviewed/parameterized for the merge.
 | `lanUrl` for copy-enrol buttons | `/api/agent-setup` → `app.js` | Returns `http://<first non-internal IPv4>:config.port`, ignores Host. By design for LAN agent traffic — do NOT "fix" to the public domain. |
 | Hardcoded `10.10.10.96:4400` | every *deployed* node's launchd plist / scheduled task (baked at enrol time — confirmed on AVA-01); `public/mac_elevate.sh:11`. NOTE: the `agents/com.tracker.agent.plist` repo file is a `TRACKER-HOST` template, not the live IP. | Agents are physically pinned here with no in-band re-point. See Section 7. |
 | `\\THIS-server\INSTALLERS` | `public/index.html` (Setup tab) | Cosmetic Windows share path. |
-| External tool paths | `render_agent.py` (mx1, RUM); enrol scripts (Deadline `deadlinecommand`) | Node-local; unaffected by the server move but required on each node. |
+| External tool paths | `render_agent.py` (mx1, RUM) | Node-local; unaffected by the server move but required on each node. |
 | Node version | `lib/db.js:2` | Requires `node:sqlite` → **Node >= 22.5** (prefer >= 24 to avoid the experimental warning). No `package.json`/engines today. |
 
 ---
@@ -319,7 +319,7 @@ All ~28 agents are baked with `--server http://10.10.10.96:4400` in their launch
 
 - **Option A — DNS/IP takeover of `.96` (SAFEST, zero node changes).** Keep `10.10.10.96:4400` answering the agent endpoints — either keep a LAN listener reachable at that IP:port, or NAT/forward `10.10.10.96:4400` to the app's new internal address. Existing agents keep checking in unchanged over plain HTTP with the same `X-Agent-Key`. **Do NOT force-redirect `/api/agent/*`, `/agent`, or `/api/agent/download/*` to HTTPS or to a sub-path** — agents call fixed root paths with no base-path awareness, and `urllib` will not transparently follow an http→https upgrade on POSTs.
   - Note: `10.10.10.96` is currently a **secondary IP alias on the MacBook itself** (which also holds `10.10.10.65`). Reassigning `.96` to the new host is therefore a clean cutover lever.
-- **Option B — re-enrol all agents.** Push a new launchd plist (macs) / re-run `elevate.ps1`/`setup.ps1` with the new `--server https://tracker.example.com` (Windows) on every node — the existing channel for this is **Deadline RemoteControl**. Required if you mount under a sub-path.
+- **Option B — re-enrol all agents.** Push a new launchd plist (macs) / re-run `elevate.ps1`/`setup.ps1` with the new `--server https://tracker.example.com` (Windows) on every node. Required if you mount under a sub-path.
 - **Option C — make agents follow a hostname.** Re-enrol agents pointed at a stable DNS name (e.g. `tracker.lan` → current IP), so future server moves are a DNS change only. One-time re-enrol (same effort as B) but removes future re-point pain.
 
 If you also **rotate the agent key** during the merge, every node's stored `--key` must be re-pushed in lockstep or those nodes drop to 401.
@@ -396,7 +396,7 @@ Prioritized:
   - **Linux:** write a systemd unit (`WorkingDirectory`, `Restart=always`, absolute node path). Paths resolve via `__dirname`.
   - **Windows:** NSSM or winsw.
 - **macOS-only bits:** `config.json` auto-adds the `/Volumes/THIS-server/INSTALLERS` mount at boot; `lanAddress()` picks the first non-internal IPv4; the **agent** supports only Windows + macOS — **no Linux agent** (the Linux concern is the server host, not the nodes).
-- **External tool paths (on nodes, must exist):** mx1 — `…/Maxon/Tools/mx1.exe` (Win), `/Library/Application Support/Maxon/Tools/mx1` (Mac); Adobe RUM — the OOBE_Enterprise path & `…/ProgramData/TrackerAgent/RemoteUpdateManager.exe` (Win), `/usr/local/bin/RemoteUpdateManager` (Mac); Deadline `deadlinecommand` at `…/Thinkbox/Deadline10/…` (used by the server's inline enrol scripts + `agents/install-windows-task.ps1`, and by the server's Windows enrol, which uses Deadline's bundled python, `server.js:366,511`). The agent guards each with `os.path.exists`.
+- **External tool paths (on nodes, must exist):** mx1 — `…/Maxon/Tools/mx1.exe` (Win), `/Library/Application Support/Maxon/Tools/mx1` (Mac); Adobe RUM — the OOBE_Enterprise path & `…/ProgramData/TrackerAgent/RemoteUpdateManager.exe` (Win), `/usr/local/bin/RemoteUpdateManager` (Mac). The agent guards each with `os.path.exists`. On Windows the server's enrol scripts (`/elevate.ps1`, `/enroll.ps1`) run the agent on `C:\Program Files\TrackerAgent\python314\python.exe` if present, else the newest `C:\Program Files\Python3*\python.exe`, else `python.exe` on PATH (never the WindowsApps stub).
 - **Self-update mechanism (good to know):** the server scrapes `AGENT_VERSION` out of `agents/render_agent.py` at startup and re-reads every 60s, so dropping in a new agent file rolls out farm-wide with no server restart. `SAFE_SELFUPDATE_FROM='2.1.0'` means agents below 2.1.0 are never told to update. All 28 nodes are on 2.8.0 today, so the gate is currently moot.
 - **State location:** `tracker.db` (+ `.db-wal` + `.db-shm`), `config.json` (live key), and ~51 GB of installers all live in the repo dir **inside Dropbox**. **Move data, installers, and `config.json` out of Dropbox and VCS** before production.
 
@@ -417,7 +417,7 @@ Work top to bottom.
 - [ ] **Lock down key-leaking routes:** `/api/agent-setup`, `/agent`, `/setup.* /enroll.* /elevate.ps1 /stage.bat` behind admin auth or an internal-only path.
 - [ ] **Auth-gate + SSRF-harden** `POST /api/download-url` (block private/link-local/metadata IPs).
 - [ ] **Fix the enrol base URL:** make the enrol generator (and `/api/agent-setup`) honor `X-Forwarded-Proto`/`X-Forwarded-Host`, or enroll agents with an explicit `https://…` `--server`.
-- [ ] **Choose the agent re-point strategy (Section 7.3):** A) keep `10.10.10.96:4400` answering (no node changes), B) re-enrol all ~28 nodes via Deadline RemoteControl, or C) re-enrol to a stable DNS name. If rotating the key, re-push `--key` at the same time.
+- [ ] **Choose the agent re-point strategy (Section 7.3):** A) keep `10.10.10.96:4400` answering (no node changes), B) re-enrol all ~28 nodes, or C) re-enrol to a stable DNS name. If rotating the key, re-push `--key` at the same time.
 - [ ] **Mounting:** prefer a **subdomain root** (`tracker.example.com/`). If a sub-path is mandatory, strip the prefix in the proxy (`proxy_pass …:4400/;`) and serve the page with a trailing slash; otherwise patch `app.js` fetch paths + server static serving.
 - [ ] **Do NOT** redirect agent traffic (`/api/agent/*`, `/agent`, `/api/agent/download/*`) to HTTPS or a sub-path, and do NOT rewrite the LAN enrol URLs to the public domain (they are http-LAN by design).
 - [ ] **Hardening (defense-in-depth):** add CSP / X-Frame-Options / X-Content-Type-Options at the proxy; add CSRF protection or SameSite session once auth exists; suppress raw `err.message`.

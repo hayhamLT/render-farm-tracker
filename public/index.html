@@ -293,10 +293,9 @@
     <div class="panel setup-hero">
       <div class="hero-ic" data-ic="check"></div>
       <div>
-        <h2>New machines join by themselves</h2>
-        <p class="hint">A machine shows up within a few minutes of the tracker agent running on it. With a
-          <b>Deadline Worker</b> that's automatic; <b>without Deadline</b>, install the agent once — via the
-          commands below, or pushed to many machines at once with Group Policy / a startup script.</p>
+        <h2>New machines join once the agent runs</h2>
+        <p class="hint">A machine shows up within a few minutes of the tracker agent running on it. Install the
+          agent once — via the commands below, or pushed to many machines at once with Group Policy / a startup script.</p>
       </div>
     </div>
 
@@ -314,15 +313,14 @@
 
       <div class="panel guide-card">
         <h3><span data-ic="apple"></span> New Mac</h3>
-        <p class="hint">Nothing to do — with a Deadline Worker a Mac enrolls <i>and</i> elevates itself; the green shield appears on its own.</p>
-        <p class="hint">No Deadline, or it's stuck? Run the macOS commands below once.</p>
+        <p class="hint">Run the macOS commands below once (Step 1, then Step 2); the green shield appears on its own.</p>
       </div>
     </div>
 
     <details class="panel">
-      <summary>Enroll a machine yourself (no Deadline needed)</summary>
+      <summary>Enroll a machine yourself</summary>
       <p class="hint">Run on the machine: <b>Step 1</b> adds it to the dashboard, <b>Step 2</b> enables silent installs.
-        For many machines at once, run Step 1 as a <b>Group Policy / login startup script</b> — same command, no Deadline.</p>
+        For many machines at once, run Step 1 as a <b>Group Policy / login startup script</b> — same command.</p>
       <div class="enrol-step"><span class="enrol-n">1</span> Monitor <span class="hint">(no admin)</span></div>
       <table>
         <tr>
@@ -474,7 +472,7 @@
       <details class="qa"><summary>A machine is online but updates never run on it</summary>
         <p class="hint">The agent is stuck. It usually fixes itself; to fix it now, click the <b>⏻ Restart</b> button on its card. (A restart interrupts any render on that machine.)</p></details>
       <details class="qa"><summary>A machine never appears on the dashboard</summary>
-        <p class="hint">It needs the tracker agent installed. With a Deadline Worker that's automatic; otherwise install it once — the commands above, or pushed via Group Policy / a startup script.</p></details>
+        <p class="hint">It needs the tracker agent installed. Install it once — the commands above, or pushed via Group Policy / a startup script.</p></details>
       <details class="qa"><summary>An update ran but the version didn't change</summary>
         <p class="hint">The tracker double-checks every install, so it flags one that didn't actually change. Usually it's Redshift bundled inside Cinema 4D — update Cinema 4D instead.</p></details>
       <details class="qa"><summary>An install is stuck or taking too long</summary>

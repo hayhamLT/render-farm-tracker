@@ -1,7 +1,7 @@
 // Machines — the farm from the update point of view: which machines are behind, updating, or can't
 // update right now (offline, rendering, not set up). Select machines to update everything on them.
 // A machine's details (#/machines/<hostname>) list its apps with an Update button each, its install
-// history and the basics. Deadline shows only when it's down.
+// history and the basics.
 import { html } from '../lib/html.js';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { signal } from '@preact/signals-core';
@@ -11,7 +11,7 @@ import { get } from '../lib/api.js';
 import { pref, openMenu, isTyping } from '../lib/ui.js';
 import { ago, plural, parseJSON } from '../lib/format.js';
 import {
-  normalizeProducts, productStatus, activeJobFor, nodeActivity, deadlineStatus, isTracked, agentOutdated, canShutdown, osVersionLabel, selfUpdateBehind, nudgeWaiting, AGENT_NAME,
+  normalizeProducts, productStatus, activeJobFor, nodeActivity, isTracked, agentOutdated, canShutdown, osVersionLabel, selfUpdateBehind, nudgeWaiting, AGENT_NAME,
 } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { canUpdate, machineUpdates, installerState } from '../lib/updater.js';
@@ -41,13 +41,12 @@ export function useMachineModel() {
     const names = new Map(products.map((p) => [p.key, p.name]));
     const nodes = s.nodes.map((n) => {
       const activity = nodeActivity(s, n, names);
-      const dl = deadlineStatus(n);
       const behind = machineUpdates(s, tracked, n);
       const failed = s.jobs.filter((j) => j.hostname === n.hostname && j.status === 'failed' && j.updated_at > Date.now() - DAY);
       // Newest of: a success still on the jobs list, or what the timeline recorded (30 days).
       const lastOk = s.jobs.filter((j) => j.hostname === n.hostname && j.status === 'success')
         .reduce((t, j) => Math.max(t, j.updated_at), n.last_install || 0);
-      return { node: n, activity, dl, behind, failed, lastOk };
+      return { node: n, activity, behind, failed, lastOk };
     });
     return { s, products, tracked, names, nodes };
   }, [s]);
@@ -91,7 +90,7 @@ const SORTS = {
 };
 
 // ---------------------------------------------------------------- per-machine menu
-export function machineMenuItems(node, dl) {
+export function machineMenuItems(node) {
   return [
     { label: 'Details', icon: 'chevron', onSelect: () => go('machines', node.hostname) },
     '-',
@@ -100,7 +99,6 @@ export function machineMenuItems(node, dl) {
       : { label: node.wake && node.wake.state === 'waking' ? 'Waking…' : 'Wake', icon: 'power', disabled: node.wake && node.wake.state === 'waking', onSelect: () => act.wake([node]) },
     { label: node.os === 'macos' ? 'Sleep (shut down)' : 'Shut down', icon: 'moon', danger: true, disabled: !canShutdown(node),
       title: canShutdown(node) ? null : 'Needs the machine online with a recent agent', onSelect: () => act.shutdown([node]) },
-    dl && dl.state !== 'ok' && dl.canFix ? { label: 'Fix Deadline startup', icon: 'zap', onSelect: () => act.fixDeadline([node]) } : null,
     '-',
     { label: 'Hide from dashboard', icon: 'eyeOff', onSelect: () => act.setHidden([node.hostname], true) },
   ];
@@ -116,7 +114,7 @@ function updateMachines(model, nodes) {
 
 // ---------------------------------------------------------------- status
 function StatusCell({ m }) {
-  const { node: n, activity: a, dl } = m;
+  const { node: n, activity: a } = m;
   const tags = [];
   if (!n.online && n.reach && n.reach.ok) {
     tags.push(html`<span class="tag warn" title=${`${n.hostname} answers on the network at ${n.reach.addr} (${n.reach.how}), but its agent hasn't checked in since ${ago(n.last_seen)}. Run the one-click installer on it, or restart it.`}>On, agent silent</span>`);
@@ -126,7 +124,6 @@ function StatusCell({ m }) {
   else if (a.key === 'rendering') tags.push(html`<span class="tag violet" title="Installs wait until it's idle">Rendering</span>`);
   else tags.push(html`<span class="tag muted">Idle</span>`);
   if (n.online && n.pending_reboot) tags.push(html`<span class="tag warn" title="Windows is waiting for a restart — some installs (NVIDIA) won't run until then">Restart pending</span>`);
-  if (dl && dl.state === 'down') tags.push(html`<span class="tag bad" title=${dl.detail}>Deadline down</span>`);
   if (n.elevated === 0) tags.push(html`<span class="tag warn" title="Run the elevate command once so installs don't stop at a permission prompt">Not set up</span>`);
   if (n.wake && n.wake.state === 'waking') tags.push(html`<span class="tag accent"><${Icon} name="spinner" cls="spin" />Waking</span>`);
   return html`<span class="tags">${tags}</span>`;
@@ -184,7 +181,7 @@ function MachineTable({ rows, model, head = true }) {
       <th style="width:36px"></th><th>Machine</th><th>Status</th><th>Updates</th><th>Last update</th><th></th>
     </tr></thead>` : null}
     <tbody>${rows.map((m) => {
-      const { node: n, dl } = m;
+      const { node: n } = m;
       const sel = selected.value.has(n.id);
       return html`<tr key=${n.id} class=${`s-${rowState(m)}${sel ? ' selected' : ''}`} onClick=${() => go('machines', n.hostname)}>
         <td onClick=${(e) => e.stopPropagation()}><input type="checkbox" aria-label=${`Select ${n.hostname}`} checked=${sel} onClick=${() => toggleSel(n.id)} /></td>
@@ -194,7 +191,7 @@ function MachineTable({ rows, model, head = true }) {
         <td class="nowrap dim">${m.lastOk ? ago(m.lastOk, model.s.now) : '—'}${agentOutdated(model.s, n) ? html` <span class="tag muted" title=${`Agent ${n.agent_version} — updates itself to ${model.s.latestAgentVersion}`}>old agent</span>` : ''}</td>
         <td class="right nowrap" onClick=${(e) => e.stopPropagation()}>
           ${m.behind.length && !blockedReason(n) ? html`<button class="btn sm" onClick=${() => updateMachines(model, [n])}><${Icon} name="download" />Update</button>` : null}
-          <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => openMenu(e.currentTarget, machineMenuItems(n, dl))}><${Icon} name="more" /></button>
+          <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => openMenu(e.currentTarget, machineMenuItems(n))}><${Icon} name="more" /></button>
         </td>
       </tr>`;
     })}</tbody>
@@ -203,7 +200,7 @@ function MachineTable({ rows, model, head = true }) {
 
 // Grid view: one card per machine, same information as a row.
 function MachineCard({ m, model }) {
-  const { node: n, dl } = m;
+  const { node: n } = m;
   const sel = selected.value.has(n.id);
   const st = rowState(m);
   return html`<article class=${`card mcard3 s-${st}${sel ? ' selected' : ''}`} onClick=${() => go('machines', n.hostname)}>
@@ -211,7 +208,7 @@ function MachineCard({ m, model }) {
       <label class="mc3-check" onClick=${(e) => e.stopPropagation()}><input type="checkbox" aria-label=${`Select ${n.hostname}`} checked=${sel} onChange=${() => toggleSel(n.id)} /></label>
       <${OsStatus} node=${n} />
       <b class="mc3-name">${n.hostname}</b>
-      <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => { e.stopPropagation(); openMenu(e.currentTarget, machineMenuItems(n, dl)); }}><${Icon} name="more" /></button>
+      <button class="btn ghost sm icon" aria-label="Machine actions" onClick=${(e) => { e.stopPropagation(); openMenu(e.currentTarget, machineMenuItems(n)); }}><${Icon} name="more" /></button>
     </header>
     <${StatusCell} m=${m} />
     <div class="mc3-updates"><${BehindCell} m=${m} model=${model} /></div>
@@ -331,7 +328,7 @@ function MachineDrawer({ hostname, model }) {
       <button class="btn ghost icon" aria-label="Close" onClick=${close}><${Icon} name="close" /></button></header>
       <div class="content"><${Empty}>No machine called ${hostname} (it may be hidden).<//></div></aside>`;
   }
-  const { node: n, dl } = m;
+  const { node: n } = m;
   const s = model.s;
   const apps = model.tracked.filter((p) => (n.software || []).some((x) => x.product_key === p.key) || activeJobFor(s, n, p.key));
   const wol = parseJSON(n.wol_info);
@@ -344,7 +341,7 @@ function MachineDrawer({ hostname, model }) {
       <${StatusCell} m=${m} />
       <span class="grow"></span>
       ${m.behind.length ? html`<button class="btn sm primary" disabled=${!!blockedReason(n)} onClick=${() => updateMachines(model, [n])}><${Icon} name="download" />Update all (${m.behind.length})</button>` : null}
-      <button class="btn sm" onClick=${(e) => openMenu(e.currentTarget, [...machineMenuItems(n, dl).slice(2), '-', { label: 'Ask the farm about it', icon: 'sparkle', onSelect: () => askAbout(`What's going on with ${n.hostname}? Anything wrong, and what should I do?`) }])}><${Icon} name="more" /></button>
+      <button class="btn sm" onClick=${(e) => openMenu(e.currentTarget, [...machineMenuItems(n).slice(2), '-', { label: 'Ask the farm about it', icon: 'sparkle', onSelect: () => askAbout(`What's going on with ${n.hostname}? Anything wrong, and what should I do?`) }])}><${Icon} name="more" /></button>
       <button class="btn ghost icon" aria-label="Close" onClick=${close}><${Icon} name="close" /></button>
     </header>
     <div class="content">
@@ -354,7 +351,6 @@ function MachineDrawer({ hostname, model }) {
       ${!n.online && !(n.reach && n.reach.ok) ? html`<div class="banner warn"><${Icon} name="power" /><span class="grow">Offline — last seen ${ago(n.last_seen, s.now)}. Updates wait until it's back.${wol && wol.note ? ` ${wol.note}` : ''}</span>
         <button class="btn sm" disabled=${n.wake && n.wake.state === 'waking'} onClick=${() => act.wake([n])}>${n.wake && n.wake.state === 'waking' ? 'Waking…' : 'Wake'}</button></div>` : null}
       ${n.elevated === 0 ? html`<div class="banner warn"><${Icon} name="shieldOff" /><span class="grow">Not set up for silent installs — run the elevate command once on this machine (Settings → Enroll a machine).</span></div>` : null}
-      ${dl && dl.state === 'down' ? html`<div class="banner bad"><${Icon} name="alert" /><span class="grow">${dl.detail}</span>${dl.canFix ? html`<button class="btn sm" onClick=${() => act.fixDeadline([n])}>Fix startup</button>` : null}</div>` : null}
 
       <section>
         <h3 class="section-title">Apps</h3>
@@ -382,7 +378,6 @@ function MachineDrawer({ hostname, model }) {
           <dt>GPU</dt><dd>${n.gpu || '—'}${n.gpu_driver ? html` · driver <span class="mono">${n.gpu_driver}</span>` : ''}</dd>
           <dt>Disk</dt><dd style=${n.disk_free_gb != null && n.disk_free_gb < 20 ? 'color:var(--warn)' : ''}>${n.disk_free_gb != null ? `${Math.round(n.disk_free_gb)} GB free of ${Math.round(n.disk_total_gb || 0)} GB` : '—'}</dd>
           <dt>${AGENT_NAME}</dt><dd class="mono">${n.agent_version || '—'}${agentOutdated(s, n) ? html` <span style="color:var(--warn)">(updating itself to ${s.latestAgentVersion})</span>` : ''}</dd>
-          ${dl ? html`<dt>Deadline</dt><dd>${dl.state === 'ok' ? 'Running' : dl.label}</dd>` : null}
         </dl>
       </section>
     </div>
@@ -429,7 +424,6 @@ export function MachinesView() {
         <div><span class="l">Updates waiting</span><b>${nodes.reduce((c, m) => c + m.behind.length, 0)}</b></div>
         <div><span class="l">Rendering now</span><b>${nodes.filter((m) => m.activity.key === 'rendering').length}</b></div>
         <div><span class="l">Restart pending</span><b>${nodes.filter((m) => m.node.online && m.node.pending_reboot).length}</b></div>
-        <div><span class="l">Out of Deadline</span><b class=${nodes.filter((m) => m.dl && m.dl.state === 'down').length ? 'bad' : ''}>${nodes.filter((m) => m.dl && m.dl.state === 'down').length}</b></div>
       </div>
     </section>
 

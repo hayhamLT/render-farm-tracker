@@ -63,7 +63,7 @@ function Sidebar() {
     history: failed ? { n: failed, cls: 'bad', title: `${failed} failed in the last 24 h` } : null,
   };
   return html`<aside class="sidebar">
-    <div class="brand"><span class="brand-mark"><${Icon} name="zap" /></span><div><b>deadline_farm</b><span>tracker</span></div></div>
+    <div class="brand"><span class="brand-mark"><${Icon} name="zap" /></span><div><b>render_farm</b><span>tracker</span></div></div>
     <nav class="nav" aria-label="Sections">
       ${ROUTES.map((t) => html`<button key=${t.name} class=${'nav-item' + (r === t.name ? ' active' : '')} onClick=${() => go(t.name)} title=${`${t.label}  ·  g then ${t.key}`} aria-current=${r === t.name ? 'page' : null}>
         <${Icon} name=${t.icon} /><span class="label">${t.label}</span>

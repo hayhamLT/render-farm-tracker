@@ -1,10 +1,10 @@
 #!/bin/bash
 # Elevate a macOS node to the root LaunchDaemon agent.
 # Usage:  bash mac_elevate.sh '<admin-password>'
-# The pipe to sudo lives INSIDE this file (bash-internal), so Deadline's
+# The pipe to sudo lives INSIDE this file (bash-internal), so a remote runner's
 # command parser never sees a pipe to split on.
 PW="$1"
-# Deadline can pass the literal surrounding quotes — strip them.
+# A remote runner can pass the literal surrounding quotes — strip them.
 PW="${PW#\'}"; PW="${PW%\'}"
 PW="${PW#\"}"; PW="${PW%\"}"
 [ -z "$PW" ] && { echo "no password given"; exit 2; }

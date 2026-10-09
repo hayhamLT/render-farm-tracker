@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { execFile, execFileSync } = require('node:child_process');
+const { execFileSync } = require('node:child_process');
 const { db, logEvent } = require('./lib/db');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
@@ -305,7 +305,7 @@ setInterval(() => { try { rollouts.tick(); } catch (e) { console.error('rollouts
 // "Ask the farm" — local Ollama on this server (config.ask = {url, model} to override).
 const ask = createAsk({
   url: (config.ask && config.ask.url) || process.env.OLLAMA_URL || 'http://127.0.0.1:11434',
-  model: (config.ask && config.ask.model) || 'granite4.1:8b',   // the model the DeadlineWatcher analysts already keep loaded
+  model: (config.ask && config.ask.model) || 'granite4.1:8b',   // default local model
 });
 // A valid rollout id from a request body, or null.
 const rolloutIdFrom = (b) => {
@@ -1163,36 +1163,6 @@ function inMaintenanceWindow() {
   return s < e ? (now >= s && now < e) : (now >= s || now < e);  // handles overnight windows
 }
 
-// Reboot a node through Deadline's RemoteControl (the Deadline Worker reboots the
-// machine). This works even when the tracker AGENT is wedged, because it goes through
-// the Worker, not the agent — exactly what's needed to recover a hung agent.
-const DEADLINE_CMD = config.deadlineCommand ||
-  (process.platform === 'darwin' ? '/Applications/Thinkbox/Deadline10/Resources/deadlinecommand'
-    : process.platform === 'win32' ? 'C:\\Program Files\\Thinkbox\\Deadline10\\bin\\deadlinecommand.exe'
-      : '/opt/Thinkbox/Deadline10/bin/deadlinecommand');
-function rebootViaDeadline(hostname) {
-  return new Promise((resolve, reject) => {
-    if (!fs.existsSync(DEADLINE_CMD)) {
-      return reject(new Error(`deadlinecommand not found at ${DEADLINE_CMD} (set config.deadlineCommand)`));
-    }
-    execFile(DEADLINE_CMD, ['RemoteControl', hostname, 'RestartMachine'], { timeout: 15000 }, (err, stdout, stderr) => {
-      const out = `${stdout || ''}${stderr || ''}`.trim();
-      // Check FAILURE first: deadlinecommand prints a generic "Sent remote command" line
-      // even when it fails, alongside the real reason (e.g. "could not resolve Worker
-      // name … may not exist on the network"). So a named error wins.
-      if (/could not|cannot connect|may not exist|no .*(slave|worker)|unable|invalid|denied|exception|not found|failed to/i.test(out)) {
-        return reject(new Error(out.replace(/\s+/g, ' ').slice(0, 300)));
-      }
-      // Clear success: the Worker accepted the command.
-      if (/Connection Accepted/i.test(out)) return resolve({ confirmed: true });
-      // Ambiguous (timeout / empty): the machine very often reboots before deadlinecommand
-      // gets a reply, so it actually worked. Report SENT-unconfirmed, not a scary failure —
-      // the node going offline then returning is the real confirmation.
-      return resolve({ confirmed: false });
-    });
-  });
-}
-
 // IPv4 directed-broadcast address for an interface (addr | ~netmask).
 function ipv4Broadcast(addr, mask) {
   const a = addr.split('.').map(Number), m = mask.split('.').map(Number);
@@ -1383,6 +1353,21 @@ function requestStop(job, reason) {
   return 'cancelled';
 }
 
+// PowerShell for the Windows scripts below: the Python that runs the agent. The tracker's own
+// C:\Program Files\TrackerAgent\python314 if it's there, else the newest machine-wide
+// C:\Program Files\Python3*, else python.exe on PATH, never the WindowsApps stub (it only opens
+// the Microsoft Store). Leaves $py $null when there is none.
+const WIN_FIND_PYTHON = `$py = "C:\\Program Files\\TrackerAgent\\python314\\python.exe"
+if (-not (Test-Path $py)) {
+  $py = (Get-ChildItem "C:\\Program Files\\Python3*\\python.exe" -ErrorAction SilentlyContinue |
+    Sort-Object { [int]($_.Directory.Name -replace '^Python(\\d+).*$', '$1') } -Descending | Select-Object -First 1).FullName
+}
+if (-not $py) {
+  $py = (Get-Command python.exe -All -ErrorAction SilentlyContinue |
+    Where-Object { $_.Source -notlike '*\\WindowsApps\\*' } | Select-Object -First 1).Source
+}`;
+const WIN_NO_PYTHON = 'No Python 3 found (looked for C:\\Program Files\\TrackerAgent\\python314, C:\\Program Files\\Python3*, then python.exe on PATH). Install Python 3 for all users, then run this again.';
+
 // One-time ELEVATED setup (Windows): re-install the agent as a Scheduled Task
 // running as the logged-on user with HIGHEST privileges — elevated (no UAC on
 // installers) but still in the user's session (so mx1's Maxon login stays valid).
@@ -1394,9 +1379,8 @@ if (-not ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal
   throw "Run this from an ELEVATED (Administrator) PowerShell."
 }
 $dir = "$env:ProgramData\\TrackerAgent"
-$py = "C:\\Program Files\\Thinkbox\\Deadline10\\bin\\python3\\python.exe"
-if (-not (Test-Path $py)) { $py = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
-if (-not $py) { throw "No Python found: install Deadline (it brings its own Python) or Python 3, then run this again." }
+${WIN_FIND_PYTHON}
+if (-not $py) { throw "${WIN_NO_PYTHON}" }
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Invoke-WebRequest "${base}/agent" -OutFile "$dir\\render_agent.py" -UseBasicParsing
 # Run elevated as SYSTEM so the agent works fully HEADLESS — no interactive login
@@ -1429,8 +1413,8 @@ Register-ScheduledTask -TaskName "TrackerAgentElevated" -Action $act -Trigger @(
   -Principal $prin -Settings $set -Force | Out-Null
 # Let any logged-in user START this task (it still RUNS as SYSTEM). Without this, a task
 # registered by SYSTEM can only be started by an admin — so when the agent dies, nothing
-# short of someone typing an admin password can revive it, and remote repair (a Deadline
-# job, which runs as the desktop user) fails with "Access is denied". GA for Admins/SYSTEM,
+# short of someone typing an admin password can revive it, and a remote repair running as
+# the desktop user fails with "Access is denied". GA for Admins/SYSTEM,
 # read+execute for authenticated users.
 try {
   $svc = New-Object -ComObject Schedule.Service; $svc.Connect()
@@ -1616,7 +1600,6 @@ echo "Log: /var/log/tracker-agent.log"
 }
 
 // ---- Non-privileged variants: per-user service, no sudo/admin required.
-// Used for push-enrolment via Deadline RemoteControl (runs as the worker's user).
 
 function macEnrollUser(base) {
   return `#!/bin/bash
@@ -1647,14 +1630,13 @@ echo "tracker-agent installed on \$(hostname)"
 `;
 }
 
-// PowerShell that uses Deadline's bundled Python (always present on a worker).
+// PowerShell that runs the agent on the machine's Python (WIN_FIND_PYTHON).
 // No-admin persistence: an HKCU Run key (starts at user logon) plus an
 // immediate detached launch so the node checks in right away.
 function winEnrollUser(base) {
   return `$ErrorActionPreference = "Stop"
 $dir = "$env:ProgramData\\TrackerAgent"
-$py = "C:\\Program Files\\Thinkbox\\Deadline10\\bin\\python3\\python.exe"
-if (-not (Test-Path $py)) { $py = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+${WIN_FIND_PYTHON}
 # An elevated node keeps its elevation: the agent file there belongs to SYSTEM and a
 # standard user CAN'T overwrite it (that's what killed the remote repair of RAZER-01,
 # Sep 2026). So check for the task BEFORE touching any file, and just restart it.
@@ -1669,11 +1651,12 @@ if ($elev) {
     return
   } catch {
     # A task registered by SYSTEM can only be STARTED by an admin, so a repair run as the
-    # desktop user (a Deadline job) lands here. Don't give up: install a user-level agent so
+    # desktop user lands here. Don't give up: install a user-level agent so
     # the machine reports again; the SYSTEM task takes over again at the next boot.
     Write-Host "elevated task can't be started as $env:USERNAME — installing a user-level agent instead"
   }
 }
+if (-not $py) { throw "${WIN_NO_PYTHON}" }
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 # If ProgramData isn't writable for this user, fall back to their own folder rather than failing.
 try {
@@ -1781,7 +1764,9 @@ function fullState() {
   ).all().map((r) => [r.node_id, r.at]));
   const nodes = db.prepare('SELECT * FROM nodes ORDER BY hostname').all()
     .filter((n) => !_hidden.includes(String(n.hostname || '').split('.')[0].toUpperCase()))
-    .map((n) => ({
+    // Older databases still have these two columns from a removed feature; they are never
+    // written any more and are not passed on.
+    .map(({ deadline_info, deadline_fix, ...n }) => ({
     ...n,
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     wake: wakesNow.get(n.id) || null,
@@ -2153,7 +2138,7 @@ function handleCheckin(body) {
     // it. Disk + pending-reboot reflect current state, so they update every time.
     const macsCsv = Array.isArray(hh.macs) && hh.macs.length
       ? hh.macs.map(String).join(',') : null;   // for Wake-on-LAN; COALESCE so a miss keeps it
-    // A partial health report (e.g. just a Deadline status after a fix) must not blank out
+    // A partial health report (one without the telemetry) must not blank out
     // disk / pending-reboot / GPU load, which the full report always carries.
     const fullHealth = 'macs' in hh || 'diskFreeGB' in hh || 'gpu' in hh;
     if (fullHealth) {
@@ -2172,21 +2157,6 @@ function handleCheckin(body) {
       macsCsv,
       typeof hh.gpuUtil === 'number' ? hh.gpuUtil : null,
       node.id);
-    }
-    if (hh.deadline && typeof hh.deadline === 'object' && Object.keys(hh.deadline).length) {
-      const dl = hh.deadline;
-      db.prepare('UPDATE nodes SET deadline_info = ? WHERE id = ?').run(JSON.stringify({
-        installed: !!dl.installed, launcher: !!dl.launcher, worker: !!dl.worker, autostart: !!dl.autostart,
-        how: Array.isArray(dl.how) ? dl.how.map(String).slice(0, 6) : [],
-        autologon: dl.autologon == null ? null : !!dl.autologon, user: dl.user ? String(dl.user).slice(0, 120) : null,
-        at: now,
-      }), node.id);
-    }
-    if (hh.deadlineFix && typeof hh.deadlineFix === 'object') {
-      const fx = { ok: !!hh.deadlineFix.ok, message: String(hh.deadlineFix.message || '').slice(0, 500), at: now };
-      db.prepare('UPDATE nodes SET deadline_fix = ? WHERE id = ?').run(JSON.stringify(fx), node.id);
-      logEvent('node', `Deadline startup fix on ${node.hostname}: ${fx.ok ? 'done' : 'failed'} — ${fx.message}`);
-      timeline.note(node.id, 'fix', fx.ok ? 'ok' : 'failed', { message: fx.message });
     }
     if (hh.wol && typeof hh.wol === 'object') {
       db.prepare('UPDATE nodes SET wol_ready = ?, wol_info = ? WHERE id = ?').run(
@@ -2314,7 +2284,7 @@ function handleCheckin(body) {
     latestAgentSha256: offered ? LATEST_AGENT_SHA : undefined,
     pollSeconds: Math.max(15, Math.floor(config.offlineAfterSeconds / 3)),
     jobs,
-    // Agent-side reboot fallback (set when Deadline RemoteControl couldn't reach the box).
+    // Agent-side reboot (requested from the dashboard's Restart).
     reboot: cmds.some((c) => c.kind === 'reboot') || undefined,
     // Wake-on-LAN relay: broadcast magic packets for these neighbours from this node.
     wake: cmds.filter((c) => c.kind === 'wake_relay').map((c) => c.payload),
@@ -2322,8 +2292,6 @@ function handleCheckin(body) {
     cancel: stopIds.length ? stopIds : undefined,
     // Agent-side full power-off (requested from the Fleet ⏻ menu → Shut down).
     shutdown: cmds.some((c) => c.kind === 'shutdown') || undefined,
-    // Make Deadline start by itself (dashboard "Fix Deadline startup"), agents 2.31.0+.
-    deadlineFix: cmds.some((c) => c.kind === 'deadline_fix') || undefined,
     // One-off shell commands from the "Run command" panel (POST /api/run), agents 2.41.0+.
     run: cmds.filter((c) => c.kind === 'run').map((c) => c.payload),
     // One-time fleet migration to a new tracker server (gated by config.rehome).
@@ -3213,13 +3181,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // Reboot a machine. Two paths, each covering the other's blind spot:
-    //   • agent — reliable when the box is ONLINE (its agent checks in); the agent runs
-    //     the OS reboot itself. Can't help if the agent is dead/offline.
-    //   • Deadline RemoteControl — works even when the tracker agent is dead, but needs
-    //     Deadline's Launcher reachable (port 17000), which is flaky on this farm.
-    // So: prefer the AGENT for online+capable machines, and fall back to Deadline for
-    // anything the agent can't reach (offline, or an agent too old to handle the flag).
+    // Reboot a machine through its agent, which runs the OS reboot itself. Needs the box
+    // ONLINE (its agent checks in) with an agent new enough to handle the flag (2.17.3+).
     const nodeReboot = p.match(/^\/api\/nodes\/(\d+)\/reboot$/);
     if (req.method === 'POST' && nodeReboot) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeReboot[1]));
@@ -3232,24 +3195,19 @@ const server = http.createServer(async (req, res) => {
         timeline.note(node.id, 'power', 'restart', { via: 'agent' });
         return sendJson(res, 200, { ok: true, hostname: node.hostname, confirmed: false, via: 'agent' });
       }
-      // Agent can't do it (offline, or too old) — try Deadline if it's present.
-      try {
-        const r = await rebootViaDeadline(node.hostname);
-        logEvent('node', `Reboot ${r.confirmed ? 'sent' : 'sent (unconfirmed)'} to ${node.hostname} (via Deadline RemoteControl)`);
-        timeline.note(node.id, 'power', 'restart', { via: 'deadline' });
-        return sendJson(res, 200, { ok: true, hostname: node.hostname, confirmed: r.confirmed, via: 'deadline' });
-      } catch (e) {
-        const hint = node.macs
+      // Agent can't do it (offline, or too old).
+      const why = online
+        ? ` Its agent (${node.agent_version || 'unknown'}) is too old to reboot it; agents update themselves within a few minutes, so try again shortly.`
+        : node.macs
           ? ` It's offline, so use Wake to power it on instead.`
           : ` It's offline and we have no Wake-on-LAN address for it yet.`;
-        return sendJson(res, 502, { error: `Can't reach ${node.hostname} to reboot.${hint} (${e.message})` });
-      }
+      return sendJson(res, 502, { error: `Can't reach ${node.hostname} to reboot.${why}` });
     }
 
-    // Shut DOWN a machine — full power-off (NOT a reboot). Agent-only: Deadline can't
-    // power a box off cleanly, and an off node is brought back with Wake-on-LAN. Needs the
-    // agent online + new enough to understand the `shutdown` directive (>= 2.28.0); older
-    // agents self-update within a few minutes, so the error tells the user to retry.
+    // Shut DOWN a machine — full power-off (NOT a reboot). Agent-only: an off node is
+    // brought back with Wake-on-LAN. Needs the agent online + new enough to understand the
+    // `shutdown` directive (>= 2.28.0); older agents self-update within a few minutes, so
+    // the error tells the user to retry.
     const nodeShutdown = p.match(/^\/api\/nodes\/(\d+)\/shutdown$/);
     if (req.method === 'POST' && nodeShutdown) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeShutdown[1]));
@@ -3275,25 +3233,6 @@ const server = http.createServer(async (req, res) => {
       timeline.note(node.id, 'power', node.os === 'macos' ? 'sleep' : 'shutdown', { via: 'agent' });
       return sendJson(res, 200, { ok: true, hostname: node.hostname, via: 'agent',
         note: node.os === 'macos' ? 'Macs are put to sleep instead of shut down — a shut-down Mac can\'t be woken over the network.' : undefined });
-    }
-
-    // Wake-on-LAN — power on a machine that's off/asleep (Deadline-free). Uses the MAC(s)
-    // the agent reported on its last check-in.
-    // Fix Deadline startup: have the machine's agent register Deadline to start at logon of
-    // its desktop user and start it now. Windows, agent 2.31.0+, machine online.
-    const nodeDlFix = p.match(/^\/api\/nodes\/(\d+)\/deadline-fix$/);
-    if (req.method === 'POST' && nodeDlFix) {
-      const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeDlFix[1]));
-      if (!node) return sendJson(res, 404, { error: 'no such node' });
-      const online = node.last_seen != null && Date.now() - node.last_seen < (config.offlineAfterSeconds || 180) * 1000;
-      if (!online) return sendJson(res, 400, { error: `${node.hostname} is offline.` });
-      if (node.os !== 'windows') return sendJson(res, 400, { error: 'The automatic Deadline startup fix is Windows-only.' });
-      if (!node.agent_version || cmpVersionServer(node.agent_version, '2.31.0') < 0) {
-        return sendJson(res, 400, { error: `${node.hostname}'s agent (${node.agent_version || 'unknown'}) is too old — it updates itself within a few minutes; try again then.` });
-      }
-      commands.queue(node.id, 'deadline_fix');
-      logEvent('node', `Deadline startup fix requested for ${node.hostname}`);
-      return sendJson(res, 200, { ok: true, hostname: node.hostname });
     }
 
     // Run a one-off shell command on chosen machines through the tracker's own agent.
@@ -3336,6 +3275,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { runs: rows });
     }
 
+    // Wake-on-LAN — power on a machine that's off/asleep. Uses the MAC(s) the agent reported
+    // on its last check-in.
     const nodeWake = p.match(/^\/api\/nodes\/(\d+)\/wake$/);
     if (req.method === 'POST' && nodeWake) {
       const node = db.prepare('SELECT * FROM nodes WHERE id = ?').get(Number(nodeWake[1]));

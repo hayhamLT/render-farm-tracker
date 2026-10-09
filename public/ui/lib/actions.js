@@ -4,7 +4,7 @@
 import { post, put, del, api } from './api.js';
 import { refresh } from './store.js';
 import { confirm, toast } from './ui.js';
-import { canShutdown, deadlineStatus } from './domain.js';
+import { canShutdown } from './domain.js';
 import { plural } from './format.js';
 
 const names = (nodes, max = 8) => nodes.slice(0, max).map((n) => n.hostname).join(', ') + (nodes.length > max ? ` +${nodes.length - max} more` : '');
@@ -25,9 +25,8 @@ function report(verb, nodes, { ok, failed }) {
 export async function restart(nodes) {
   nodes = nodes.filter((n) => n.online);
   if (!nodes.length) return toast('Restart only works on online machines.', 'error');
-  if (!await confirm(`Restart ${names(nodes)}? ${nodes.length === 1 ? 'It reboots' : 'They reboot'} within a minute — via the tracker agent, or Deadline if the agent can't be reached — and any render running on ${nodes.length === 1 ? 'it' : 'them'} is interrupted.`,
-    { title: nodes.length === 1 ? 'Restart machine' : `Restart ${nodes.length} machines`, confirmLabel: 'Restart', danger: true,
-      details: 'After a restart, Deadline only comes back on machines where it starts automatically (see the Deadline badge).' })) return;
+  if (!await confirm(`Restart ${names(nodes)}? ${nodes.length === 1 ? 'It reboots' : 'They reboot'} within a minute through the tracker agent, and any render running on ${nodes.length === 1 ? 'it' : 'them'} is interrupted.`,
+    { title: nodes.length === 1 ? 'Restart machine' : `Restart ${nodes.length} machines`, confirmLabel: 'Restart', danger: true })) return;
   report((n) => (n ? `Restart sent to ${n.hostname}.` : 'Restart sent to'), nodes, await forEach(nodes, (n) => post(`/api/nodes/${n.id}/reboot`)));
 }
 
@@ -48,14 +47,6 @@ export async function wake(nodes) {
   if (!await confirm(`Wake ${names(nodes)}? The tracker sends Wake-on-LAN from the server and from online machines on the same network, then tells you when ${nodes.length === 1 ? 'it is' : 'they are'} back — or why not.`,
     { title: nodes.length === 1 ? 'Wake machine' : `Wake ${nodes.length} machines`, confirmLabel: 'Wake' })) return;
   report((n) => (n ? `Waking ${n.hostname} — watching for it to come online…` : 'Waking'), nodes, await forEach(nodes, (n) => post(`/api/nodes/${n.id}/wake`)));
-}
-
-export async function fixDeadline(nodes) {
-  nodes = nodes.filter((n) => { const d = deadlineStatus(n); return d && d.canFix && d.state !== 'ok'; });
-  if (!nodes.length) return toast('No selected machine needs (or supports) the Deadline startup fix.', 'info');
-  if (!await confirm(`Make Deadline start by itself on ${names(nodes)}? The agent registers the Deadline Launcher to start whenever the desktop user logs in (no password needed), turns on "start the Worker with the Launcher", and starts Deadline now if it isn't running.`,
-    { title: 'Fix Deadline startup', confirmLabel: 'Fix it' })) return;
-  report((n) => (n ? `Fixing Deadline startup on ${n.hostname} — the result shows here in about a minute.` : 'Deadline startup fix sent to'), nodes, await forEach(nodes, (n) => post(`/api/nodes/${n.id}/deadline-fix`)));
 }
 
 // ---- visibility ----

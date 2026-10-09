@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs ON a macOS worker (delivered via Deadline RemoteControl Execute).
+# Runs ON a macOS machine, as the user who should own the agent (e.g. over ssh).
 # Installs the tracker agent as a per-user LaunchAgent (no sudo needed).
 # Args: $1 = server base URL, $2 = agent key
 set -e

@@ -12,7 +12,7 @@ export async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) {
-    // Behind deadlinefarm.com the session expired: send the whole window (not just the embedding
+    // Behind a signed-in proxy the session expired: send the whole window (not just the embedding
     // iframe) to the login page, and come back here afterwards.
     const top = window.top || window;
     top.location.href = '/login?next=' + encodeURIComponent(top.location.pathname + top.location.hash);

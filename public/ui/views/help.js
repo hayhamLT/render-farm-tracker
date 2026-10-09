@@ -14,7 +14,7 @@ const TOPICS = [
   ['updates', 'Updating machines', 'download'],
   ['schedule', 'Scheduling & rollouts', 'clock'],
   ['apps', 'Apps & installers', 'package'],
-  ['machines', 'Machines, power & Deadline', 'server'],
+  ['machines', 'Machines & power', 'server'],
   ['alerts', 'Alerts & Ask the farm', 'bell'],
   ['keys', 'Keyboard shortcuts', 'command'],
   ['trouble', 'Troubleshooting', 'alert'],
@@ -85,17 +85,15 @@ const CONTENT = {
     </ul>
     <p><b>Power</b> — from a machine's menu or the selection bar:</p>
     <ul>
-      <li><b>Restart</b> goes through the agent (or Deadline if the agent is unreachable) and interrupts any render.</li>
+      <li><b>Restart</b> goes through the agent and interrupts any render.</li>
       <li><b>Shut down</b> powers a Windows machine fully off. Macs are put to sleep instead — a shut-down Mac can't be woken over the network.</li>
       <li><b>Wake</b> sends Wake-on-LAN from the tracker and from up to 3 online machines on the same network, and reports when the machine is back, or why not.</li>
     </ul>
-    <p><b>Deadline</b> — the tracker isn't a render manager, so it only flags <span class="tag bad">Deadline down</span>: the machine is on, but its Deadline Worker isn't running, so it takes no renders. On Windows, <b>Fix Deadline startup</b> registers the Launcher to start at the desktop user's logon, turns on "start the Worker with the Launcher" — in the machine-wide <i>and</i> that user's own settings — and starts it now. The machine needs automatic login for Deadline to come back after a restart. Macs are handled by their own Deadline Watchdog.</p>
     <${QA} q="Wake doesn't turn a machine on">The agent sets up each wired network card (wake on magic packet, wake from shutdown, Energy-Efficient Ethernet off). What it can't change is the BIOS: enable <b>Wake on LAN</b> / <b>Power On by PCIe</b> and disable <b>ErP/EuP</b> deep power-saving. Add-in 10G cards often can't wake a PC from full shutdown — cable the onboard port.<//>`,
   alerts: () => html`
-    <p><b>Desktop alerts</b> (Settings → Desktop alerts) pop up on your computer while the dashboard is open in a tab, even when you're in another app. When you're looking at the dashboard they appear as a message in the corner instead. It's a per-browser setting, and you can switch off any of the four kinds:</p>
+    <p><b>Desktop alerts</b> (Settings → Desktop alerts) pop up on your computer while the dashboard is open in a tab, even when you're in another app. When you're looking at the dashboard they appear as a message in the corner instead. It's a per-browser setting, and you can switch off any of the three kinds:</p>
     <ul>
       <li>a rollout starts, pauses for the night or finishes,</li>
-      <li>a machine drops out of Deadline,</li>
       <li>a machine goes offline,</li>
       <li>an install fails.</li>
     </ul>
@@ -110,7 +108,7 @@ const CONTENT = {
     </tbody></table>`,
   trouble: () => html`
     <${QA} q="A machine shows offline">"Offline" means no check-in for ~3 minutes. The tracker also probes it: if the machine still answers on the network it says <span class="tag warn">On, agent silent</span> instead — the machine is up but its agent isn't reporting (it didn't come back after a restart, or its scheduled task was removed). Fix it by running the one-click installer on that machine again; it reinstalls and starts the agent in one go. If nothing answers, it's really off — use Wake.<//>
-    <${QA} q="An agent didn't come back after a restart">The Windows agent runs as a scheduled task (SYSTEM, at startup and every 5 minutes) and the Mac agent as a root LaunchDaemon, so it normally returns on its own. It won't if that task/daemon was removed, or its Python moved (a Deadline upgrade can do this). Running the one-click installer again restores it. A machine on Wi-Fi that logs in nobody can also have no network until someone logs in.<//>
+    <${QA} q="An agent didn't come back after a restart">The Windows agent runs as a scheduled task (SYSTEM, at startup and every 5 minutes) and the Mac agent as a root LaunchDaemon, so it normally returns on its own. It won't if that task/daemon was removed, or its Python was moved or uninstalled. Running the one-click installer again restores it. A machine on Wi-Fi that logs in nobody can also have no network until someone logs in.<//>
     <${QA} q="A job failed with “reboot needed”">Windows has updates waiting on a restart and the installer refuses to run. Restart the machine, then Retry (History → Installs, or the machine's details).<//>
     <${QA} q="A job says the machine stopped running it">The download or install ended without its result reaching the tracker (e.g. the agent restarted). Retry — if the software did install, the job corrects itself to success on the next check-in. Each agent keeps a log at C:\\ProgramData\\TrackerAgent\\agent.log.<//>
     <${QA} q="An update never runs on a machine">Open History → Installs: the job says what it's waiting for — a render to finish, the machine to come back online, elevation, its own current install, or a scheduled start time.<//>

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals-core';
 import { farm } from '../lib/store.js';
 import { go } from '../lib/router.js';
-import { normalizeProducts, deadlineStatus, canShutdown, ACTIVE } from '../lib/domain.js';
+import { normalizeProducts, canShutdown, ACTIVE } from '../lib/domain.js';
 import * as act from '../lib/actions.js';
 import { Icon, OsStatus, ProductLogo } from './common.js';
 import { askOpen } from './ask.js';
@@ -33,8 +33,6 @@ function buildItems(s) {
     if (n.online) items.push({ group: 'Machine actions', label: `Restart ${n.hostname}`, icon: 'refresh', keywords: tags, hidden: true, run: () => act.restart([n]) });
     else items.push({ group: 'Machine actions', label: `Wake ${n.hostname}`, icon: 'power', keywords: tags, hidden: true, run: () => act.wake([n]) });
     if (canShutdown(n)) items.push({ group: 'Machine actions', label: `Shut down ${n.hostname}`, icon: 'moon', keywords: tags, hidden: true, run: () => act.shutdown([n]) });
-    const d = deadlineStatus(n);
-    if (d && d.canFix && d.state !== 'ok') items.push({ group: 'Machine actions', label: `Fix Deadline startup on ${n.hostname}`, icon: 'zap', keywords: tags + ' deadline', hidden: true, run: () => act.fixDeadline([n]) });
   }
   for (const p of normalizeProducts(s)) {
     items.push({ group: 'Apps', label: p.name, product: p, keywords: `${p.key} ${p.latest_version || ''}`, hint: p.latest_version || '', run: () => go('updates') });

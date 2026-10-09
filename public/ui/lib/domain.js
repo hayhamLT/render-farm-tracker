@@ -1,7 +1,7 @@
 // Farm rules: product status per machine, what's deployable, what a machine is doing.
 // Ported from the classic dashboard (public/app.js) — same decisions, as pure functions over
 // the farm state instead of globals.
-import { cmpVersion, parseJSON } from './format.js';
+import { cmpVersion } from './format.js';
 import { INSTALL_PRESETS, ADOBE_RUM } from './presets.js';
 
 export const AGENT_NAME = 'Beacon';
@@ -181,23 +181,6 @@ export function nodeActivity(state, n, names) {
   return { key: 'idle', label: 'Idle', tone: 'muted' };
 }
 
-// Deadline health (agents 2.31.0+): down = Worker not running; fragile = running but nothing
-// starts it after a restart.
-export function deadlineStatus(n) {
-  const d = parseJSON(n.deadline_info);
-  if (!d || !d.installed || !n.online) return null;
-  const canFix = n.os === 'windows' && !!n.agent_version && cmpVersion(n.agent_version, '2.31.0') >= 0;
-  if (!d.worker) {
-    return { state: 'down', canFix, label: 'Deadline down', info: d,
-      detail: `The Deadline Worker isn't running — ${n.hostname} takes no renders.${d.autostart ? '' : ' Nothing starts Deadline on this machine.'}` };
-  }
-  if (!d.autostart) {
-    return { state: 'fragile', canFix, label: 'No auto-start', info: d,
-      detail: `Deadline is running, but nothing starts it after a restart — the next reboot takes ${n.hostname} out of the farm.${d.autologon === false ? ' Automatic login is also off.' : ''}` };
-  }
-  return { state: 'ok', canFix, label: 'Deadline OK', info: d, detail: `Running · starts via ${(d.how || []).join(', ')}${d.user ? ' as ' + d.user : ''}` };
-}
-
 export function osVersionShort(n) {
   const v = n.os_version || '';
   if (n.os === 'windows') {
@@ -229,9 +212,6 @@ export const canShutdown = (n) => n.online && !!n.agent_version && cmpVersion(n.
 export function nodeIssues(state, products, n) {
   const out = [];
   if (!n.online) out.push({ tone: 'bad', label: 'Offline' });
-  const dl = deadlineStatus(n);
-  if (dl && dl.state === 'down') out.push({ tone: 'bad', label: 'Deadline down', kind: 'deadline' });
-  if (dl && dl.state === 'fragile') out.push({ tone: 'warn', label: 'Deadline won\'t auto-start', kind: 'deadline' });
   if (n.online && n.pending_reboot) out.push({ tone: 'warn', label: 'Reboot pending' });
   if (n.disk_free_gb != null && n.disk_free_gb < 20) out.push({ tone: 'warn', label: `Low disk (${n.disk_free_gb} GB)` });
   if (n.elevated === 0) out.push({ tone: 'warn', label: 'Needs elevation' });
