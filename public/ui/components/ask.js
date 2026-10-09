@@ -38,7 +38,7 @@ async function ask(question) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: q, history }), signal: controller.signal,
     });
-    if (res.status === 401) { (window.top || window).location.href = '/login'; return; }
+    if (res.status === 401 && res.headers.get('X-Tracker-Auth') !== 'admin_token') { (window.top || window).location.href = '/login'; return; }
     if (!res.ok || !res.body) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `HTTP ${res.status}`); }
     const reader = res.body.getReader();
     const dec = new TextDecoder();

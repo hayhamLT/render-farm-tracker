@@ -11,6 +11,12 @@ export async function api(method, path, body) {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401 && res.headers.get('X-Tracker-Auth') === 'admin_token') {
+    // The tracker itself refused: whatever relays to it did not send its admin token. Signing in again
+    // would not help (and would loop), so just say so.
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "The tracker refused: its admin token was not sent");
+  }
   if (res.status === 401) {
     // Behind a signed-in proxy the session expired: send the whole window (not just the embedding
     // iframe) to the login page, and come back here afterwards.

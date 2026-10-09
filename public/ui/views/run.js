@@ -1,6 +1,6 @@
 // Run command: pick machines, send one shell command, watch each machine's answer come back.
-// Open like the rest of the dashboard — see the note on POST /api/run in server.js. Every
-// command and the machines it went to are written to the activity log.
+// Every command must say why (the server refuses one without a reason, up to 300 characters); the
+// command, the machines it went to and the reason are written to the activity log (History).
 import { html } from '../lib/html.js';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { farm } from '../lib/store.js';
@@ -216,6 +216,7 @@ export function RunView() {
   const s = farm.value;
   const [picked, setPicked] = useState(new Set());
   const [cmd, setCmd] = useState('');
+  const [why, setWhy] = useState('');
   const [asUser, setAsUser] = useState(true);
   const [runs, setRuns] = useState([]);
   const [skipped, setSkipped] = useState([]);
@@ -248,7 +249,8 @@ export function RunView() {
   const send = async (hostsIn) => {
     const hosts = hostsIn || [...picked];
     const command = cmd.trim();
-    if (!hosts.length || !command) return;
+    const reason = why.trim();
+    if (!hosts.length || !command || !reason) return;
     const ok = await openDialog((close) => html`
       <div class="body stack" style="gap:12px">
         <p style="margin:0">Run on <b>${plural(hosts.length, 'machine')}</b>, ${asUser
@@ -256,6 +258,8 @@ export function RunView() {
           : html`as the <b>system account</b>`}.</p>
         <div><div class="dim" style="font-size:.8rem;margin-bottom:5px">Command</div>
           <pre class="run-out" style="margin:0;max-height:120px">${command}</pre></div>
+        <div><div class="dim" style="font-size:.8rem;margin-bottom:5px">Why</div>
+          <div>${reason}</div></div>
         <div><div class="dim" style="font-size:.8rem;margin-bottom:5px">Machines</div>
           <div class="run-hosts" style="margin:0;max-height:110px;overflow:auto">${hosts.map((h) => html`<span key=${h} class="host-chip">${h}</span>`)}</div></div>
       </div>
@@ -266,7 +270,7 @@ export function RunView() {
     if (!ok) return;
     setBusy(true); setRuns([]); setSkipped([]);
     try {
-      const r = await post('/api/run', { hostnames: hosts, command, asUser });
+      const r = await post('/api/run', { hostnames: hosts, command, asUser, reason });
       setSkipped(r.skipped || []);
       setRuns(r.runs.map((x) => ({ ...x, status: 'pending' })));
       if (r.runs.length) {
@@ -279,7 +283,7 @@ export function RunView() {
     setBusy(false);
   };
 
-  const canRun = !busy && picked.size > 0 && cmd.trim().length > 0;
+  const canRun = !busy && picked.size > 0 && cmd.trim().length > 0 && why.trim().length > 0;
   return html`<div class="stack">
     <${PageHeader} title="Run command" subtitle="Pick machines, type a command, send it. Each machine runs it and reports back what happened." />
 
@@ -299,6 +303,9 @@ export function RunView() {
           style="font-family:var(--mono);font-size:.84rem"
           value=${cmd} onInput=${(e) => setCmd(e.currentTarget.value)}
           onKeyDown=${(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canRun) { e.preventDefault(); send(); } }}></textarea>
+        <input class="field" maxlength="300" placeholder="Why (required, goes to History with the command)"
+          title="Why this command is being run. Kept with each run and written to the activity log."
+          value=${why} onInput=${(e) => setWhy(e.currentTarget.value)} />
         <label class="check run-asuser">
           <input type="checkbox" checked=${asUser} onChange=${(e) => setAsUser(e.currentTarget.checked)} />
           <span><b>Run as the logged-in user</b>

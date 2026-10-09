@@ -16,6 +16,7 @@ const crypto = require('node:crypto');
 const { db, logEvent } = require('./lib/db');
 const jobRules = require('./lib/job_rules');
 const hidden = require('./lib/hidden');
+const adminAuth = require('./lib/admin_auth');
 const { createOfflineAlerts } = require('./lib/offline_alerts');
 const commands = require('./lib/commands');
 const { createLive } = require('./lib/live');
@@ -256,8 +257,10 @@ if (fs.existsSync(CONFIG_PATH)) {
     port: 4400,
     agentKey: crypto.randomBytes(16).toString('hex'),
     offlineAfterSeconds: 180,
+    // A new tracker has no Farmly relay to wait for: it requires the admin token from the start.
+    requireAdminToken: true,
   };
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
 }
 
 // Monitoring is always on (the master on/off toggle was removed by request).
@@ -277,10 +280,19 @@ if (!config.downloadDir || path.resolve(config.downloadDir) === path.resolve(INS
   configDirty = true;
 }
 
+// The admin API's token (lib/admin_auth.js): made once, kept in config.json, read from there by Farmly.
+if (adminAuth.ensureToken(config)) {
+  configDirty = true;
+  console.log('Admin token: generated and saved to config.json (adminToken)');   // never the token itself
+}
+
 function saveConfig() {
   // mode 600: config.json holds the tracker's settings and tokens, so only this account may read it.
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-  try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* best effort */ }
+  // Written beside and renamed over, so Farmly (which reads adminToken from it) never reads half a file.
+  const tmp = CONFIG_PATH + '.saving';
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch { /* best effort */ }
+  fs.renameSync(tmp, CONFIG_PATH);
 }
 if (configDirty) saveConfig();
 
@@ -2236,7 +2248,8 @@ function handleCheckin(body) {
 // ------------------------------------------------------- this computer only --
 // What machines on the LAN may still reach directly: the agent API and the scripts that enrol one
 // (which only say "Farmly installs the agent now", unless config.directAgents).
-const AGENT_SURFACE = /^\/(agent|setup\.(sh|ps1)|enroll\.(sh|ps1)|elevate\.ps1)$|^\/api\/agent\//;
+const AGENT_SURFACE = adminAuth.AGENT_SURFACE;
+const adminWarnDue = adminAuth.createWarnLimiter();
 let _own = { at: 0, set: new Set() };
 function ownAddresses() {
   // Every address this computer answers on: a script here that calls http://<LAN IP>:4400 (e.g.
@@ -2306,6 +2319,20 @@ const server = http.createServer(async (req, res) => {
         return res.end();
       }
       return sendJson(res, 403, { error: `The appTracker answers only on the farm server. Use it in Farmly${farmly ? ': ' + farmly : ' (Apps)'}.` });
+    }
+
+    // -------- the admin token --------
+    // Being on this computer is not enough any more: any process here could run a command as SYSTEM on
+    // every machine. Everything but the agent surface and the static UI files needs X-Tracker-Admin
+    // (lib/admin_auth.js); Farmly's relay adds it. Until config.requireAdminToken, only logged.
+    const admin = adminAuth.check(req, p, config);
+    if (!admin.ok) {
+      req.resume();
+      res.setHeader('X-Tracker-Auth', adminAuth.CODE);   // not a Farmly sign-in 401: the UIs must not go to /login
+      return sendJson(res, admin.status, admin.body);
+    }
+    if (admin.warn && adminWarnDue(`${req.method} ${p}`)) {
+      console.warn(`Admin token ${admin.warn} on ${req.method} ${p} (from ${req.socket.remoteAddress}): answered, because config.requireAdminToken is off; it will be refused once it is on`);
     }
 
     // -------- static UI --------
@@ -3178,16 +3205,17 @@ const server = http.createServer(async (req, res) => {
     // Run a one-off shell command on chosen machines through the tracker's own agent.
     //   POST /api/run {hostnames:[..], command, asUser?, timeoutSec?}  ->  {runs:[{id,hostname}], skipped}
     //   GET  /api/run?ids=1,2,3                                        ->  status, exit code, output
-    // Unauthenticated, like every other dashboard route: /api/packages already takes an
-    // arbitrary install_command and /api/deployments already sends it to any machine, so a key
-    // here would have closed one door and left the identical one beside it open. Every command
-    // and target still goes to the activity log.
+    // Behind the admin token like every other dashboard route (lib/admin_auth.js), and it must say why
+    // (`reason`, up to 300 characters): every command, its targets and its reason go to the activity log,
+    // and the reason is kept with each run.
     if (req.method === 'POST' && p === '/api/run') {
       const b = await readBody(req);
       const command = String(b.command || '').trim();
       if (!command || !Array.isArray(b.hostnames) || !b.hostnames.length) {
         return sendJson(res, 400, { error: 'hostnames[] and command required' });
       }
+      const why = adminAuth.runReason(b);
+      if (why.error) return sendJson(res, 400, { error: why.error });
       const asUser = b.asUser === true;
       const offlineMs = (config.offlineAfterSeconds || 180) * 1000;
       const runs = [], skipped = [];
@@ -3200,13 +3228,13 @@ const server = http.createServer(async (req, res) => {
         if (asUser && cmpVersionServer(node.agent_version, '2.42.0') < 0) { skipped.push({ hostname: node.hostname, reason: `agent ${node.agent_version} can't run as the logged-in user yet; it updates itself within minutes` }); continue; }
         const timeout = Math.min(3600, Number(b.timeoutSec) || 300);
         // timeout_s lets a run whose result never comes be marked lost/expired (lib/run_expiry.js).
-        const info = db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at, timeout_s) VALUES (?, ?, 'pending', ?, ?)")
-          .run(node.id, command, Date.now(), timeout);
+        const info = db.prepare("INSERT INTO remote_runs (node_id, command, status, created_at, timeout_s, reason) VALUES (?, ?, 'pending', ?, ?, ?)")
+          .run(node.id, command, Date.now(), timeout, why.reason);
         const id = Number(info.lastInsertRowid);
         commands.queue(node.id, 'run', { id, command, timeout, as_user: asUser || undefined });
         runs.push({ id, hostname: node.hostname });
       }
-      logEvent('node', `Command run on ${runs.map((r) => r.hostname).join(', ') || '(no machines)'}${asUser ? ' (as the logged-in user)' : ''}: ${command.slice(0, 200)}`);
+      logEvent('node', `Command run on ${runs.map((r) => r.hostname).join(', ') || '(no machines)'}${asUser ? ' (as the logged-in user)' : ''}, because: ${why.reason}. Command: ${command.slice(0, 200)}`);
       return sendJson(res, 200, { ok: true, runs, skipped });
     }
     if (req.method === 'GET' && p === '/api/run') {
@@ -3214,7 +3242,7 @@ const server = http.createServer(async (req, res) => {
       if (!ids.length) return sendJson(res, 400, { error: 'ids required' });
       // status: pending | done | lost (picked up, no result came back) | expired (never picked up);
       // done_at is set for all but pending (lib/run_expiry.js).
-      const rows = db.prepare(`SELECT r.id, n.hostname, r.status, r.exit_code, r.output, r.created_at, r.done_at, r.delivered_at, r.timeout_s
+      const rows = db.prepare(`SELECT r.id, n.hostname, r.status, r.exit_code, r.output, r.created_at, r.done_at, r.delivered_at, r.timeout_s, r.reason
         FROM remote_runs r JOIN nodes n ON n.id = r.node_id WHERE r.id IN (${ids.map(() => '?').join(',')}) ORDER BY r.id`).all(...ids);
       return sendJson(res, 200, { runs: rows });
     }
@@ -3336,9 +3364,11 @@ const server = http.createServer(async (req, res) => {
 // PORT env overrides config.json — lets a second instance (e.g. UI preview)
 // run beside the production server without stealing its port.
 const LISTEN_PORT = Number(process.env.PORT) || config.port;
-// HOST env / config.listenHost: all interfaces by default, because the machines' agents reach
-// this server over the LAN. The guard in the router keeps everything else to this computer.
-const LISTEN_HOST = process.env.HOST || config.listenHost || undefined;
+// HOST env / config.listenHost, default 127.0.0.1 (lib/admin_auth.js listenHost): every agent reports
+// through Farmly's /beacon, which relays from this computer, so nothing on the LAN needs :4400 any more.
+// Don't set "0.0.0.0" unless machines must report here directly again (config.directAgents, which then
+// makes it the default): it puts the admin API one stolen token from the whole LAN.
+const LISTEN_HOST = adminAuth.listenHost(config);
 // The port already taken (a tracker already running) used to end in an unhandled 'error' event: a page
 // of stack trace in tracker.log each time. Say it in one line, and exit as before.
 server.on('error', (e) => {
@@ -3349,7 +3379,8 @@ server.on('error', (e) => {
 });
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.log(`Render Farm Update Tracker`);
-  console.log(`  Dashboard : http://localhost:${LISTEN_PORT}`);
+  console.log(`  Dashboard : http://${LISTEN_HOST === '0.0.0.0' ? 'localhost' : LISTEN_HOST}:${LISTEN_PORT} (listening on ${LISTEN_HOST})`);
+  console.log(`  Admin API : ${adminAuth.enforced(config) ? 'X-Tracker-Admin token required' : 'token NOT required yet (config.requireAdminToken is off): requests without it are answered and logged'}`);
   console.log(`  Agent key : ${config.agentKey ? 'set (config.json)' : 'NOT SET'}`);   // never the key itself: logs get shared
   console.log(`  Installers: ${config.downloadDir}${downloadDir() ? '' : ' (NOT MOUNTED)'}`);
   // Automated DB + config backups (one now, then nightly) — see lib/backup.js.
