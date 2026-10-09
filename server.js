@@ -1814,9 +1814,7 @@ function fullState() {
   ).all().map((r) => [r.node_id, r.at]));
   const nodes = db.prepare('SELECT * FROM nodes ORDER BY hostname').all()
     .filter((n) => !_hidden.includes(String(n.hostname || '').split('.')[0].toUpperCase()))
-    // Older databases still have these two columns from a removed feature; they are never
-    // written any more and are not passed on.
-    .map(({ deadline_info, deadline_fix, ...n }) => ({
+    .map((n) => ({
     ...n,
     online: n.last_seen != null && now - n.last_seen < offlineMs,
     wake: wakesNow.get(n.id) || null,

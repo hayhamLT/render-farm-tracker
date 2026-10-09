@@ -1,6 +1,7 @@
 'use strict';
-// node --test test/   — the one-time clean-up in lib/db.js, on a database of its own (TRACKER_DB) laid out
-// like the live one before it: jobs the old check-in correction credited by mistake.
+// node --test test/   — the one-time clean-ups in lib/db.js, on a database of its own (TRACKER_DB) laid out
+// like the live one before them: Deadline's columns and timeline rows, and jobs the old check-in
+// correction credited by mistake.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -65,6 +66,19 @@ const { db, _migrations } = require('../lib/db');
 
 const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
 
+test('Deadline\'s columns are dropped and its timeline rows deleted; everything else stays', () => {
+  assert.ok(!cols('nodes').includes('deadline_info'));
+  assert.ok(!cols('nodes').includes('deadline_fix'));
+  assert.ok(cols('nodes').includes('license_info'), 'other columns untouched');
+  assert.ok(!cols('metric_farm').includes('deadline_down'));
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM metric_farm').get().c, 50, 'metric rows kept');
+  assert.deepEqual(db.prepare('SELECT kind FROM node_timeline ORDER BY id').all().map((r) => r.kind), ['install', 'render']);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM nodes').get().c, 3);
+  const ev = db.prepare("SELECT message FROM events WHERE message LIKE 'Deadline is gone%'").all();
+  assert.equal(ev.length, 1);
+  assert.match(ev[0].message, /nodes\.deadline_info dropped, nodes\.deadline_fix dropped, metric_farm\.deadline_down dropped, 2 timeline rows/);
+});
+
 test('jobs the old correction credited by mistake say so; their status and history stay', () => {
   const j = (id) => db.prepare('SELECT status, log, updated_at FROM jobs WHERE id = ?').get(id);
   for (const id of [586, 588, 589, 590]) {
@@ -84,6 +98,7 @@ test('jobs the old correction credited by mistake say so; their status and histo
 test('the clean-ups run once: a second boot changes nothing', () => {
   const before = db.prepare('SELECT id, log FROM jobs ORDER BY id').all();
   const events = db.prepare('SELECT COUNT(*) AS c FROM events').get().c;
+  assert.deepEqual(_migrations.clearDeadline(), []);
   assert.deepEqual(_migrations.noteMiscredited(), []);
   assert.deepEqual(db.prepare('SELECT id, log FROM jobs ORDER BY id').all(), before);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM events').get().c, events);
