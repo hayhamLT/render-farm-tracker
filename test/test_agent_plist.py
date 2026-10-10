@@ -76,8 +76,8 @@ class PlistIsPrivate(unittest.TestCase):
         self.assertEqual(_mode(nokey), 0o644)
         self.assertFalse(agent._private_plist(os.path.join(self.dir, "missing.plist")))
 
-    def test_version_is_2_49_0(self):
-        self.assertEqual(agent.AGENT_VERSION, "2.49.0")
+    def test_version_is_2_49_0_or_newer(self):
+        self.assertGreaterEqual(agent._version_tuple(agent.AGENT_VERSION), (2, 49, 0))   # the 0600 plists came in 2.49.0
 
 
 if __name__ == "__main__":

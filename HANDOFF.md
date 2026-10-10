@@ -203,6 +203,32 @@ df35f15): nothing reads it; it can be removed by hand.
 Testing on a scratch copy: give it its own `sharedInstallers`/`downloadDir` folder and
 `autoFetchMaxonInstallers: false`, or within a minute it starts downloading vendor installers into it.
 
+## 0d. Agent 2.50.0: Farmly's HTTPS, 2026-10-09
+
+Farmly answers HTTPS on :4443 with a certificate from its own CA (Farmly's CLAUDE.md "HTTPS on the LAN") and adds
+`tls` = `{url: "https://<server>:4443/beacon", ca_sha256}` to every check-in answer it relays (`beacon.with_tls`; the
+tracker itself knows nothing of it). Agent 2.50.0 (`farm_tls`, the section above the wedge watchdog), reporting to
+`http://<server>:4500/beacon`:
+1. fetches `<server>:4500/api/tls/ca.pem` and keeps it as `farm-ca.pem` beside `render_agent.py` (0644) only when it
+   holds the root `ca_sha256` names (SHA-256 of the DER). Trust on first use: the fingerprint comes over the same
+   plain-http connection; Farmly's Fleet ▸ Add machine shows it for a person to compare;
+2. asks `<https url>/agent` with ONLY that CA trusted (`ssl.create_default_context(cafile=…)`: not the system's roots,
+   not the Windows store), TLS 1.2+, the address checked: Farmly's relay must answer 401 "bad agent key";
+3. only then `rehome(<https url>, <same key>)`: the LaunchDaemon plist (0600) or every scheduled task / Run key that
+   starts it, then relaunches. A failed step leaves it where it was (tried again after 10 min).
+Started with an https `--server`, it installs an opener that trusts `farm-ca.pem` alone (every urlopen in the agent
+is to its server). It never goes back to http (its key is its own). The CA is fetched again over HTTPS when the signing
+root is not one it holds and every 6 h (a CA rotation stages a root first). A missing `farm-ca.pem` with an https
+`--server` is said in the log and nothing can be checked: copy Farmly's CA there, or run Farmly's installer again.
+- **The self-update code is unchanged** (`test_the_self_update_code_is_unchanged` hashes `self_update`,
+  `update_refusal`, `Server.get_agent_code`). 2.50.0 carries 2.49.0's plist changes (2.49.0 never went live). Ship it
+  through `config.agentCanary` (a Windows PC with someone at it + a Mac), after Farmly's server that adds `tls`:
+  check `/api/run` on the canaries as SYSTEM and asUser after they moved, and that their launch config names :4443.
+- Tests: `test/test_agent_tls.py` (a temporary CA from `openssl`, local http + https stand-ins for Farmly; nothing
+  relaunched) with Apple's 3.9 and a 3.14: `<python> -m unittest test/test_agent_tls.py test/test_agent_plist.py`.
+  (`python3 -m unittest` with no arguments finds nothing here: `test/` is not a package, on purpose: `test` is a
+  standard-library package name. Homebrew's python3 cannot load plistlib on the server: its expat is broken.)
+
 ---
 
 ## 1. Overview

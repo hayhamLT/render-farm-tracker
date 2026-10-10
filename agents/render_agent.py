@@ -18,6 +18,11 @@ Usage:
 Config file (overridden by CLI flags):
     { "server": "http://tracker-host:4400", "key": "....", "interval": 60 }
 
+Farmly's HTTPS (agent 2.50.0): an agent reporting through Farmly (http://<server>:4500/beacon) is told in each check-in's
+answer where Farmly answers HTTPS (`tls`: {url: "https://<server>:4443/beacon", ca_sha256}). It keeps Farmly's CA as
+farm-ca.pem beside this script (checked against ca_sha256), tries HTTPS with that CA alone, and only then moves its launch
+config there (rehome). On HTTPS it trusts farm-ca.pem and nothing else, and never goes back to http (its key is its own).
+
 Deployments run installer commands, so run the agent with admin rights:
   - Windows: as a service / scheduled task running as SYSTEM or an admin account.
   - macOS:   as a LaunchDaemon (root). See agents/com.tracker.agent.plist.
@@ -33,6 +38,7 @@ import re
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -41,7 +47,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.49.0"
+AGENT_VERSION = "2.50.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -2356,6 +2362,157 @@ def rehome(new_server, new_key, interval, cur_server=None):
 
 
 # --------------------------------------------------------------------------
+# Farmly's HTTPS (agent 2.50.0). Farmly answers the agents on its own HTTPS too (:4443, a certificate from its own
+# CA) and adds `tls` = {url: "https://<server>:4443/beacon", ca_sha256} to every relayed check-in answer. An agent on
+# http://<server>:4500/beacon then (farm_tls):
+#   1. fetches Farmly's CA (/api/tls/ca.pem on the server it reports to) and keeps it as farm-ca.pem beside this
+#      script (0644; the folder is the agent's own, admin/root only) only when it holds the root `ca_sha256` names (the
+#      SHA-256 of its DER). Trust on first use: the fingerprint comes over the same plain-http connection as the CA;
+#      Farmly's Fleet > Add machine shows it for a person to compare;
+#   2. asks the HTTPS address with ONLY that CA trusted (never the system's store, on Windows either), TLS 1.2 or newer,
+#      the address checked against the certificate: Farmly's relay answers an unauthenticated /agent with 401
+#      "bad agent key" (what Farmly's own beacon.reachable checks);
+#   3. only then moves its launch config (rehome: the LaunchDaemon plist, 0600, or every scheduled task / Run key that
+#      starts it) to the https address with the same key, and relaunches there.
+# Started with an https --server, it trusts farm-ca.pem alone for every request (install_farm_tls: every urlopen in
+# this agent is to the server it reports to). It never goes back to http: its key is its own; a failing check-in is
+# tried again next cycle. The CA bundle is fetched again over HTTPS when the root that signs is not one it holds, and
+# every CA_REFRESH_S (a CA rotation stages a root that every machine must hold before it signs).
+# --------------------------------------------------------------------------
+
+FARM_CA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "farm-ca.pem")
+TLS_SWITCH_AGAIN_S = 600        # a move to HTTPS that failed is tried again after this
+CA_REFRESH_S = 6 * 3600
+_TLS = {"switch_after": 0.0, "ca_at": 0.0, "said": None}
+
+
+def _tls_say(what, words):
+    if _TLS["said"] != what:
+        _TLS["said"] = what
+        print(words)
+
+
+def farm_ca_roots(pem):
+    """SHA-256 (lower-case hex, of the DER) of every certificate in a PEM bundle; [] when none can be read."""
+    text = pem.decode("ascii", "replace") if isinstance(pem, bytes) else str(pem or "")
+    out = []
+    for b in re.findall(r"-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----", text):
+        try:
+            out.append(hashlib.sha256(ssl.PEM_cert_to_DER_cert(b)).hexdigest())
+        except Exception:
+            pass
+    return out
+
+
+def _held_ca_roots():
+    try:
+        with open(FARM_CA, "rb") as f:
+            return farm_ca_roots(f.read())
+    except OSError:
+        return []
+
+
+def farm_tls_context():
+    """Farmly's CA and nothing else (a cafile and no default roots: not the Windows store, not the system's), TLS 1.2
+    or newer (the Macs' Command Line Tools Python 3.9 has LibreSSL 2.8.3: no 1.3), the address checked."""
+    ctx = ssl.create_default_context(cafile=FARM_CA)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
+
+
+def install_farm_tls():
+    """Every https request of this process trusts Farmly's CA alone. The agent's urlopens all go to the server it reports
+    to (check-ins, results, uploads, installers through Farmly's relay, its own update), so they all get it unchanged."""
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=farm_tls_context())))
+
+
+def _origin(url):
+    """scheme://host:port of a URL (Farmly serves its CA at <origin>/api/tls/ca.pem; the agents' relay is <origin>/beacon)."""
+    m = re.match(r"^(https?://[^/]+)", url or "")
+    return m.group(1) if m else None
+
+
+def _write_farm_ca(pem):
+    tmp = FARM_CA + ".new"
+    with open(tmp, "wb") as f:
+        f.write(pem)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.chmod(tmp, 0o644)
+    except OSError:
+        pass
+    os.replace(tmp, FARM_CA)
+
+
+def _probe_farm_https(url):
+    """True when Farmly's agents' relay answers at `url` over HTTPS with only its CA trusted."""
+    try:
+        urllib.request.urlopen(url.rstrip("/") + "/agent", timeout=15, context=farm_tls_context()).read()
+    except urllib.error.HTTPError as e:
+        return e.code == 401 and b"bad agent key" in (e.read() or b"")
+    return False
+
+
+def farm_tls(server, offer, interval):
+    """A check-in's answer said where Farmly answers HTTPS: move there (http), or keep its CA current (https). Never
+    raises. Only for an agent reporting through Farmly's relay (/beacon)."""
+    try:
+        url = str((offer or {}).get("url") or "").strip().rstrip("/")
+        want = str((offer or {}).get("ca_sha256") or "").strip().lower()
+        if not url.lower().startswith("https://") or not url.endswith("/beacon") or not re.match(r"^[0-9a-f]{64}$", want):
+            return False
+        if "/beacon" not in server.base:
+            return False
+        if server.base.lower().startswith("https://"):
+            _keep_farm_ca(server, want)
+            return False
+        if time.time() < _TLS["switch_after"]:
+            return False
+        _TLS["switch_after"] = time.time() + TLS_SWITCH_AGAIN_S
+        if want not in _held_ca_roots():
+            with urllib.request.urlopen(_origin(server.base) + "/api/tls/ca.pem", timeout=20) as r:
+                pem = r.read(256 * 1024)
+            got = farm_ca_roots(pem)
+            if want not in got:
+                _tls_say("ca-wrong", "  ! Farmly's CA (%s) is not the one it named (%s): not trusting it, staying on %s"
+                         % (", ".join(g[:16] for g in got) or "nothing readable", want[:16], server.base))
+                return False
+            _write_farm_ca(pem)
+            print("Farmly's CA kept in %s (SHA-256 %s, as Farmly named it)" % (FARM_CA, want))
+        if not _probe_farm_https(url):
+            _tls_say("probe", "  ! Farmly's HTTPS at %s did not answer as the agents' relay: staying on %s, trying again in %d min"
+                     % (url, server.base, TLS_SWITCH_AGAIN_S // 60))
+            return False
+    except Exception as e:
+        _tls_say("probe", "  ! Farmly's HTTPS: %s: staying on %s, trying again in %d min" % (e, server.base, TLS_SWITCH_AGAIN_S // 60))
+        return False
+    print("Farmly answers HTTPS at %s with its own CA: moving there" % url)
+    rehome(url, server.key, interval, server)      # rewrites the launch config, then relaunches (returns only on failure)
+    return True
+
+
+def _keep_farm_ca(server, want):
+    held = _held_ca_roots()
+    if want in held and time.time() - _TLS["ca_at"] < CA_REFRESH_S:
+        return
+    _TLS["ca_at"] = time.time()
+    try:
+        with urllib.request.urlopen(_origin(server.base) + "/api/tls/ca.pem", timeout=20) as r:   # HTTPS: pinned
+            pem = r.read(256 * 1024)
+    except Exception as e:
+        print("  ! could not fetch Farmly's CA again: %s" % e)
+        return
+    got = farm_ca_roots(pem)
+    if want in got and sorted(got) != sorted(held):
+        _write_farm_ca(pem)
+        install_farm_tls()
+        print("Farmly's CA bundle changed (%s): kept" % ", ".join(g[:16] for g in got))
+
+
+# --------------------------------------------------------------------------
 # Wedge watchdog
 # --------------------------------------------------------------------------
 # The agent keeps heartbeating (stays "online") even if its work loop stalls or a job
@@ -2423,6 +2580,14 @@ def main():
         print("Another agent instance is already running — exiting.")
         return
 
+    if server_url.lower().startswith("https://"):
+        # Farmly's own HTTPS: its CA alone (farm_tls). Without the file nothing can be checked: said, never ignored
+        if os.path.exists(FARM_CA):
+            install_farm_tls()
+            print("HTTPS to %s, trusting Farmly's CA (%s) alone" % (server_url, FARM_CA))
+        else:
+            print("  ! %s is missing: this agent cannot check %s. Copy Farmly's CA (/api/tls/ca.pem) there, or run "
+                  "Farmly's installer for software updates again" % (FARM_CA, server_url))
     server = Server(server_url, key)
     server.on_response = handle_directives
     _RUN_SERVER["server"] = server
@@ -2485,6 +2650,9 @@ def main():
             rh = resp.get("rehome")
             if rh and not busy and rh.get("server") and rh.get("key"):
                 rehome(rh["server"], rh["key"], interval, server)
+            # Farmly's HTTPS: the relayed answer says where (agent 2.50.0); never mid-install (a move relaunches)
+            if resp.get("tls") and not busy:
+                farm_tls(server, resp["tls"], interval)
             # Pull user-added (custom) product patterns BEFORE the full check-in's detection below.
             set_custom_products(resp.get("products"))
             active = resp.get("active", True)
