@@ -102,8 +102,10 @@ helper instead of the Beacon, then this server's logic ported into Farmly and No
 - **Agent 2.49.0** (`_rewrite_plist`, `_private_plist`): the LaunchDaemon plist that holds the machine's
   Farmly key stays 0600 (agents before it rewrote it 0644 on every move to Farmly and every launch-config
   sync), and the sync after a good check-in tightens one left readable. Windows unchanged: its task is
-  readable by signed-in users on purpose (they may start it to revive the agent). **2.49.0 is NOT live:
-  ship it through the canary protocol above (`config.agentCanary`).** The self-update code is unchanged.
+  readable by signed-in users on purpose (they may start it to revive the agent). 2.49.0 itself never went
+  live: these changes shipped in 2.50.0 (section 0d), live on every reporting machine since 2026-10-09. The
+  Macs' existing plists were also set 0600 by hand on 2026-10-09 (`/api/run` #1652-1657, all `-rw------- root`).
+  The self-update code is unchanged.
 - Tests: `node --test test/*.test.js` (pure decisions + the migrations on a database of their own, via
   `TRACKER_DB`), `python3 -m unittest test/test_agent_plist.py` (Apple's 3.9 and the newest).
   `test/e2e.sh` is stale and refuses to run without `TRACKER_URL` or against :4400.
@@ -221,9 +223,10 @@ is to its server). It never goes back to http (its key is its own). The CA is fe
 root is not one it holds and every 6 h (a CA rotation stages a root first). A missing `farm-ca.pem` with an https
 `--server` is said in the log and nothing can be checked: copy Farmly's CA there, or run Farmly's installer again.
 - **The self-update code is unchanged** (`test_the_self_update_code_is_unchanged` hashes `self_update`,
-  `update_refusal`, `Server.get_agent_code`). 2.50.0 carries 2.49.0's plist changes (2.49.0 never went live). Ship it
-  through `config.agentCanary` (a Windows PC with someone at it + a Mac), after Farmly's server that adds `tls`:
-  check `/api/run` on the canaries as SYSTEM and asUser after they moved, and that their launch config names :4443.
+  `update_refusal`, `Server.get_agent_code`). 2.50.0 carries 2.49.0's plist changes (2.49.0 never went live). **Live
+  since 2026-10-09**: canaries MACSTUDIO-N05 and MARS-05 (checked as SYSTEM and asUser after their move), then every
+  machine; `config.agentCanary` is empty again. Not on it yet: RAZER-01 (2.47.1) and Node-00 (2.46.0, hidden), both
+  off (Node-00 since 09-24, RAZER-01 since 10-07).
 - Tests: `test/test_agent_tls.py` (a temporary CA from `openssl`, local http + https stand-ins for Farmly; nothing
   relaunched) with Apple's 3.9 and a 3.14: `<python> -m unittest test/test_agent_tls.py test/test_agent_plist.py`.
   (`python3 -m unittest` with no arguments finds nothing here: `test/` is not a package, on purpose: `test` is a
