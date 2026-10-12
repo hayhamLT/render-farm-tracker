@@ -47,7 +47,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.50.0"
+AGENT_VERSION = "2.50.1"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1438,6 +1438,51 @@ def _report_run(rid, code, out):
             time.sleep(5 * (attempt + 1))
 
 
+# An install job downloads into tempfile.mkdtemp("tracker_job_<id>_"). Only a job that got as far as running its
+# installer used to remove it: a failed download, a checksum or signature refusal and a cancel left the folder, and the
+# installer in it when the bytes had arrived (2026-10-11: 133 empty folders on AVA-01 from an NVIDIA rollout whose every
+# download hit "No space left on device", a 3.2 GB Red Giant installer on MARS-JUICY, 3 GB of Redshift on NODE-03,
+# 1.3 GB of Cinema 4D on STARK). Every way out of a job now drops its folder, and at start-up the agent clears such
+# folders older than a day in its temp folders (never one a running job could own: there is none yet).
+WORK_DIR_RE = re.compile(r"^tracker_job_\d+_[A-Za-z0-9_]{6,12}$")
+WORK_DIR_KEEP_S = 86400
+
+
+def _drop_work_dir(work_dir):
+    if work_dir:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def sweep_work_dirs(now=None, roots=None):
+    """Remove leftover install folders (tracker_job_<id>_*) older than a day; returns what was removed."""
+    now = time.time() if now is None else now
+    if roots is None:
+        roots = [tempfile.gettempdir()]
+        if IS_WINDOWS:
+            windir = os.environ.get("SystemRoot") or r"C:\Windows"
+            roots += [os.path.join(windir, "Temp"), os.path.join(windir, "SystemTemp")]
+    gone = []
+    for root in dict.fromkeys(os.path.normcase(os.path.abspath(r)) for r in roots):
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            p = os.path.join(root, name)
+            try:
+                if not WORK_DIR_RE.match(name) or not os.path.isdir(p) or os.path.islink(p) or now - os.path.getmtime(p) < WORK_DIR_KEEP_S:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(p, ignore_errors=True)
+            if not os.path.exists(p):
+                gone.append(p)
+    if gone:
+        print("  removed %d leftover install folder(s): %s" % (len(gone), ", ".join(os.path.basename(g) for g in gone[:5])
+                                                              + (" ..." if len(gone) > 5 else "")))
+    return gone
+
+
 def _run_cancellable(cmd, timeout):
     """Run a shell command in its own process group so the whole tree can be killed on
     timeout or cancel. Returns (returncode, stdout, stderr)."""
@@ -1868,36 +1913,44 @@ def _run_job(server, job):
         try:
             server.download(job["package_id"], installer, cancel=_JOB["cancel"])
         except JobCancelled:
+            _drop_work_dir(work_dir)
             raise
         except Exception as e:
+            _drop_work_dir(work_dir)
             server.report(job_id, "failed", "Download failed: %s" % e)
             print("  ! download failed: %s" % e)
             return
-        # Verify integrity before running anything (SHA256 from the server).
-        expected = job.get("sha256")
-        if expected:
-            h = hashlib.sha256()
-            with open(installer, "rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    h.update(chunk)
-            actual = h.hexdigest()
-            if actual.lower() != expected.lower():
-                server.report(job_id, "failed",
-                              "SHA256 mismatch — refusing to install.\nexpected %s\ngot      %s"
-                              % (expected, actual))
-                print("  ! sha256 mismatch — aborting")
+        try:
+            # Verify integrity before running anything (SHA256 from the server).
+            expected = job.get("sha256")
+            if expected:
+                h = hashlib.sha256()
+                with open(installer, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        h.update(chunk)
+                actual = h.hexdigest()
+                if actual.lower() != expected.lower():
+                    server.report(job_id, "failed",
+                                  "SHA256 mismatch — refusing to install.\nexpected %s\ngot      %s"
+                                  % (expected, actual))
+                    print("  ! sha256 mismatch — aborting")
+                    _drop_work_dir(work_dir)
+                    return
+                print("  sha256 verified")
+            sig_ok, sig_note = verify_vendor_signature(installer, job.get("signature"))
+            if not sig_ok:
+                _drop_work_dir(work_dir)
+                server.report(job_id, "failed", sig_note)
+                print("  ! %s" % sig_note)
                 return
-            print("  sha256 verified")
-        sig_ok, sig_note = verify_vendor_signature(installer, job.get("signature"))
-        if not sig_ok:
-            server.report(job_id, "failed", sig_note)
-            print("  ! %s" % sig_note)
-            return
-        print("  %s" % sig_note)
-        server.report(job_id, "downloading", sig_note)
-        if IS_MACOS:
-            os.chmod(installer, 0o755)
-        cmd = job["install_command"].replace("{file}", installer)
+            print("  %s" % sig_note)
+            server.report(job_id, "downloading", sig_note)
+            if IS_MACOS:
+                os.chmod(installer, 0o755)
+            cmd = job["install_command"].replace("{file}", installer)
+        except BaseException:
+            _drop_work_dir(work_dir)          # a read or check that raised: nothing of this job stays behind
+            raise
 
     server.report(job_id, "installing", "Running: %s" % cmd)
     print("  running: %s" % cmd)
@@ -2011,12 +2064,7 @@ def _run_job(server, job):
     except Exception as e:
         server.report(job_id, "failed", "Execution error: %s" % e)
     finally:
-        if installer:
-            try:
-                os.remove(installer)
-                os.rmdir(work_dir)
-            except OSError:
-                pass
+        _drop_work_dir(work_dir)          # the installer and anything it unpacked beside itself
 
 
 # --------------------------------------------------------------------------
@@ -2591,6 +2639,11 @@ def main():
     server = Server(server_url, key)
     server.on_response = handle_directives
     _RUN_SERVER["server"] = server
+    if not args.once:
+        try:
+            sweep_work_dirs()
+        except Exception as e:
+            print("  ! could not clear old install folders: %s" % e)
     print("Tracker agent %s on %s (%s) -> %s"
           % (AGENT_VERSION, socket.gethostname(), platform.system(), server_url))
 
