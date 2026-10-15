@@ -47,7 +47,7 @@ import time
 import urllib.request
 import urllib.error
 
-AGENT_VERSION = "2.50.1"
+AGENT_VERSION = "2.51.0"
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 
@@ -1770,32 +1770,91 @@ def _restart_cc():
         pass
 
 
-# A running "render" process means work is in progress — NEVER touch it, defer the
-# update. A "gui" process is the app left open idle — safe to close. (Cinema 4D
-# can't be told apart from a C4D render by name, so we never auto-close it.)
+# A running "render" process means work is in progress: NEVER touch it, defer the update.
+# A "gui" process is an app left open: closed before the install (2.51.0, Mike 2026-10-14: "close
+# any open app to update if needed"). An install only starts when Farmly's gate says nothing of the
+# farm runs there and nobody is using the machine, and a busy GPU still defers it, so an open
+# Cinema 4D / After Effects at that point is one left open, not one rendering in its own viewer.
+# Blender renders and the Blender app are the same process: never closed.
+# The Maxon App: its installer stops with "The application Maxon is still running ... Abort" (rollout
+# 21, 2026-10-14: 15 of 30 machines), and it serves the render licences, so it is reopened after.
+MAXON_APP_GUI = ["Maxon.exe"] if IS_WINDOWS else ["Maxon"]
+MAXON_APP_EXE_WIN = [r"C:\Program Files\Maxon\App Manager\Maxon.exe"]
+MAXON_APP_MAC = "/Applications/Maxon.app"
+REOPEN = {"maxonapp"}          # apps closed for an install that are put back after it (a background service)
+
+
 def _blockers(product_key):
     # RUM HANGS if a target app is open. AE updates touch After Effects AND Media Encoder
-    # (AEFT,AME), so DEFER the patch while any of them — or the render engine — is running,
-    # rather than force-closing an artist's session or letting the install stall. It retries
-    # automatically each check-in once they're closed.
-    ae_apps = (["AfterFX.exe", "AfterFX.com", "aerender.exe", "Adobe Media Encoder.exe", "AfterFXLib.dll"]
-               if IS_WINDOWS else ["After Effects", "aerender", "Adobe Media Encoder"])
-    ae_render = ["aerender.exe"] if IS_WINDOWS else ["aerender"]
+    # (AEFT,AME): the render engine defers the patch, the apps left open are closed.
+    ae_render = ["aerender.exe", "AfterFX.com"] if IS_WINDOWS else ["aerender"]
+    ae_gui = (["AfterFX.exe", "Adobe Media Encoder.exe"] if IS_WINDOWS
+              else ["After Effects", "Adobe Media Encoder"])
     # Cinema 4D renders on a farm run through the command-line renderer (farm jobs launch
-    # Commandline.exe), not the Cinema 4D GUI — both must block, or an install lands on top
-    # of a live render. Redshift's standalone renderer counts too.
-    c4d = (["Cinema 4D.exe", "Commandline.exe", "c4dpy.exe", "redshiftCmdLine.exe"] if IS_WINDOWS
-           else ["Cinema 4D", "Commandline", "c4dpy", "redshiftCmdLine"])
+    # Commandline.exe): those defer. The Cinema 4D app left open is closed.
+    c4d_render = (["Commandline.exe", "c4dpy.exe", "redshiftCmdLine.exe"] if IS_WINDOWS
+                  else ["Commandline", "c4dpy", "redshiftCmdLine"])
+    c4d_gui = ["Cinema 4D.exe"] if IS_WINDOWS else ["Cinema 4D"]
     blender = ["blender.exe"] if IS_WINDOWS else ["blender", "Blender"]
     return {
-        "aftereffects": {"render": ae_apps, "gui": []},
-        "cinema4d":     {"render": c4d, "gui": []},
-        "redshift":     {"render": c4d, "gui": []},
-        "redgiant":     {"render": c4d + ae_render, "gui": []},
+        "aftereffects": {"render": ae_render, "gui": ae_gui},
+        "cinema4d":     {"render": c4d_render, "gui": c4d_gui},
+        "redshift":     {"render": c4d_render, "gui": c4d_gui},
+        "redgiant":     {"render": c4d_render + ae_render, "gui": c4d_gui + ae_gui},
         "blender":      {"render": blender, "gui": []},
+        "maxonapp":     {"render": c4d_render + ae_render, "gui": c4d_gui + ae_gui + MAXON_APP_GUI},
         # CC refresh must never bounce Adobe licensing mid-render — defer if rendering.
-        "creativecloud": {"render": ae_render + c4d, "gui": []},
+        "creativecloud": {"render": ae_render + c4d_render, "gui": []},
     }.get(product_key, {"render": [], "gui": []})
+
+
+_CLOSED = []                   # what prepare_for_install closed for the job in hand (reopened after it)
+
+
+def _launch_for_user(exe, task):
+    """Start a program in the LOGGED-IN user's session (Windows), as _launch_cc_for_user does for
+    Creative Cloud: a one-shot scheduled task with the desktop's owner as an Interactive principal.
+    Nobody logged in: nothing is started (it starts at their next logon)."""
+    ps = ("$e=Get-CimInstance Win32_Process|Where-Object{$_.Name -eq 'explorer.exe' -and $_.SessionId -ne 0}|Select-Object -First 1;"
+          "if(-not $e){'nouser';exit};"
+          "$o=Invoke-CimMethod -InputObject $e -MethodName GetOwner;$u=$o.Domain+'\\'+$o.User;"
+          "$a=New-ScheduledTaskAction -Execute '%s';"
+          "$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited;"
+          "Register-ScheduledTask -TaskName '%s' -Action $a -Principal $p -Force|Out-Null;"
+          "Start-ScheduledTask -TaskName '%s';Start-Sleep -Seconds 4;"
+          "Unregister-ScheduledTask -TaskName '%s' -Confirm:$false;'ok'"
+          % (exe.replace("'", "''"), task, task, task))
+    return "ok" in _ps(ps, timeout=60)
+
+
+def _reopen_maxon_app():
+    """Put the Maxon App back in the person's session after its install closed it."""
+    try:
+        if _proc_running(MAXON_APP_GUI):
+            return True
+        if IS_WINDOWS:
+            exe = next((p for p in MAXON_APP_EXE_WIN if os.path.isfile(p)), None)
+            return bool(exe) and _launch_for_user(exe, "TrackerStartMaxonApp")
+        if not os.path.isdir(MAXON_APP_MAC):
+            return False
+        owner = subprocess.run(["stat", "-f", "%Su %u", "/dev/console"], capture_output=True,
+                               text=True, timeout=10).stdout.split()
+        if len(owner) != 2 or owner[0] in ("root", "loginwindow", "_mbsetupuser"):
+            return False                                  # nobody logged in: it starts at their next login
+        user, uid = owner
+        r = subprocess.run(["launchctl", "asuser", uid, "sudo", "-u", user, "/usr/bin/open", "-g", "-j", MAXON_APP_MAC],
+                           capture_output=True, timeout=30)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def reopen_closed():
+    """Reopen what was closed for the install that just ended (whatever its outcome)."""
+    closed, _CLOSED[:] = list(_CLOSED), []
+    if "maxonapp" in closed:
+        ok = _reopen_maxon_app()
+        print("  ↻ reopened the Maxon App" if ok else "  ! could not reopen the Maxon App (it starts at the next login)")
 
 
 def prepare_for_install(product_key):
@@ -1820,7 +1879,9 @@ def prepare_for_install(product_key):
         return False, ("Deferred — this node is rendering; the %s update will run "
                        "automatically once it's idle." % product_key)
     if b["gui"] and _proc_running(b["gui"]):
-        print("  closing idle %s app before install" % product_key)
+        print("  closing the open app(s) before the %s install" % product_key)
+        if product_key in REOPEN and _proc_running(MAXON_APP_GUI):
+            _CLOSED.append(product_key)
         _close_app(b["gui"])
     return True, ""
 
@@ -1875,6 +1936,13 @@ def run_job(server, job):
 
 
 def _run_job(server, job):
+    try:
+        _run_job_inner(server, job)
+    finally:
+        reopen_closed()
+
+
+def _run_job_inner(server, job):
     job_id = job["id"]
     kind = job.get("kind", "installer")
     print("Job #%d: %s %s (%s) — starting" % (job_id, job["product_key"], job["version"], kind))
