@@ -334,11 +334,12 @@ const rolloutIdFrom = (b) => {
 // After detecting versions, auto-download any missing Maxon installer straight from
 // Maxon's PUBLIC downloads page (full offline .exe/.dmg, no login). Guarded: only when
 // the latest isn't already staged or downloading, and there's disk headroom. Cinema 4D
-// isn't on that page so it stays manual. Disable with config.autoFetchMaxonInstallers=false.
+// is on its own per-year page (lib/maxon_versions.js downloadsPages). Disable with config.autoFetchMaxonInstallers=false.
 async function autoFetchMaxonInstallers() {
   if (config.autoFetchMaxonInstallers === false) return [];
   let urls;
-  try { urls = await fetchInstallerUrls(config); } catch { return []; }
+  const c4d = db.prepare("SELECT latest_version FROM products WHERE key = 'cinema4d'").get();
+  try { urls = await fetchInstallerUrls(config, c4d && c4d.latest_version); } catch { return []; }
   if (!urls.length) return [];
   const files = listInstallerFiles();
   const fetched = [];
